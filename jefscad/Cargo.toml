@@ -1,0 +1,9 @@
+[package]
+name = "jefscad"
+version = "0.1.0"
+edition = "2024"
+authors = ["Jef Wagner <jefwagner@gmail.com>"]
+license = "MIT"
+description = "Solid modeling language"
+
+[dependencies]

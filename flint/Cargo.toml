@@ -1,0 +1,11 @@
+[package]
+name = "flint"
+version = "0.1.0"
+edition = "2024"
+authors = ["Jef Wagner <jefwagner@gmail.com>"]
+license = "MIT"
+description = "Rounded floating-point interval arithmetic library"
+
+[dependencies]
+num-traits = "0.2.19"
+ryu = "1.0.23"

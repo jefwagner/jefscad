@@ -1,0 +1,17 @@
+# Cargo build artifacts
+target/
+**/target/
+
+# Cargo.lock — omitted for libraries (generated per consumer project)
+Cargo.lock
+**/Cargo.lock
+
+# Personal knowledge base
+kb/
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
