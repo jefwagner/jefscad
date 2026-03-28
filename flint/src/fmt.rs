@@ -4,7 +4,52 @@ use std::{
     str::FromStr,
 };
 
-use crate::{Flint, FlintRef};
+use crate::{Flint, FlintArray, FlintRef, FlintVec, FlintView};
+
+/// Format a sequence of interval pairs as `[v0, v1, ...]` where each element is
+/// formatted using `Flint::Display`. Used by all array/vec/view Display impls.
+fn fmt_interval_slice<T>(lb: &[T], ub: &[T], f: &mut fmt::Formatter<'_>) -> fmt::Result
+where
+    T: num_traits::Float + ryu::Float + Copy + GenNumConsts + LowerExp + FloatStringParts,
+{
+    write!(f, "[")?;
+    let mut first = true;
+    for (l, u) in lb.iter().zip(ub.iter()) {
+        if !first {
+            write!(f, ", ")?;
+        }
+        first = false;
+        fmt::Display::fmt(&Flint { lb: *l, ub: *u }, f)?;
+    }
+    write!(f, "]")
+}
+
+impl<T, const N: usize> fmt::Display for FlintArray<T, N>
+where
+    T: num_traits::Float + ryu::Float + Copy + GenNumConsts + LowerExp + FloatStringParts,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_interval_slice(&self.lb, &self.ub, f)
+    }
+}
+
+impl<T> fmt::Display for FlintVec<T>
+where
+    T: num_traits::Float + ryu::Float + Copy + GenNumConsts + LowerExp + FloatStringParts,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_interval_slice(&self.lb, &self.ub, f)
+    }
+}
+
+impl<'a, T> fmt::Display for FlintView<'a, T>
+where
+    T: num_traits::Float + ryu::Float + Copy + GenNumConsts + LowerExp + FloatStringParts,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_interval_slice(self.lb, self.ub, f)
+    }
+}
 
 trait GenNumConsts {
     const ZERO: Self;
@@ -233,5 +278,110 @@ mod tests {
             lb <= v && v <= ub,
             "output {s} ({v:.17e}) not in [{lb:.17e}, {ub:.17e}]"
         );
+    }
+
+    // --- FlintArray Display ---
+
+    #[test]
+    fn test_fmt_array_basic() {
+        // Intervals chosen so the shortest in-range repr is unambiguous:
+        //   [0.999, 1.001] -> "1.0"   (i=0 truncation "1.e0" = 1.0_f64; ryu emits "1.0")
+        //   [2.49,  2.51 ] -> "2.5"   (i=1 truncation "2.5e0" is in range)
+        //   [3.141, 3.142] -> "3.141" (need 4 sig figs to land in range)
+        //   [-0.5,  0.5  ] -> "0"     (straddles zero)
+        let a = FlintArray::<f64, 4> {
+            lb: [0.999, 2.49, 3.141, -0.5],
+            ub: [1.001, 2.51, 3.142, 0.5],
+        };
+        assert_eq!("[1.0, 2.5, 3.141, 0]", format!("{a}"));
+    }
+
+    #[test]
+    fn test_fmt_array_single() {
+        let a = FlintArray::<f64, 1> {
+            lb: [1.555],
+            ub: [1.565],
+        };
+        assert_eq!("[1.56]", format!("{a}"));
+    }
+
+    #[test]
+    fn test_fmt_array_empty() {
+        let a = FlintArray::<f32, 0> { lb: [], ub: [] };
+        assert_eq!("[]", format!("{a}"));
+    }
+
+    // --- FlintVec Display ---
+
+    #[test]
+    fn test_fmt_vec_basic() {
+        let v = FlintVec::<f64> {
+            lb: vec![0.999, 2.49, 3.141, -0.5],
+            ub: vec![1.001, 2.51, 3.142, 0.5],
+        };
+        assert_eq!("[1.0, 2.5, 3.141, 0]", format!("{v}"));
+    }
+
+    #[test]
+    fn test_fmt_vec_single() {
+        let v = FlintVec::<f64> {
+            lb: vec![1.555],
+            ub: vec![1.565],
+        };
+        assert_eq!("[1.56]", format!("{v}"));
+    }
+
+    #[test]
+    fn test_fmt_vec_empty() {
+        let v = FlintVec::<f64> {
+            lb: vec![],
+            ub: vec![],
+        };
+        assert_eq!("[]", format!("{v}"));
+    }
+
+    // --- FlintView Display ---
+
+    #[test]
+    fn test_fmt_view_basic() {
+        let lb = [0.999_f64, 2.49, 3.141, -0.5];
+        let ub = [1.001_f64, 2.51, 3.142, 0.5];
+        let view = FlintView { lb: &lb, ub: &ub };
+        assert_eq!("[1.0, 2.5, 3.141, 0]", format!("{view}"));
+    }
+
+    #[test]
+    fn test_fmt_view_single() {
+        let lb = [1.555_f64];
+        let ub = [1.565_f64];
+        let view = FlintView { lb: &lb, ub: &ub };
+        assert_eq!("[1.56]", format!("{view}"));
+    }
+
+    #[test]
+    fn test_fmt_view_empty() {
+        let lb: [f64; 0] = [];
+        let ub: [f64; 0] = [];
+        let view = FlintView { lb: &lb, ub: &ub };
+        assert_eq!("[]", format!("{view}"));
+    }
+
+    // --- Consistency: FlintArray, FlintVec, FlintView produce identical output ---
+
+    #[test]
+    fn test_fmt_array_types_consistent() {
+        let lbs = [0.999_f64, 2.49, -1.6, -0.5];
+        let ubs = [1.001_f64, 2.51, -1.55, 0.5];
+        let arr = FlintArray::<f64, 4> { lb: lbs, ub: ubs };
+        let vec = FlintVec::<f64> {
+            lb: lbs.to_vec(),
+            ub: ubs.to_vec(),
+        };
+        let view = FlintView::<f64> { lb: &lbs, ub: &ubs };
+        let arr_s = format!("{arr}");
+        let vec_s = format!("{vec}");
+        let view_s = format!("{view}");
+        assert_eq!(arr_s, vec_s, "FlintArray and FlintVec output differ");
+        assert_eq!(arr_s, view_s, "FlintArray and FlintView output differ");
     }
 }

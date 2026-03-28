@@ -55,8 +55,11 @@ and spacing to have them look better when printted to the command line?
     Note: the actual bug was for negative intervals — truncating the 17dp fractional
     string on a negative number moves the value toward zero (above ub), so the original
     `lb <= ub_trunc` check was insufficient. Fixed by adding `&& ub_trunc <= ub`.
-[_] Implement unit tests for formatting for array types
-[_] Implement formatting for array types
+[x] Implement unit tests for formatting for array types
+[x] Implement formatting for array types
+    Format: single line, square brackets, comma-space separated (e.g. `[1, 2.51, 3.14]`)
+[_] Implement pretty-printing for 4-element (4x1 column vector) and 16-element (4x4
+    matrix) FlintArray/FlintVec/FlintView types with newlines and aligned columns
 
 ### Conversions
 
