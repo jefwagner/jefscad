@@ -18,11 +18,12 @@ total)
   particularly useful. I suspect that the 4-size array should also implement the COPY 
   trait, and maybe all fixed sized array backed types should.
 * `FlintVec` An owned type where the lower and upper bounds are heap-allocated vectors.
-* `FlintView` A reference type where the lower and upper bounds are slices (views?) of
-  either FlintArrays or FlintVec types.
+* `FlintView` A reference type where the lower and upper bounds are slices borrowed from
+  either a FlintArray or FlintVec.
 
-Question: Should the array, vec, view types support multi-dimensional arrays where we
-store shape and stride info instead of just the upper and lower bound lists?
+Decision: No shape/stride metadata on any type. Multi-dimensional semantics (e.g. 4×4
+matrix) are encoded in the const generic N and in the methods defined on top of it.
+This keeps FlintArray Copy, layout simple, and SIMD straightforward.
 
 In addition, I would like to implement
 * Formatting to print out the shortest number possible in the range
@@ -48,9 +49,12 @@ and spacing to have them look better when printted to the command line?
 
 [x] Implement unit tests for formatting scalar types
 [x] Implement formatting for scalar types
-[_] validate formatting in edge case where upper bound is very near but strictly less
+[x] validate formatting in edge case where upper bound is very near but strictly less
     than a much shorter representation when printed in 17 digit form 
     (ex. 1.59999999999999994 vs 1.6)
+    Note: the actual bug was for negative intervals — truncating the 17dp fractional
+    string on a negative number moves the value toward zero (above ub), so the original
+    `lb <= ub_trunc` check was insufficient. Fixed by adding `&& ub_trunc <= ub`.
 [_] Implement unit tests for formatting for array types
 [_] Implement formatting for array types
 

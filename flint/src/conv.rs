@@ -1,4 +1,4 @@
-use crate::{Flint, FlintRef, next_up_down::NextUpDown};
+use crate::{next_up_down::NextUpDown, Flint, FlintRef};
 #[allow(unused_imports)]
 use crate::{FlintArray, FlintVec};
 

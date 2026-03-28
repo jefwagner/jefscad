@@ -1,4 +1,4 @@
-use std::simd::{Select, prelude::*};
+use std::simd::{prelude::*, Select};
 
 /// Get the next representable floating point value in upward (positive) or downward (negative)
 /// direction

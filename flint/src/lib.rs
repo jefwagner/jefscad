@@ -35,7 +35,7 @@ pub struct Flint<T> {
 /// A Rounded floating point interval
 ///
 /// This type has the interval endpoints as references and can act as a single
-/// 'scalar' value reference from a FlintArray or FlintArrayRef
+/// 'scalar' value reference from a FlintArray or FlintVec.
 #[repr(C)]
 #[derive(Debug)]
 pub struct FlintRef<'a, T> {
@@ -51,14 +51,6 @@ pub struct FlintArray<T, const N: usize> {
     ub: [T; N],
 }
 
-/// An array reference of rounded floating point intervals
-#[repr(C)]
-#[derive(Debug)]
-pub struct FlintArrayRef<'a, T, const N: usize> {
-    lb: &'a [T; N],
-    ub: &'a [T; N],
-}
-
 /// An owned dynamically sized vector of floating point intervals
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -67,10 +59,12 @@ pub struct FlintVec<T> {
     ub: Vec<T>,
 }
 
-/// A dynamically sized slice of floating point intervals
+/// A dynamically sized view (slice) of floating point intervals
+///
+/// The lower and upper bound slices may be borrowed from a FlintArray or FlintVec.
 #[repr(C)]
 #[derive(Debug)]
-pub struct FlintSlice<'a, T> {
+pub struct FlintView<'a, T> {
     lb: &'a [T],
     ub: &'a [T],
 }

@@ -94,7 +94,11 @@ where
         let (ub_int, ub_frac, ub_exp) = ub.to_str_parts(&mut buf[..]);
         for i in 0..ub_frac.len() {
             let ub_trunc: T = FloatStringParts::from_str_parts(ub_int, &ub_frac[0..i], ub_exp);
-            if lb <= &ub_trunc {
+            // ub_trunc must lie within [lb, ub]: for positive numbers truncation
+            // always moves toward zero (smaller), so ub_trunc <= ub is automatic.
+            // For negative numbers truncation moves toward zero (larger/less negative),
+            // so ub_trunc can exceed ub — we must check both bounds.
+            if lb <= &ub_trunc && &ub_trunc <= ub {
                 let mut buf = ryu::Buffer::new();
                 return write!(f, "{}", buf.format(ub_trunc));
             }
@@ -126,5 +130,46 @@ mod tests {
             ub: 1.565_f32,
         };
         assert_eq!("1.56", format!("{f}"));
+    }
+
+    // Regression: negative intervals were printed incorrectly because truncating
+    // fractional digits on a negative number moves it toward zero (i.e. above ub),
+    // so the `lb <= ub_trunc` check alone is not sufficient — `ub_trunc <= ub`
+    // must also be verified.
+    #[test]
+    fn test_fmt_negative() {
+        // Simple negative interval: [-1.6, -1.55]
+        let f = Flint {
+            lb: -1.6_f64,
+            ub: -1.55_f64,
+        };
+        let s = format!("{f}");
+        let v: f64 = s.parse().expect("output should be a valid float");
+        assert!(
+            -1.6_f64 <= v && v <= -1.55_f64,
+            "output {s} not in [{}, {}]",
+            -1.6_f64,
+            -1.55_f64
+        );
+        // Shortest repr inside the interval is "-1.6" (ub itself) or "-1.55"; "-1" is wrong.
+        assert_ne!(
+            s, "-1",
+            "formatter emitted integer truncation of negative ub"
+        );
+    }
+
+    // Regression: narrow negative f64 interval where ub is just above -1.6.
+    // The 17-digit expansion of ub truncates to "-1" at i=0 which is outside the interval.
+    #[test]
+    fn test_fmt_negative_narrow() {
+        let ub = -1.5999999999999999_f64; // f64 just above -1.6 (closer to zero)
+        let lb = -1.601_f64;
+        let f = Flint { lb, ub };
+        let s = format!("{f}");
+        let v: f64 = s.parse().expect("output should be a valid float");
+        assert!(
+            lb <= v && v <= ub,
+            "output {s} ({v:.17e}) not in [{lb:.17e}, {ub:.17e}]"
+        );
     }
 }
