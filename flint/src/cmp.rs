@@ -381,4 +381,205 @@ mod test {
         assert!(f.as_ref() > 0_u16);
         assert!(0.0_f32 < f);
     }
+
+    // --- FlintRef vs FlintRef ordering ---
+
+    #[test]
+    fn test_inequality_ref_vs_ref() {
+        let fa: Flint<f64> = Flint { lb: 0.5, ub: 1.5 };
+        let fb: Flint<f64> = Flint { lb: 0.25, ub: 0.75 };
+        let fd: Flint<f64> = Flint {
+            lb: -0.25,
+            ub: 0.25,
+        };
+
+        // overlapping: neither < nor >
+        assert!(!(fa.as_ref() > fb.as_ref()));
+        assert!(!(fa.as_ref() < fb.as_ref()));
+
+        // non-overlapping: fa strictly above fd
+        assert!(fa.as_ref() > fd.as_ref());
+        assert!(fd.as_ref() < fa.as_ref());
+    }
+
+    // --- direct partial_cmp return value checks ---
+
+    #[test]
+    fn test_partial_cmp_values() {
+        let fa: Flint<f64> = Flint { lb: 2.0, ub: 3.0 };
+        let fb: Flint<f64> = Flint { lb: 0.0, ub: 1.0 };
+        let fc: Flint<f64> = Flint { lb: 0.5, ub: 2.5 }; // overlaps fa
+        let fnan: Flint<f64> = Flint {
+            lb: f64::NAN,
+            ub: f64::NAN,
+        };
+
+        // Some(Greater): fa entirely above fb
+        assert_eq!(Some(Ordering::Greater), fa.partial_cmp(&fb));
+        // Some(Less): fb entirely below fa
+        assert_eq!(Some(Ordering::Less), fb.partial_cmp(&fa));
+        // Some(Equal): fa and fc overlap
+        assert_eq!(Some(Ordering::Equal), fa.partial_cmp(&fc));
+        // None when either operand contains NaN
+        assert_eq!(None, fa.partial_cmp(&fnan));
+        assert_eq!(None, fnan.partial_cmp(&fa));
+        assert_eq!(None, fnan.partial_cmp(&fnan));
+
+        // same checks via FlintRef
+        assert_eq!(
+            Some(Ordering::Greater),
+            fa.as_ref().partial_cmp(&fb.as_ref())
+        );
+        assert_eq!(Some(Ordering::Less), fb.as_ref().partial_cmp(&fa.as_ref()));
+        assert_eq!(Some(Ordering::Equal), fa.as_ref().partial_cmp(&fc.as_ref()));
+        assert_eq!(None, fa.as_ref().partial_cmp(&fnan.as_ref()));
+        assert_eq!(None, fnan.as_ref().partial_cmp(&fa.as_ref()));
+
+        // partial_cmp against a primitive
+        assert_eq!(Some(Ordering::Greater), fa.partial_cmp(&0.0_f64));
+        assert_eq!(Some(Ordering::Less), fb.partial_cmp(&10.0_f64));
+        assert_eq!(None, fa.partial_cmp(&f64::NAN));
+        assert_eq!(None, fa.as_ref().partial_cmp(&f64::NAN));
+    }
+
+    // --- touching intervals: equal at shared endpoint ---
+
+    #[test]
+    fn test_touching_intervals() {
+        // [0.0, 1.0] and [1.0, 2.0] share the point 1.0 → equal (overlap)
+        let fa: Flint<f64> = Flint { lb: 0.0, ub: 1.0 };
+        let fb: Flint<f64> = Flint { lb: 1.0, ub: 2.0 };
+        assert_eq!(fa, fb);
+        assert_eq!(fa.as_ref(), fb.as_ref());
+        // partial_cmp should return Some(Equal) for touching intervals
+        assert_eq!(Some(Ordering::Equal), fa.partial_cmp(&fb));
+        assert_eq!(Some(Ordering::Equal), fa.as_ref().partial_cmp(&fb.as_ref()));
+
+        // [0.0, 0.9] and [1.0, 2.0] do NOT touch → not equal, fa < fb
+        let fc: Flint<f64> = Flint { lb: 0.0, ub: 0.9 };
+        assert_ne!(fc, fb);
+        assert!(fc < fb);
+        assert_eq!(Some(Ordering::Less), fc.partial_cmp(&fb));
+    }
+
+    // --- Flint<f32> comparisons ---
+
+    #[test]
+    fn test_equality_flint_f32() {
+        let fa: Flint<f32> = Flint { lb: 0.5, ub: 1.5 };
+        let fb: Flint<f32> = Flint { lb: 0.25, ub: 0.75 };
+        let fc: Flint<f32> = Flint { lb: 2.0, ub: 3.0 };
+        let fnan: Flint<f32> = Flint {
+            lb: f32::NAN,
+            ub: f32::NAN,
+        };
+
+        assert_eq!(fa, fb); // overlapping → equal
+        assert_ne!(fa, fc); // disjoint → not equal
+        assert_ne!(fnan, fnan); // NaN never equal
+        assert_eq!(fa, fa.as_ref()); // owned == ref
+        assert_eq!(fa.as_ref(), fb.as_ref()); // ref == ref
+
+        // with primitives
+        assert_eq!(fa, 1_i8);
+        assert_eq!(1_u8, fa);
+        assert_ne!(fa.as_ref(), 0_u8);
+    }
+
+    #[test]
+    fn test_inequality_flint_f32() {
+        let fa: Flint<f32> = Flint { lb: 2.0, ub: 3.0 };
+        let fb: Flint<f32> = Flint { lb: 0.0, ub: 1.0 };
+
+        assert!(fa > fb);
+        assert!(fb < fa);
+        assert!(fa.as_ref() > fb.as_ref());
+        assert!(fb.as_ref() < fa.as_ref());
+        assert_eq!(Some(Ordering::Greater), fa.partial_cmp(&fb));
+        assert_eq!(Some(Ordering::Less), fb.partial_cmp(&fa));
+
+        // with primitives
+        assert!(fa > 0.0_f32);
+        assert!(fa.as_ref() > 0_i8);
+        assert_eq!(None, fa.partial_cmp(&f32::NAN));
+    }
+
+    // --- cross-type f32/f64 comparisons ---
+
+    #[test]
+    fn test_cross_type_cmp() {
+        let f64val: Flint<f64> = Flint { lb: 0.5, ub: 1.5 };
+        let f32val: Flint<f32> = Flint { lb: 0.25, ub: 0.75 };
+        let f32hi: Flint<f32> = Flint { lb: 2.0, ub: 3.0 };
+        let f32nan: Flint<f32> = Flint {
+            lb: f32::NAN,
+            ub: f32::NAN,
+        };
+
+        // Flint<f64> == FlintRef<f32>: overlapping
+        assert_eq!(f64val, f32val.as_ref());
+        // Flint<f64> != FlintRef<f32>: disjoint
+        assert_ne!(f64val, f32hi.as_ref());
+        // Flint<f64> ordering vs FlintRef<f32>
+        assert!(f64val < f32hi.as_ref());
+        assert_eq!(Some(Ordering::Less), f64val.partial_cmp(&f32hi.as_ref()));
+        assert_eq!(None, f64val.partial_cmp(&f32nan.as_ref()));
+
+        // Flint<f32> == FlintRef<f64>
+        let f64hi: Flint<f64> = Flint { lb: 2.0, ub: 3.0 };
+        assert_eq!(f32val, f64val.as_ref());
+        assert_ne!(f32val, f64hi.as_ref());
+        assert!(f32val < f64hi.as_ref());
+        assert_eq!(Some(Ordering::Less), f32val.partial_cmp(&f64hi.as_ref()));
+
+        // FlintRef<f32> vs Flint<f64>
+        assert_eq!(f32val.as_ref(), f64val);
+        assert!(f32hi.as_ref() > f64val);
+        assert_eq!(Some(Ordering::Greater), f32hi.as_ref().partial_cmp(&f64val));
+        assert_eq!(None, f32nan.as_ref().partial_cmp(&f64val));
+
+        // FlintRef<f64> vs Flint<f32>
+        assert_eq!(f64val.as_ref(), f32val);
+        assert!(f64hi.as_ref() > f32val);
+        assert_eq!(Some(Ordering::Greater), f64hi.as_ref().partial_cmp(&f32val));
+    }
+
+    // --- infinity comparisons ---
+
+    #[test]
+    fn test_infinity_cmp() {
+        let finf: Flint<f64> = Flint {
+            lb: f64::INFINITY,
+            ub: f64::INFINITY,
+        };
+        let fninf: Flint<f64> = Flint {
+            lb: f64::NEG_INFINITY,
+            ub: f64::NEG_INFINITY,
+        };
+        let fa: Flint<f64> = Flint { lb: 0.5, ub: 1.5 };
+
+        // +inf is greater than any finite interval
+        assert!(finf > fa);
+        assert!(fa < finf);
+        assert_eq!(Some(Ordering::Greater), finf.partial_cmp(&fa));
+        assert_eq!(Some(Ordering::Less), fa.partial_cmp(&finf));
+
+        // -inf is less than any finite interval
+        assert!(fninf < fa);
+        assert!(fa > fninf);
+        assert_eq!(Some(Ordering::Less), fninf.partial_cmp(&fa));
+        assert_eq!(Some(Ordering::Greater), fa.partial_cmp(&fninf));
+
+        // +inf vs -inf
+        assert!(finf > fninf);
+        assert_eq!(Some(Ordering::Greater), finf.partial_cmp(&fninf));
+
+        // same via refs
+        assert!(finf.as_ref() > fa.as_ref());
+        assert!(fninf.as_ref() < fa.as_ref());
+        assert_eq!(
+            Some(Ordering::Greater),
+            finf.as_ref().partial_cmp(&fa.as_ref())
+        );
+    }
 }
