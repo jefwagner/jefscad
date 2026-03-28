@@ -22,6 +22,6 @@ The flint project defines new rounded floating point interval numeric types.
    - [x] add flint project to cargo workspace
    - [x] Create the jefscad project
    - [x] add jefscad project to cargo workspace
-   - [_] add copyright and license file
-   - [_] initialize git repo, upload to github
+   - [x] add copyright and license file
+   - [x] initialize git repo, upload to github
 
