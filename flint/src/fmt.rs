@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::Flint;
+use crate::{Flint, FlintRef};
 
 trait GenNumConsts {
     const ZERO: Self;
@@ -69,6 +69,21 @@ impl FloatStringParts for f64 {
         let num_str = num_str.trim_end_matches(|c: char| c == '\0' || c.is_whitespace());
         // eprintln!("num_str[{}]={}", num_str.len(), num_str);
         f64::from_str(num_str.trim()).expect("Failed parse combined string")
+    }
+}
+
+/// Display for FlintRef delegates to Flint::Display by copying through the references.
+/// T must be Copy (true for f32 and f64), so no allocation is needed.
+impl<'a, T> fmt::Display for FlintRef<'a, T>
+where
+    T: num_traits::Float + ryu::Float + Copy + GenNumConsts + LowerExp + FloatStringParts,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Flint {
+            lb: *self.lb,
+            ub: *self.ub,
+        }
+        .fmt(f)
     }
 }
 
@@ -166,6 +181,53 @@ mod tests {
         let lb = -1.601_f64;
         let f = Flint { lb, ub };
         let s = format!("{f}");
+        let v: f64 = s.parse().expect("output should be a valid float");
+        assert!(
+            lb <= v && v <= ub,
+            "output {s} ({v:.17e}) not in [{lb:.17e}, {ub:.17e}]"
+        );
+    }
+
+    // --- FlintRef Display ---
+    // FlintRef::Display must produce identical output to Flint::Display for all cases.
+
+    #[test]
+    fn test_fmt_ref_basic() {
+        let lb = 1.555_f32;
+        let ub = 1.565_f32;
+        let r = FlintRef { lb: &lb, ub: &ub };
+        assert_eq!("1.56", format!("{r}"));
+    }
+
+    #[test]
+    fn test_fmt_ref_matches_owned() {
+        // For every case the ref output must exactly equal the owned output.
+        let cases: &[(f64, f64)] = &[
+            (1.555, 1.565),                         // normal positive
+            (-1.6, -1.55),                          // normal negative
+            (0.0, 0.0),                             // zero interval
+            (-0.5, 0.5),                            // straddles zero
+            (f64::NAN, f64::NAN),                   // NaN
+            (f64::NEG_INFINITY, f64::NEG_INFINITY), // infinite
+        ];
+        for &(lb, ub) in cases {
+            let owned = Flint { lb, ub };
+            let r = FlintRef { lb: &lb, ub: &ub };
+            assert_eq!(
+                format!("{owned}"),
+                format!("{r}"),
+                "mismatch for lb={lb} ub={ub}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fmt_ref_negative_narrow() {
+        // Regression case: narrow negative interval must not truncate to integer part.
+        let ub = -1.5999999999999999_f64;
+        let lb = -1.601_f64;
+        let r = FlintRef { lb: &lb, ub: &ub };
+        let s = format!("{r}");
         let v: f64 = s.parse().expect("output should be a valid float");
         assert!(
             lb <= v && v <= ub,
