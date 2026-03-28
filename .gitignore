@@ -6,8 +6,8 @@ target/
 Cargo.lock
 **/Cargo.lock
 
-# Personal knowledge base
-kb/
+# Personal knowledge base (may be a symlink to ../kb)
+kb
 
 # Editor and OS files
 .vscode/
