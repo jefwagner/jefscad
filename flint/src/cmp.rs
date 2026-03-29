@@ -2,7 +2,7 @@ use num_traits::Float;
 use std::cmp::{Ordering, PartialEq, PartialOrd};
 use std::simd::prelude::*;
 
-use crate::{Flint, FlintArray, FlintRef, FlintVec, FlintView};
+use crate::{Flint, FlintArray, FlintMut, FlintRef, FlintVec, FlintView, FlintViewMut};
 
 // ----------------------
 // Copmarisons for Flints
@@ -98,6 +98,66 @@ where
     }
 }
 
+// -------------------------
+// Comparisons for FlintMuts
+// -------------------------
+
+impl<'a, T> PartialEq<FlintMut<'a, T>> for FlintMut<'a, T>
+where
+    T: Copy + PartialEq + PartialOrd,
+{
+    fn eq(&self, other: &FlintMut<T>) -> bool {
+        *self.ub >= *other.lb && *self.lb <= *other.ub
+    }
+}
+
+impl<'a, T> PartialOrd<FlintMut<'a, T>> for FlintMut<'a, T>
+where
+    T: Copy + PartialEq + PartialOrd + Float,
+{
+    fn partial_cmp(&self, other: &FlintMut<T>) -> Option<Ordering> {
+        if self.lb.is_nan() || self.ub.is_nan() || other.lb.is_nan() || other.ub.is_nan() {
+            None
+        } else if *self.lb > *other.ub {
+            Some(Ordering::Greater)
+        } else if *self.ub < *other.lb {
+            Some(Ordering::Less)
+        } else {
+            Some(Ordering::Equal)
+        }
+    }
+}
+
+impl<'a, T, Rhs> PartialEq<Rhs> for FlintMut<'a, T>
+where
+    T: Copy + PartialEq + PartialOrd,
+    Rhs: Copy + Into<Flint<T>>,
+{
+    fn eq(&self, other: &Rhs) -> bool {
+        let other: Flint<T> = (*other).into();
+        *self.ub >= other.lb && *self.lb <= other.ub
+    }
+}
+
+impl<'a, T, Rhs> PartialOrd<Rhs> for FlintMut<'a, T>
+where
+    T: Copy + PartialEq + PartialOrd + Float,
+    Rhs: Copy + Into<Flint<T>>,
+{
+    fn partial_cmp(&self, other: &Rhs) -> Option<Ordering> {
+        let other: Flint<T> = (*other).into();
+        if self.lb.is_nan() || self.ub.is_nan() || other.lb.is_nan() || other.ub.is_nan() {
+            None
+        } else if *self.lb > other.ub {
+            Some(Ordering::Greater)
+        } else if *self.ub < other.lb {
+            Some(Ordering::Less)
+        } else {
+            Some(Ordering::Equal)
+        }
+    }
+}
+
 // ---------------------------------------------------------
 // Comparison between Flint and FlintRefs of same base types
 // ---------------------------------------------------------
@@ -121,6 +181,96 @@ where
         } else if self.lb > *other.ub {
             Some(Ordering::Greater)
         } else if self.ub < *other.lb {
+            Some(Ordering::Less)
+        } else {
+            Some(Ordering::Equal)
+        }
+    }
+}
+
+// ---------------------------------------------------------
+// Comparison between Flint and FlintMut of same base type
+// (FlintMut is not Copy so the generic Rhs impl on Flint doesn't cover it)
+// ---------------------------------------------------------
+
+impl<'a, T> PartialEq<FlintMut<'a, T>> for Flint<T>
+where
+    T: Copy + PartialEq + PartialOrd,
+{
+    fn eq(&self, other: &FlintMut<T>) -> bool {
+        self.ub >= *other.lb && self.lb <= *other.ub
+    }
+}
+
+impl<'a, T> PartialOrd<FlintMut<'a, T>> for Flint<T>
+where
+    T: Copy + PartialEq + PartialOrd + Float,
+{
+    fn partial_cmp(&self, other: &FlintMut<T>) -> Option<Ordering> {
+        if self.lb.is_nan() || self.ub.is_nan() || other.lb.is_nan() || other.ub.is_nan() {
+            None
+        } else if self.lb > *other.ub {
+            Some(Ordering::Greater)
+        } else if self.ub < *other.lb {
+            Some(Ordering::Less)
+        } else {
+            Some(Ordering::Equal)
+        }
+    }
+}
+
+// ----------------------------------------------------------
+// Comparison between FlintRef and FlintMut of same base type
+// (FlintMut is not Copy so the generic Rhs impl on FlintRef doesn't cover it)
+// ----------------------------------------------------------
+
+impl<'a, 'b, T> PartialEq<FlintMut<'b, T>> for FlintRef<'a, T>
+where
+    T: Copy + PartialEq + PartialOrd,
+{
+    fn eq(&self, other: &FlintMut<T>) -> bool {
+        *self.ub >= *other.lb && *self.lb <= *other.ub
+    }
+}
+
+impl<'a, 'b, T> PartialOrd<FlintMut<'b, T>> for FlintRef<'a, T>
+where
+    T: Copy + PartialEq + PartialOrd + Float,
+{
+    fn partial_cmp(&self, other: &FlintMut<T>) -> Option<Ordering> {
+        if self.lb.is_nan() || self.ub.is_nan() || other.lb.is_nan() || other.ub.is_nan() {
+            None
+        } else if *self.lb > *other.ub {
+            Some(Ordering::Greater)
+        } else if *self.ub < *other.lb {
+            Some(Ordering::Less)
+        } else {
+            Some(Ordering::Equal)
+        }
+    }
+}
+// FlintRef does not derive Copy, so the generic Rhs: Copy + Into<Flint<T>> impl
+// on FlintMut does not cover it — explicit impls are needed.
+
+impl<'a, 'b, T> PartialEq<FlintRef<'b, T>> for FlintMut<'a, T>
+where
+    T: Copy + PartialEq + PartialOrd,
+{
+    fn eq(&self, other: &FlintRef<T>) -> bool {
+        *self.ub >= *other.lb && *self.lb <= *other.ub
+    }
+}
+
+impl<'a, 'b, T> PartialOrd<FlintRef<'b, T>> for FlintMut<'a, T>
+where
+    T: Copy + PartialEq + PartialOrd + Float,
+{
+    fn partial_cmp(&self, other: &FlintRef<T>) -> Option<Ordering> {
+        if self.lb.is_nan() || self.ub.is_nan() || other.lb.is_nan() || other.ub.is_nan() {
+            None
+        } else if *self.lb > *other.ub {
+            Some(Ordering::Greater)
+        } else if *self.ub < *other.lb {
             Some(Ordering::Less)
         } else {
             Some(Ordering::Equal)
@@ -212,6 +362,90 @@ impl<'a> PartialOrd<Flint<f32>> for FlintRef<'a, f64> {
     }
 }
 
+// ------------------------------------------------------------------
+// Comparisons between Flint and FlintMut of different base types
+// ------------------------------------------------------------------
+
+impl<'a> PartialEq<FlintMut<'a, f32>> for Flint<f64> {
+    fn eq(&self, other: &FlintMut<f32>) -> bool {
+        self.ub >= (*other.lb as f64) && self.lb <= (*other.ub as f64)
+    }
+}
+
+impl<'a> PartialOrd<FlintMut<'a, f32>> for Flint<f64> {
+    fn partial_cmp(&self, other: &FlintMut<f32>) -> Option<Ordering> {
+        if self.lb.is_nan() || self.ub.is_nan() || other.lb.is_nan() || other.ub.is_nan() {
+            None
+        } else if self.lb > (*other.ub as f64) {
+            Some(Ordering::Greater)
+        } else if self.ub < (*other.lb as f64) {
+            Some(Ordering::Less)
+        } else {
+            Some(Ordering::Equal)
+        }
+    }
+}
+
+impl<'a> PartialEq<FlintMut<'a, f64>> for Flint<f32> {
+    fn eq(&self, other: &FlintMut<f64>) -> bool {
+        (self.ub as f64) >= *other.lb && (self.lb as f64) <= *other.ub
+    }
+}
+
+impl<'a> PartialOrd<FlintMut<'a, f64>> for Flint<f32> {
+    fn partial_cmp(&self, other: &FlintMut<f64>) -> Option<Ordering> {
+        if self.lb.is_nan() || self.ub.is_nan() || other.lb.is_nan() || other.ub.is_nan() {
+            None
+        } else if (self.lb as f64) > *other.ub {
+            Some(Ordering::Greater)
+        } else if (self.ub as f64) < *other.lb {
+            Some(Ordering::Less)
+        } else {
+            Some(Ordering::Equal)
+        }
+    }
+}
+
+impl<'a> PartialEq<Flint<f64>> for FlintMut<'a, f32> {
+    fn eq(&self, other: &Flint<f64>) -> bool {
+        (*self.ub as f64) >= other.lb && (*self.lb as f64) <= other.ub
+    }
+}
+
+impl<'a> PartialOrd<Flint<f64>> for FlintMut<'a, f32> {
+    fn partial_cmp(&self, other: &Flint<f64>) -> Option<Ordering> {
+        if self.lb.is_nan() || self.ub.is_nan() || other.lb.is_nan() || other.ub.is_nan() {
+            None
+        } else if (*self.lb as f64) > other.ub {
+            Some(Ordering::Greater)
+        } else if (*self.ub as f64) < other.lb {
+            Some(Ordering::Less)
+        } else {
+            Some(Ordering::Equal)
+        }
+    }
+}
+
+impl<'a> PartialEq<Flint<f32>> for FlintMut<'a, f64> {
+    fn eq(&self, other: &Flint<f32>) -> bool {
+        *self.ub >= (other.lb as f64) && *self.lb <= (other.ub as f64)
+    }
+}
+
+impl<'a> PartialOrd<Flint<f32>> for FlintMut<'a, f64> {
+    fn partial_cmp(&self, other: &Flint<f32>) -> Option<Ordering> {
+        if self.lb.is_nan() || self.ub.is_nan() || other.lb.is_nan() || other.ub.is_nan() {
+            None
+        } else if *self.lb > (other.ub as f64) {
+            Some(Ordering::Greater)
+        } else if *self.ub < (other.lb as f64) {
+            Some(Ordering::Less)
+        } else {
+            Some(Ordering::Equal)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // Comparisons between types convertable to flint and flint and flintref
 // ---------------------------------------------------------------------
@@ -249,6 +483,28 @@ macro_rules! impl_partial_cmp {
 
         impl<'a> PartialOrd<FlintRef<'a, $flint_base>> for $other_type {
             fn partial_cmp(&self, other: &FlintRef<$flint_base>) -> Option<Ordering> {
+                let f: Flint<$flint_base> = (*self).into();
+                if f.lb.is_nan() || f.ub.is_nan() || other.lb.is_nan() || other.ub.is_nan() {
+                    None
+                } else if f.lb > *other.ub {
+                    Some(Ordering::Greater)
+                } else if f.ub < *other.lb {
+                    Some(Ordering::Less)
+                } else {
+                    Some(Ordering::Equal)
+                }
+            }
+        }
+
+        impl<'a> PartialEq<FlintMut<'a, $flint_base>> for $other_type {
+            fn eq(&self, other: &FlintMut<$flint_base>) -> bool {
+                let f: Flint<$flint_base> = (*self).into();
+                f.ub >= *other.lb && f.lb <= *other.ub
+            }
+        }
+
+        impl<'a> PartialOrd<FlintMut<'a, $flint_base>> for $other_type {
+            fn partial_cmp(&self, other: &FlintMut<$flint_base>) -> Option<Ordering> {
                 let f: Flint<$flint_base> = (*self).into();
                 if f.lb.is_nan() || f.ub.is_nan() || other.lb.is_nan() || other.ub.is_nan() {
                     None
@@ -468,6 +724,82 @@ macro_rules! impl_vec_view_cmp {
         }
 
         impl<'a> FlintView<'a, $T> {
+            /// Returns an element-wise vec indicating whether each interval pair overlaps.
+            pub fn eq_intervals(&self, other: &Self) -> Vec<bool> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..(n / L) {
+                    let s = i * L;
+                    out.extend_from_slice(
+                        &(<$S8>::from_slice(&self.ub[s..]).simd_ge(<$S8>::from_slice(&other.lb[s..]))
+                            & <$S8>::from_slice(&self.lb[s..]).simd_le(<$S8>::from_slice(&other.ub[s..])))
+                        .to_array(),
+                    );
+                }
+                for j in (n / L * L)..n {
+                    out.push(self.ub[j] >= other.lb[j] && self.lb[j] <= other.ub[j]);
+                }
+                out
+            }
+
+            /// Returns an element-wise vec indicating whether each self interval lies
+            /// entirely below the corresponding other interval.
+            pub fn lt_intervals(&self, other: &Self) -> Vec<bool> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..(n / L) {
+                    let s = i * L;
+                    out.extend_from_slice(
+                        &<$S8>::from_slice(&self.ub[s..])
+                            .simd_lt(<$S8>::from_slice(&other.lb[s..]))
+                            .to_array(),
+                    );
+                }
+                for j in (n / L * L)..n {
+                    out.push(self.ub[j] < other.lb[j]);
+                }
+                out
+            }
+
+            /// Returns an element-wise vec indicating whether each self interval lies
+            /// entirely above the corresponding other interval.
+            pub fn gt_intervals(&self, other: &Self) -> Vec<bool> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..(n / L) {
+                    let s = i * L;
+                    out.extend_from_slice(
+                        &<$S8>::from_slice(&self.lb[s..])
+                            .simd_gt(<$S8>::from_slice(&other.ub[s..]))
+                            .to_array(),
+                    );
+                }
+                for j in (n / L * L)..n {
+                    out.push(self.lb[j] > other.ub[j]);
+                }
+                out
+            }
+
+            /// True iff every element pair overlaps.
+            pub fn all_eq(&self, other: &Self) -> bool {
+                self.eq_intervals(other).iter().all(|&b| b)
+            }
+
+            /// True iff every self interval lies entirely below the corresponding other interval.
+            pub fn all_lt(&self, other: &Self) -> bool {
+                self.lt_intervals(other).iter().all(|&b| b)
+            }
+
+            /// True iff every self interval lies entirely above the corresponding other interval.
+            pub fn all_gt(&self, other: &Self) -> bool {
+                self.gt_intervals(other).iter().all(|&b| b)
+            }
+        }
+
+        impl<'a> FlintViewMut<'a, $T> {
             /// Returns an element-wise vec indicating whether each interval pair overlaps.
             pub fn eq_intervals(&self, other: &Self) -> Vec<bool> {
                 const L: usize = 8;
@@ -1023,5 +1355,160 @@ mod test {
         assert!(a.all_eq(&b));
         assert!(a.all_lt(&c));
         assert!(c.all_gt(&a));
+    }
+
+    // ------------------------------------------------------------------
+    // FlintMut scalar comparisons
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_cmp_flint_mut_basic() {
+        // overlapping — equal
+        let mut lb_a = 0.5_f64;
+        let mut ub_a = 1.5_f64;
+        let mut lb_b = 0.25_f64;
+        let mut ub_b = 0.75_f64;
+        let a = FlintMut { lb: &mut lb_a, ub: &mut ub_a };
+        let b = FlintMut { lb: &mut lb_b, ub: &mut ub_b };
+        assert!(a == b);
+        assert!(!(a < b));
+        assert!(!(a > b));
+    }
+
+    #[test]
+    fn test_cmp_flint_mut_ordering() {
+        // disjoint: a entirely above b
+        let mut lb_a = 2.0_f64;
+        let mut ub_a = 3.0_f64;
+        let mut lb_b = 0.0_f64;
+        let mut ub_b = 1.0_f64;
+        let a = FlintMut { lb: &mut lb_a, ub: &mut ub_a };
+        let b = FlintMut { lb: &mut lb_b, ub: &mut ub_b };
+        assert!(a > b);
+        assert!(b < a);
+        assert!(!(a == b));
+    }
+
+    #[test]
+    fn test_cmp_flint_mut_with_flint() {
+        // FlintMut == Flint (generic Rhs covers Flint<T>)
+        let fa = Flint::<f64> { lb: 0.5, ub: 1.5 };
+        let mut lb = 0.25_f64;
+        let mut ub = 0.75_f64;
+        let m = FlintMut { lb: &mut lb, ub: &mut ub };
+        assert!(m == fa); // generic Rhs impl
+
+        // Flint == FlintMut (explicit impl since FlintMut is !Copy)
+        assert!(fa == m);
+    }
+
+    #[test]
+    fn test_cmp_flint_mut_with_flintref() {
+        let lb_r = 0.5_f64;
+        let ub_r = 1.5_f64;
+        let r = FlintRef { lb: &lb_r, ub: &ub_r };
+
+        let mut lb_m = 0.25_f64;
+        let mut ub_m = 0.75_f64;
+        let m = FlintMut { lb: &mut lb_m, ub: &mut ub_m };
+
+        // FlintMut == FlintRef (generic Rhs covers FlintRef since it is Copy+Into)
+        assert!(m == r);
+        // FlintRef == FlintMut (explicit impl since FlintMut is !Copy)
+        assert!(r == m);
+    }
+
+    #[test]
+    fn test_cmp_flint_mut_nan() {
+        let mut lb = f64::NAN;
+        let mut ub = f64::NAN;
+        let m = FlintMut { lb: &mut lb, ub: &mut ub };
+        let f = Flint::<f64> { lb: 1.0, ub: 2.0 };
+        assert!(m.partial_cmp(&f).is_none());
+    }
+
+    #[test]
+    fn test_cmp_flint_mut_cross_precision() {
+        // FlintMut<f32> vs Flint<f64>
+        let mut lb32: f32 = 0.5;
+        let mut ub32: f32 = 1.5;
+        let m32 = FlintMut { lb: &mut lb32, ub: &mut ub32 };
+        let f64 = Flint::<f64> { lb: 0.25, ub: 0.75 };
+        assert!(m32 == f64);
+        assert!(f64 == m32);
+
+        // disjoint: FlintMut<f32> > Flint<f64>
+        let mut lb32b: f32 = 5.0;
+        let mut ub32b: f32 = 6.0;
+        let m32b = FlintMut { lb: &mut lb32b, ub: &mut ub32b };
+        let f64b = Flint::<f64> { lb: 1.0, ub: 2.0 };
+        assert!(m32b > f64b);
+        assert!(f64b < m32b);
+    }
+
+    #[test]
+    fn test_cmp_flint_mut_with_primitive() {
+        let mut lb = 0.5_f64;
+        let mut ub = 1.5_f64;
+        let m = FlintMut { lb: &mut lb, ub: &mut ub };
+        // primitive on right: generic Rhs impl
+        assert!(m == 1.0_f64);
+        assert!(m == 1_i32);
+        // primitive on left: impl_partial_cmp! macro
+        assert!(1.0_f64 == m);
+        assert!(1_i32 == m);
+    }
+
+    // ------------------------------------------------------------------
+    // FlintViewMut array comparisons
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_cmp_view_mut_f32_eq() {
+        let mut lb_a = [0.0_f32, 1.0, 2.0, 3.0];
+        let mut ub_a = [1.0_f32, 2.0, 3.0, 4.0];
+        let mut lb_b = [0.5_f32, 1.5, 2.5, 3.5];
+        let mut ub_b = [1.5_f32, 2.5, 3.5, 4.5];
+        let a = FlintViewMut { lb: &mut lb_a, ub: &mut ub_a };
+        let b = FlintViewMut { lb: &mut lb_b, ub: &mut ub_b };
+        assert_eq!(a.eq_intervals(&b), vec![true; 4]);
+        assert!(a.all_eq(&b));
+    }
+
+    #[test]
+    fn test_cmp_view_mut_f64_lt_gt() {
+        let mut lb_a = [0.0_f64, 1.0, 2.0, 3.0];
+        let mut ub_a = [0.5_f64, 1.5, 2.5, 3.5];
+        let mut lb_b = [1.0_f64, 2.0, 3.0, 4.0];
+        let mut ub_b = [1.5_f64, 2.5, 3.5, 4.5];
+        let a = FlintViewMut { lb: &mut lb_a, ub: &mut ub_a };
+        let b = FlintViewMut { lb: &mut lb_b, ub: &mut ub_b };
+        assert_eq!(a.lt_intervals(&b), vec![true; 4]);
+        assert_eq!(b.gt_intervals(&a), vec![true; 4]);
+        assert!(a.all_lt(&b));
+        assert!(b.all_gt(&a));
+    }
+
+    #[test]
+    fn test_cmp_view_mut_matches_view() {
+        // ViewMut and View over the same data should give identical results
+        let lbs = [0.0_f64, 10.0, 20.0, 30.0];
+        let ubs = [5.0_f64, 15.0, 25.0, 35.0];
+        let lbs2 = [3.0_f64, 13.0, 23.0, 33.0];
+        let ubs2 = [8.0_f64, 18.0, 28.0, 38.0];
+
+        let va = FlintView { lb: &lbs, ub: &ubs };
+        let vb = FlintView { lb: &lbs2, ub: &ubs2 };
+
+        let mut lbm = lbs;
+        let mut ubm = ubs;
+        let mut lbm2 = lbs2;
+        let mut ubm2 = ubs2;
+        let vma = FlintViewMut { lb: &mut lbm, ub: &mut ubm };
+        let vmb = FlintViewMut { lb: &mut lbm2, ub: &mut ubm2 };
+
+        assert_eq!(va.eq_intervals(&vb), vma.eq_intervals(&vmb));
+        assert_eq!(va.lt_intervals(&vb), vma.lt_intervals(&vmb));
+        assert_eq!(va.gt_intervals(&vb), vma.gt_intervals(&vmb));
     }
 }

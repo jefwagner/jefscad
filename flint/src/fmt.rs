@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::{Flint, FlintArray, FlintRef, FlintVec, FlintView};
+use crate::{Flint, FlintArray, FlintMut, FlintRef, FlintVec, FlintView, FlintViewMut};
 
 /// Format a sequence of interval pairs as `[v0, v1, ...]` where each element is
 /// formatted using `Flint::Display`. Used by all array/vec/view Display impls.
@@ -129,6 +129,30 @@ where
             ub: *self.ub,
         }
         .fmt(f)
+    }
+}
+
+/// Display for FlintMut delegates to Flint::Display identically to FlintRef.
+impl<'a, T> fmt::Display for FlintMut<'a, T>
+where
+    T: num_traits::Float + ryu::Float + Copy + GenNumConsts + LowerExp + FloatStringParts,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Flint {
+            lb: *self.lb,
+            ub: *self.ub,
+        }
+        .fmt(f)
+    }
+}
+
+/// Display for FlintViewMut delegates to fmt_interval_slice identically to FlintView.
+impl<'a, T> fmt::Display for FlintViewMut<'a, T>
+where
+    T: num_traits::Float + ryu::Float + Copy + GenNumConsts + LowerExp + FloatStringParts,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_interval_slice(self.lb, self.ub, f)
     }
 }
 
@@ -364,6 +388,110 @@ mod tests {
         let ub: [f64; 0] = [];
         let view = FlintView { lb: &lb, ub: &ub };
         assert_eq!("[]", format!("{view}"));
+    }
+
+    // --- FlintMut Display ---
+
+    #[test]
+    fn test_fmt_mut_basic() {
+        let mut lb = 1.555_f32;
+        let mut ub = 1.565_f32;
+        let m = FlintMut {
+            lb: &mut lb,
+            ub: &mut ub,
+        };
+        assert_eq!("1.56", format!("{m}"));
+    }
+
+    #[test]
+    fn test_fmt_mut_matches_owned() {
+        let cases: &[(f64, f64)] = &[
+            (1.555, 1.565),
+            (-1.6, -1.55),
+            (0.0, 0.0),
+            (-0.5, 0.5),
+        ];
+        for &(lbv, ubv) in cases {
+            let owned = Flint { lb: lbv, ub: ubv };
+            let mut lb = lbv;
+            let mut ub = ubv;
+            let m = FlintMut {
+                lb: &mut lb,
+                ub: &mut ub,
+            };
+            assert_eq!(
+                format!("{owned}"),
+                format!("{m}"),
+                "mismatch for lb={lbv} ub={ubv}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_fmt_mut_negative_narrow() {
+        let ubv = -1.5999999999999999_f64;
+        let lbv = -1.601_f64;
+        let mut lb = lbv;
+        let mut ub = ubv;
+        let m = FlintMut {
+            lb: &mut lb,
+            ub: &mut ub,
+        };
+        let s = format!("{m}");
+        let v: f64 = s.parse().expect("output should be a valid float");
+        assert!(
+            lbv <= v && v <= ubv,
+            "output {s} ({v:.17e}) not in [{lbv:.17e}, {ubv:.17e}]"
+        );
+    }
+
+    // --- FlintViewMut Display ---
+
+    #[test]
+    fn test_fmt_view_mut_basic() {
+        let mut lb = [0.999_f64, 2.49, 3.141, -0.5];
+        let mut ub = [1.001_f64, 2.51, 3.142, 0.5];
+        let view = FlintViewMut {
+            lb: &mut lb,
+            ub: &mut ub,
+        };
+        assert_eq!("[1.0, 2.5, 3.141, 0]", format!("{view}"));
+    }
+
+    #[test]
+    fn test_fmt_view_mut_single() {
+        let mut lb = [1.555_f64];
+        let mut ub = [1.565_f64];
+        let view = FlintViewMut {
+            lb: &mut lb,
+            ub: &mut ub,
+        };
+        assert_eq!("[1.56]", format!("{view}"));
+    }
+
+    #[test]
+    fn test_fmt_view_mut_empty() {
+        let mut lb: [f64; 0] = [];
+        let mut ub: [f64; 0] = [];
+        let view = FlintViewMut {
+            lb: &mut lb,
+            ub: &mut ub,
+        };
+        assert_eq!("[]", format!("{view}"));
+    }
+
+    #[test]
+    fn test_fmt_view_mut_matches_view() {
+        let lbs = [0.999_f64, 2.49, -1.6, -0.5];
+        let ubs = [1.001_f64, 2.51, -1.55, 0.5];
+        let view = FlintView::<f64> { lb: &lbs, ub: &ubs };
+        let mut lb_m = lbs;
+        let mut ub_m = ubs;
+        let view_mut = FlintViewMut {
+            lb: &mut lb_m,
+            ub: &mut ub_m,
+        };
+        assert_eq!(format!("{view}"), format!("{view_mut}"));
     }
 
     // --- Consistency: FlintArray, FlintVec, FlintView produce identical output ---

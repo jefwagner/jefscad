@@ -1,4 +1,4 @@
-use crate::{next_up_down::NextUpDown, Flint, FlintRef};
+use crate::{next_up_down::NextUpDown, Flint, FlintMut, FlintRef};
 #[allow(unused_imports)]
 use crate::{FlintArray, FlintVec};
 
@@ -11,6 +11,15 @@ where
     T: Copy,
 {
     fn from(f: FlintRef<T>) -> Self {
+        f.to_owned()
+    }
+}
+
+impl<'a, T> From<FlintMut<'a, T>> for Flint<T>
+where
+    T: Copy,
+{
+    fn from(f: FlintMut<T>) -> Self {
         f.to_owned()
     }
 }
@@ -662,5 +671,28 @@ mod test {
         assert_eq!(1.0_f64, fvec.lb[0]); // exact integer
         assert_eq!(1.0_f64, fvec.ub[0]);
         assert!(fvec.lb[1] < 1.0_f64 && 1.0_f64 < fvec.ub[1]); // float interval
+    }
+
+    #[test]
+    fn test_from_flint_mut() {
+        // From<FlintMut> should produce the same Flint as to_owned()
+        let mut lb = 1.0_f32.nd();
+        let mut ub = 1.0_f32.nu();
+        let m = FlintMut {
+            lb: &mut lb,
+            ub: &mut ub,
+        };
+        let owned: Flint<f32> = m.into();
+        assert!(owned.lb < 1.0_f32 && 1.0_f32 < owned.ub);
+
+        // f64 variant
+        let mut lb = 2.5_f64.nd();
+        let mut ub = 2.5_f64.nu();
+        let m = FlintMut {
+            lb: &mut lb,
+            ub: &mut ub,
+        };
+        let owned: Flint<f64> = m.into();
+        assert!(owned.lb < 2.5_f64 && 2.5_f64 < owned.ub);
     }
 }

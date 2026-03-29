@@ -58,6 +58,7 @@ and spacing to have them look better when printted to the command line?
 [x] Implement unit tests for formatting for array types
 [x] Implement formatting for array types
     Format: single line, square brackets, comma-space separated (e.g. `[1, 2.51, 3.14]`)
+[x] Implement Display for FlintMut and FlintViewMut
 [_] Implement pretty-printing for 4-element (4x1 column vector) and 16-element (4x4
     matrix) FlintArray/FlintVec/FlintView types with newlines and aligned columns
 
@@ -80,6 +81,7 @@ return an array of bools instead of a single bool.
 
 [x] Implement unit tests for comparisons with scalar Flint types
 [x] Implement scalar comparisons
+[x] Implement comparisons for FlintMut
 [x] Figure out and document the appropriate equivalent comparisons for array types
     Decision: do NOT implement PartialEq/PartialOrd for array types — the return type
     would need to be an array of bools, which the standard traits cannot express.
@@ -90,6 +92,7 @@ return an array of bools instead of a single bool.
     FlintVec and FlintView use chunked SIMD (lane=8) with scalar fallback.
 [x] Implement unit tests for array comparisons
 [x] Implement array comparisons
+[x] Implement array comparisons for FlintViewMut
 
 ### Arithmatic
 
@@ -103,6 +106,7 @@ but the assignment operators can reassign the ref-types.
     Scalar (Flint, FlintRef): Neg, Add, Sub, Mul, Div + *Assign ops; Rhs generic over Into<Flint<T>>.
     Arrays (FlintArray, FlintVec, FlintView): element-wise SIMD; chunked f32x8/f64x8 for Vec/View
     with scalar remainder; 4-boundary min/max for Mul/Div; FlintView ops return FlintVec (owned).
+[x] Implement arithmatic for FlintMut and FlintViewMut
 
 ### Broadcasting
 

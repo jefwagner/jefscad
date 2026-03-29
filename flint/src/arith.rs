@@ -3,7 +3,7 @@ use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssi
 use std::simd::prelude::*;
 
 use crate::next_up_down::NextUpDown;
-use crate::{Flint, FlintArray, FlintRef, FlintVec, FlintView};
+use crate::{Flint, FlintArray, FlintMut, FlintRef, FlintVec, FlintView, FlintViewMut};
 
 // -----------------------------------------------------------------------
 // AsFlintSlice — internal borrow trait for FlintVec / FlintView ops,
@@ -25,6 +25,15 @@ impl<T> AsFlintSlice<T> for FlintVec<T> {
 }
 
 impl<'a, T> AsFlintSlice<T> for FlintView<'a, T> {
+    fn lb_slice(&self) -> &[T] {
+        self.lb
+    }
+    fn ub_slice(&self) -> &[T] {
+        self.ub
+    }
+}
+
+impl<'a, T> AsFlintSlice<T> for FlintViewMut<'a, T> {
     fn lb_slice(&self) -> &[T] {
         self.lb
     }
@@ -255,6 +264,114 @@ where
 {
     fn div_assign(&mut self, rhs: Rhs) {
         *self = *self / rhs;
+    }
+}
+
+// -----------------------------------------------------------------------
+// FlintMut arithmetic
+// Non-assign ops convert to owned and delegate; assign ops mutate the
+// underlying floats through the &'a mut T fields.
+// -----------------------------------------------------------------------
+
+impl<'a, T> Neg for FlintMut<'a, T>
+where
+    T: Float,
+{
+    type Output = Flint<T>;
+    fn neg(self) -> Flint<T> {
+        -self.to_owned()
+    }
+}
+
+impl<'a, T, Rhs> Add<Rhs> for FlintMut<'a, T>
+where
+    T: Float + NextUpDown,
+    Rhs: Into<Flint<T>>,
+{
+    type Output = Flint<T>;
+    fn add(self, rhs: Rhs) -> Flint<T> {
+        self.to_owned() + rhs
+    }
+}
+
+impl<'a, T, Rhs> AddAssign<Rhs> for FlintMut<'a, T>
+where
+    T: Float + NextUpDown,
+    Rhs: Into<Flint<T>>,
+{
+    fn add_assign(&mut self, rhs: Rhs) {
+        let result = self.to_owned() + rhs;
+        *self.lb = result.lb;
+        *self.ub = result.ub;
+    }
+}
+
+impl<'a, T, Rhs> Sub<Rhs> for FlintMut<'a, T>
+where
+    T: Float + NextUpDown,
+    Rhs: Into<Flint<T>>,
+{
+    type Output = Flint<T>;
+    fn sub(self, rhs: Rhs) -> Flint<T> {
+        self.to_owned() - rhs
+    }
+}
+
+impl<'a, T, Rhs> SubAssign<Rhs> for FlintMut<'a, T>
+where
+    T: Float + NextUpDown,
+    Rhs: Into<Flint<T>>,
+{
+    fn sub_assign(&mut self, rhs: Rhs) {
+        let result = self.to_owned() - rhs;
+        *self.lb = result.lb;
+        *self.ub = result.ub;
+    }
+}
+
+impl<'a, T, Rhs> Mul<Rhs> for FlintMut<'a, T>
+where
+    T: Float + NextUpDown,
+    Rhs: Into<Flint<T>>,
+{
+    type Output = Flint<T>;
+    fn mul(self, rhs: Rhs) -> Flint<T> {
+        self.to_owned() * rhs
+    }
+}
+
+impl<'a, T, Rhs> MulAssign<Rhs> for FlintMut<'a, T>
+where
+    T: Float + NextUpDown,
+    Rhs: Into<Flint<T>>,
+{
+    fn mul_assign(&mut self, rhs: Rhs) {
+        let result = self.to_owned() * rhs;
+        *self.lb = result.lb;
+        *self.ub = result.ub;
+    }
+}
+
+impl<'a, T, Rhs> Div<Rhs> for FlintMut<'a, T>
+where
+    T: Float + NextUpDown,
+    Rhs: Into<Flint<T>>,
+{
+    type Output = Flint<T>;
+    fn div(self, rhs: Rhs) -> Flint<T> {
+        self.to_owned() / rhs
+    }
+}
+
+impl<'a, T, Rhs> DivAssign<Rhs> for FlintMut<'a, T>
+where
+    T: Float + NextUpDown,
+    Rhs: Into<Flint<T>>,
+{
+    fn div_assign(&mut self, rhs: Rhs) {
+        let result = self.to_owned() / rhs;
+        *self.lb = result.lb;
+        *self.ub = result.ub;
     }
 }
 
@@ -746,6 +863,156 @@ macro_rules! impl_vec_view_arith {
                 FlintVec { lb, ub }
             }
         }
+
+        // -----------------------------------------------------------------------
+        // FlintViewMut arithmetic
+        // Non-assign ops delegate to FlintView (returning FlintVec).
+        // Assign ops mutate the underlying slices in place using the same chunked
+        // SIMD pattern as FlintVec.
+        // -----------------------------------------------------------------------
+
+        impl<'a> Neg for FlintViewMut<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn neg(self) -> FlintVec<$T> {
+                -(FlintView::<$T> { lb: self.lb, ub: self.ub })
+            }
+        }
+
+        impl<'a, Rhs: AsFlintSlice<$T>> Add<Rhs> for FlintViewMut<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn add(self, rhs: Rhs) -> FlintVec<$T> {
+                FlintView::<$T> { lb: self.lb, ub: self.ub } + rhs
+            }
+        }
+
+        impl<Rhs: AsFlintSlice<$T>> AddAssign<Rhs> for FlintViewMut<'_, $T> {
+            fn add_assign(&mut self, rhs: Rhs) {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = rhs.lb_slice();
+                let rub = rhs.ub_slice();
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let lo = (<$S8>::from_slice(&self.lb[s..]) + <$S8>::from_slice(&rlb[s..])).nd();
+                    let hi = (<$S8>::from_slice(&self.ub[s..]) + <$S8>::from_slice(&rub[s..])).nu();
+                    self.lb[s..s + L].copy_from_slice(&lo.to_array());
+                    self.ub[s..s + L].copy_from_slice(&hi.to_array());
+                }
+                for j in (chunks * L)..n {
+                    self.lb[j] = (self.lb[j] + rlb[j]).nd();
+                    self.ub[j] = (self.ub[j] + rub[j]).nu();
+                }
+            }
+        }
+
+        impl<'a, Rhs: AsFlintSlice<$T>> Sub<Rhs> for FlintViewMut<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn sub(self, rhs: Rhs) -> FlintVec<$T> {
+                FlintView::<$T> { lb: self.lb, ub: self.ub } - rhs
+            }
+        }
+
+        impl<Rhs: AsFlintSlice<$T>> SubAssign<Rhs> for FlintViewMut<'_, $T> {
+            fn sub_assign(&mut self, rhs: Rhs) {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = rhs.lb_slice();
+                let rub = rhs.ub_slice();
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let lo = (<$S8>::from_slice(&self.lb[s..]) - <$S8>::from_slice(&rub[s..])).nd();
+                    let hi = (<$S8>::from_slice(&self.ub[s..]) - <$S8>::from_slice(&rlb[s..])).nu();
+                    self.lb[s..s + L].copy_from_slice(&lo.to_array());
+                    self.ub[s..s + L].copy_from_slice(&hi.to_array());
+                }
+                for j in (chunks * L)..n {
+                    self.lb[j] = (self.lb[j] - rub[j]).nd();
+                    self.ub[j] = (self.ub[j] - rlb[j]).nu();
+                }
+            }
+        }
+
+        impl<'a, Rhs: AsFlintSlice<$T>> Mul<Rhs> for FlintViewMut<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn mul(self, rhs: Rhs) -> FlintVec<$T> {
+                FlintView::<$T> { lb: self.lb, ub: self.ub } * rhs
+            }
+        }
+
+        impl<Rhs: AsFlintSlice<$T>> MulAssign<Rhs> for FlintViewMut<'_, $T> {
+            fn mul_assign(&mut self, rhs: Rhs) {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = rhs.lb_slice();
+                let rub = rhs.ub_slice();
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let slb = <$S8>::from_slice(&self.lb[s..]);
+                    let sub = <$S8>::from_slice(&self.ub[s..]);
+                    let rl = <$S8>::from_slice(&rlb[s..]);
+                    let ru = <$S8>::from_slice(&rub[s..]);
+                    let p1 = slb * rl;
+                    let p2 = slb * ru;
+                    let p3 = sub * rl;
+                    let p4 = sub * ru;
+                    let lo = p1.simd_min(p2).simd_min(p3).simd_min(p4).nd();
+                    let hi = p1.simd_max(p2).simd_max(p3).simd_max(p4).nu();
+                    self.lb[s..s + L].copy_from_slice(&lo.to_array());
+                    self.ub[s..s + L].copy_from_slice(&hi.to_array());
+                }
+                for j in (chunks * L)..n {
+                    let p1 = self.lb[j] * rlb[j];
+                    let p2 = self.lb[j] * rub[j];
+                    let p3 = self.ub[j] * rlb[j];
+                    let p4 = self.ub[j] * rub[j];
+                    self.lb[j] = p1.min(p2).min(p3).min(p4).nd();
+                    self.ub[j] = p1.max(p2).max(p3).max(p4).nu();
+                }
+            }
+        }
+
+        impl<'a, Rhs: AsFlintSlice<$T>> Div<Rhs> for FlintViewMut<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn div(self, rhs: Rhs) -> FlintVec<$T> {
+                FlintView::<$T> { lb: self.lb, ub: self.ub } / rhs
+            }
+        }
+
+        impl<Rhs: AsFlintSlice<$T>> DivAssign<Rhs> for FlintViewMut<'_, $T> {
+            fn div_assign(&mut self, rhs: Rhs) {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = rhs.lb_slice();
+                let rub = rhs.ub_slice();
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let slb = <$S8>::from_slice(&self.lb[s..]);
+                    let sub = <$S8>::from_slice(&self.ub[s..]);
+                    let rl = <$S8>::from_slice(&rlb[s..]);
+                    let ru = <$S8>::from_slice(&rub[s..]);
+                    let q1 = slb / rl;
+                    let q2 = slb / ru;
+                    let q3 = sub / rl;
+                    let q4 = sub / ru;
+                    let lo = q1.simd_min(q2).simd_min(q3).simd_min(q4).nd();
+                    let hi = q1.simd_max(q2).simd_max(q3).simd_max(q4).nu();
+                    self.lb[s..s + L].copy_from_slice(&lo.to_array());
+                    self.ub[s..s + L].copy_from_slice(&hi.to_array());
+                }
+                for j in (chunks * L)..n {
+                    let q1 = self.lb[j] / rlb[j];
+                    let q2 = self.lb[j] / rub[j];
+                    let q3 = self.ub[j] / rlb[j];
+                    let q4 = self.ub[j] / rub[j];
+                    self.lb[j] = q1.min(q2).min(q3).min(q4).nd();
+                    self.ub[j] = q1.max(q2).max(q3).max(q4).nu();
+                }
+            }
+        }
     };
 }
 
@@ -1114,5 +1381,209 @@ mod test {
         let sum = va + vb;
         assert!(sum.lb[0] <= 4.0_f64 && 4.0_f64 <= sum.ub[0]);
         assert!(sum.lb[1] <= 6.0_f64 && 6.0_f64 <= sum.ub[1]);
+    }
+
+    // ---- FlintMut scalar arithmetic ----
+
+    #[test]
+    fn test_mut_neg() {
+        let a = flint64!(2.0_f64);
+        let mut lb = a.lb;
+        let mut ub = a.ub;
+        let m = FlintMut { lb: &mut lb, ub: &mut ub };
+        let neg = -m;
+        assert!(neg.lb <= -2.0_f64 && -2.0_f64 <= neg.ub);
+        assert!(neg.lb < 0.0 && neg.ub < 0.0);
+    }
+
+    #[test]
+    fn test_mut_add_sub() {
+        let a = flint64!(1.0_f64);
+        let b = flint64!(2.0_f64);
+        let mut lb = a.lb;
+        let mut ub = a.ub;
+        let m = FlintMut { lb: &mut lb, ub: &mut ub };
+        let sum = m + b;
+        assert!(sum.lb <= 3.0_f64 && 3.0_f64 <= sum.ub);
+
+        let mut lb2 = a.lb;
+        let mut ub2 = a.ub;
+        let m2 = FlintMut { lb: &mut lb2, ub: &mut ub2 };
+        let diff = m2 - flint64!(0.5_f64);
+        assert!(diff.lb <= 0.5_f64 && 0.5_f64 <= diff.ub);
+    }
+
+    #[test]
+    fn test_mut_mul_div() {
+        let a = flint64!(3.0_f64);
+        let mut lb = a.lb;
+        let mut ub = a.ub;
+        let m = FlintMut { lb: &mut lb, ub: &mut ub };
+        let prod = m * flint64!(2.0_f64);
+        assert!(prod.lb <= 6.0_f64 && 6.0_f64 <= prod.ub);
+
+        let mut lb2 = a.lb;
+        let mut ub2 = a.ub;
+        let m2 = FlintMut { lb: &mut lb2, ub: &mut ub2 };
+        let quot = m2 / flint64!(2.0_f64);
+        assert!(quot.lb <= 1.5_f64 && 1.5_f64 <= quot.ub);
+    }
+
+    #[test]
+    fn test_mut_assign_ops() {
+        let a = flint64!(1.0_f64);
+        let mut lb = a.lb;
+        let mut ub = a.ub;
+
+        // add_assign
+        {
+            let mut m = FlintMut { lb: &mut lb, ub: &mut ub };
+            m += flint64!(2.0_f64);
+        }
+        assert!(lb <= 3.0_f64 && 3.0_f64 <= ub);
+
+        // sub_assign
+        {
+            let mut m = FlintMut { lb: &mut lb, ub: &mut ub };
+            m -= flint64!(1.0_f64);
+        }
+        assert!(lb <= 2.0_f64 && 2.0_f64 <= ub);
+
+        // mul_assign
+        {
+            let mut m = FlintMut { lb: &mut lb, ub: &mut ub };
+            m *= flint64!(3.0_f64);
+        }
+        assert!(lb <= 6.0_f64 && 6.0_f64 <= ub);
+
+        // div_assign
+        {
+            let mut m = FlintMut { lb: &mut lb, ub: &mut ub };
+            m /= flint64!(2.0_f64);
+        }
+        assert!(lb <= 3.0_f64 && 3.0_f64 <= ub);
+    }
+
+    #[test]
+    fn test_mut_assign_writes_through() {
+        // Verify the assign op actually mutates the underlying floats,
+        // not just local copies.
+        let mut val_lb = 1.0_f32.nd();
+        let mut val_ub = 1.0_f32.nu();
+        let original_lb = val_lb;
+        {
+            let mut m = FlintMut { lb: &mut val_lb, ub: &mut val_ub };
+            m += flint32!(1.0_f32);
+        }
+        assert!(val_lb != original_lb, "lb should have changed after add_assign");
+        assert!(val_lb <= 2.0_f32 && 2.0_f32 <= val_ub);
+    }
+
+    // ---- FlintViewMut array arithmetic ----
+
+    #[test]
+    fn test_view_mut_neg() {
+        let v = flint64_vec![1.0_f64, -2.0_f64];
+        let mut lb = v.lb.clone();
+        let mut ub = v.ub.clone();
+        let vm = FlintViewMut { lb: &mut lb, ub: &mut ub };
+        let neg = -vm;
+        assert!(neg.lb[0] <= -1.0_f64 && -1.0_f64 <= neg.ub[0]);
+        assert!(neg.lb[1] <= 2.0_f64 && 2.0_f64 <= neg.ub[1]);
+    }
+
+    #[test]
+    fn test_view_mut_add_matches_view() {
+        // FlintViewMut + rhs should give the same result as FlintView + rhs
+        let a = flint64_vec![1.0_f64, 2.0_f64, 3.0_f64];
+        let b = flint64_vec![4.0_f64, 5.0_f64, 6.0_f64];
+
+        let va = FlintView { lb: &a.lb, ub: &a.ub };
+        let vb = FlintView { lb: &b.lb, ub: &b.ub };
+        let expected = va + vb;
+
+        let mut lb_m = a.lb.clone();
+        let mut ub_m = a.ub.clone();
+        let vma = FlintViewMut { lb: &mut lb_m, ub: &mut ub_m };
+        let vb2 = FlintView { lb: &b.lb, ub: &b.ub };
+        let result = vma + vb2;
+
+        assert_eq!(expected.lb, result.lb);
+        assert_eq!(expected.ub, result.ub);
+    }
+
+    #[test]
+    fn test_view_mut_add_assign() {
+        let a = flint64_vec![1.0_f64, 2.0_f64, 3.0_f64];
+        let b = flint64_vec![4.0_f64, 5.0_f64, 6.0_f64];
+        let mut lb = a.lb.clone();
+        let mut ub = a.ub.clone();
+        {
+            let mut vm = FlintViewMut { lb: &mut lb, ub: &mut ub };
+            vm += FlintView { lb: &b.lb, ub: &b.ub };
+        }
+        assert!(lb[0] <= 5.0_f64 && 5.0_f64 <= ub[0]);
+        assert!(lb[1] <= 7.0_f64 && 7.0_f64 <= ub[1]);
+        assert!(lb[2] <= 9.0_f64 && 9.0_f64 <= ub[2]);
+    }
+
+    #[test]
+    fn test_view_mut_sub_assign() {
+        let a = flint64_vec![5.0_f64, 6.0_f64];
+        let b = flint64_vec![1.0_f64, 2.0_f64];
+        let mut lb = a.lb.clone();
+        let mut ub = a.ub.clone();
+        {
+            let mut vm = FlintViewMut { lb: &mut lb, ub: &mut ub };
+            vm -= FlintView { lb: &b.lb, ub: &b.ub };
+        }
+        assert!(lb[0] <= 4.0_f64 && 4.0_f64 <= ub[0]);
+        assert!(lb[1] <= 4.0_f64 && 4.0_f64 <= ub[1]);
+    }
+
+    #[test]
+    fn test_view_mut_mul_assign() {
+        let a = flint64_vec![2.0_f64, 3.0_f64];
+        let b = flint64_vec![4.0_f64, 5.0_f64];
+        let mut lb = a.lb.clone();
+        let mut ub = a.ub.clone();
+        {
+            let mut vm = FlintViewMut { lb: &mut lb, ub: &mut ub };
+            vm *= FlintView { lb: &b.lb, ub: &b.ub };
+        }
+        assert!(lb[0] <= 8.0_f64 && 8.0_f64 <= ub[0]);
+        assert!(lb[1] <= 15.0_f64 && 15.0_f64 <= ub[1]);
+    }
+
+    #[test]
+    fn test_view_mut_div_assign() {
+        let a = flint64_vec![6.0_f64, 9.0_f64];
+        let b = flint64_vec![2.0_f64, 3.0_f64];
+        let mut lb = a.lb.clone();
+        let mut ub = a.ub.clone();
+        {
+            let mut vm = FlintViewMut { lb: &mut lb, ub: &mut ub };
+            vm /= FlintView { lb: &b.lb, ub: &b.ub };
+        }
+        assert!(lb[0] <= 3.0_f64 && 3.0_f64 <= ub[0]);
+        assert!(lb[1] <= 3.0_f64 && 3.0_f64 <= ub[1]);
+    }
+
+    #[test]
+    fn test_view_mut_assign_writes_through() {
+        // Verify the assign op mutates the underlying vec data
+        let a = flint32_vec![1.0_f32, 2.0_f32, 3.0_f32];
+        let b = flint32_vec![1.0_f32, 1.0_f32, 1.0_f32];
+        let mut lb = a.lb.clone();
+        let mut ub = a.ub.clone();
+        let original_lb0 = lb[0];
+        {
+            let mut vm = FlintViewMut { lb: &mut lb, ub: &mut ub };
+            vm += FlintView { lb: &b.lb, ub: &b.ub };
+        }
+        assert!(lb[0] != original_lb0, "lb[0] should have changed");
+        assert!(lb[0] <= 2.0_f32 && 2.0_f32 <= ub[0]);
+        assert!(lb[1] <= 3.0_f32 && 3.0_f32 <= ub[1]);
+        assert!(lb[2] <= 4.0_f32 && 4.0_f32 <= ub[2]);
     }
 }
