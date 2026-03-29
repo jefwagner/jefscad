@@ -17,75 +17,8 @@ notebook) in editable mode with pip install -e (or the UV equivalent).
 [x] Create a simple python unit test (using pytest package)
 [x] Create a jupyter notebook the demos the use of the python package
 
-### Environment setup (pyo3 + maturin + UV)
-
-**Tools**
-- `maturin` — builds the Rust extension and packages it as a Python wheel.
-- `uv` — manages the Python virtual environment and Python dependencies.
-- Rust nightly is required by `flint` (`portable_simd`, `macro_metavar_expr`).
-
-**Project layout**
-```
-repo root/
-├── pyproject.toml          # maturin build config + project metadata
-├── .venv/                  # UV-managed virtualenv (gitignored)
-├── python/jefscad/         # thin Python wrapper package
-│   └── __init__.py         # re-exports from ._jefscad (the Rust extension)
-├── tests/                  # pytest test suite
-│   └── test_hello.py
-├── notebooks/              # Jupyter notebooks
-│   └── playground.ipynb
-└── jefscad/                # Rust crate (source of the extension)
-    ├── Cargo.toml
-    └── src/lib.rs
-```
-
-The Rust crate builds to `jefscad._jefscad` (underscore prefix = private
-implementation detail). `python/jefscad/__init__.py` re-exports the public API
-so users write `from jefscad import HelloWorld`, not `from jefscad._jefscad import ...`.
-
-The `extension-module` pyo3 feature is optional in `jefscad/Cargo.toml` so that
-`cargo +nightly test` works without linking Python.
-
-**One-time setup**
-```bash
-# 1. Create the virtualenv (run once from the repo root)
-uv venv .venv
-
-# 2. Install Python dev dependencies into the venv
-uv pip install --python .venv/bin/python maturin pytest jupyterlab ipykernel
-
-# 3. Build the Rust extension and install it in editable mode
-#    (CONDA_PREFIX must be unset if you use miniconda/anaconda)
-unset CONDA_PREFIX
-VIRTUAL_ENV=$(pwd)/.venv .venv/bin/maturin develop --features extension-module
-```
-
-**Daily dev loop**
-```bash
-# After any change to Rust code — recompile and reinstall:
-unset CONDA_PREFIX
-VIRTUAL_ENV=$(pwd)/.venv .venv/bin/maturin develop --features extension-module
-
-# Run Rust tests (no Python needed):
-cargo +nightly test
-
-# Run Python tests:
-unset CONDA_PREFIX
-VIRTUAL_ENV=$(pwd)/.venv .venv/bin/pytest -v
-
-# Launch Jupyter:
-unset CONDA_PREFIX
-VIRTUAL_ENV=$(pwd)/.venv .venv/bin/jupyter lab notebooks/playground.ipynb
-```
-
-**Gotchas**
-- `CONDA_PREFIX` and `VIRTUAL_ENV` cannot both be set when running maturin.
-  If you use miniconda, always `unset CONDA_PREFIX` before running maturin or pytest.
-- The `.venv/` directory is gitignored. New contributors must run the one-time setup.
-- The compiled `.so` (`python/jefscad/_jefscad.cpython-*.so`) is also gitignored.
-  Running `maturin develop` regenerates it.
-- Always use `cargo +nightly` (no `rust-toolchain.toml` in this repo).
+See [DEVELOPMENT.md](../DEVELOPMENT.md) for environment setup, build commands,
+running tests, and the Jupyter workflow.
 
 ## Construct Solid Geometry Layer
 
