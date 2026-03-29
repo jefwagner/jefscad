@@ -175,6 +175,36 @@ impl_large_uint!(f64, u64);
 impl_large_uint!(f64, u128);
 impl_large_uint!(f64, usize);
 
+// -------------------------------------------
+// From [f32; N] / [f64; N] -> FlintArray<T,N>
+// -------------------------------------------
+
+impl<const N: usize> From<[f32; N]> for FlintArray<f32, N> {
+    fn from(arr: [f32; N]) -> Self {
+        let mut lb = [0.0_f32; N];
+        let mut ub = [0.0_f32; N];
+        for i in 0..N {
+            let f = Flint::from(arr[i]);
+            lb[i] = f.lb;
+            ub[i] = f.ub;
+        }
+        FlintArray { lb, ub }
+    }
+}
+
+impl<const N: usize> From<[f64; N]> for FlintArray<f64, N> {
+    fn from(arr: [f64; N]) -> Self {
+        let mut lb = [0.0_f64; N];
+        let mut ub = [0.0_f64; N];
+        for i in 0..N {
+            let f = Flint::from(arr[i]);
+            lb[i] = f.lb;
+            ub[i] = f.ub;
+        }
+        FlintArray { lb, ub }
+    }
+}
+
 // --------------------------------------------
 // macro for simplfied flint and array creation
 // --------------------------------------------
@@ -548,6 +578,31 @@ mod test {
         let f = flint64!(255_u8);
         assert_eq!(0.0, width(f));
         assert_eq!(255.0_f64, f.lb);
+    }
+
+    #[test]
+    fn test_from_float_array() {
+        // From<[f32; N]> — each element gets nd/nu expansion
+        let arr: FlintArray<f32, 3> = [1.0_f32, 0.2_f32, -1.0_f32].into();
+        for i in 0..3 {
+            assert!(arr.lb[i] <= arr.ub[i], "lb must be <= ub at index {i}");
+        }
+        // 1.0 is exactly representable in f32 — interval straddles it
+        assert!(arr.lb[0] < 1.0_f32 && 1.0_f32 < arr.ub[0]);
+        // 0.2 is not exactly representable
+        assert!(arr.lb[1] < 0.2_f32 && 0.2_f32 < arr.ub[1]);
+        // negative value: lb < -1.0 < ub
+        assert!(arr.lb[2] < -1.0_f32 && -1.0_f32 < arr.ub[2]);
+
+        // From<[f64; N]> — same guarantees
+        let arr: FlintArray<f64, 2> = [1.0_f64, 0.1_f64].into();
+        assert!(arr.lb[0] < 1.0_f64 && 1.0_f64 < arr.ub[0]);
+        assert!(arr.lb[1] < 0.1_f64 && 0.1_f64 < arr.ub[1]);
+
+        // integer-valued floats: exact representation — lb < val < ub still holds
+        // (nd/nu always expand by at least 1 ULP, so lb < exact < ub)
+        let arr: FlintArray<f32, 1> = [3.0_f32].into();
+        assert!(arr.lb[0] < 3.0_f32 && 3.0_f32 < arr.ub[0]);
     }
 
     #[test]
