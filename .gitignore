@@ -9,6 +9,13 @@ Cargo.lock
 # Personal knowledge base (may be a symlink to ../kb)
 kb
 
+# Python environment and build artifacts
+.venv/
+python/jefscad/*.so
+__pycache__/
+*.pyc
+.pytest_cache/
+
 # Editor and OS files
 .vscode/
 .idea/

@@ -6,4 +6,17 @@ authors = ["Jef Wagner <jefwagner@gmail.com>"]
 license = "MIT"
 description = "Solid modeling language"
 
+# cdylib  — produces the Python extension .so
+# rlib    — lets `cargo test` and other Rust crates link against this crate
+[lib]
+# _jefscad becomes jefscad._jefscad in Python; __init__.py re-exports from it.
+name = "_jefscad"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
+# pyo3 is optional so that `cargo +nightly test` works without linking Python.
+# maturin activates the "extension-module" feature when building for Python.
+pyo3 = { version = "0.28", optional = true }
+
+[features]
+extension-module = ["pyo3/extension-module"]

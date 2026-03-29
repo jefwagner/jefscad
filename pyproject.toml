@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "jefscad"
+version = "0.1.0"
+description = "Solid modeling language exposed as a Python package"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "jupyterlab",
+    "ipykernel",
+]
+
+[tool.maturin]
+# Which Rust crate to build
+manifest-path = "jefscad/Cargo.toml"
+# Dotted module path: Python package "jefscad", Rust submodule "_jefscad"
+module-name = "jefscad._jefscad"
+# The pure-Python package lives here; maturin merges it with the compiled extension
+python-source = "python"
+# Activate the pyo3 extension-module feature when building for Python
+features = ["extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
