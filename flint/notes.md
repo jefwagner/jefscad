@@ -68,8 +68,8 @@ macros for creating array-types.
 
 [x] Implement unit tests for converting from standard numeric types to scalar Flints
 [x] Implement `From` or `Into` traits for standard numeric types
-[_] Implement unit tests for converting multiple values into array Flints
-[_] Implement macros that create array Flints from arbitrary numeric types
+[x] Implement unit tests for converting multiple values into array Flints
+[x] Implement macros that create array Flints from arbitrary numeric types
 
 ### Comparisons
 
@@ -80,9 +80,16 @@ return an array of bools instead of a single bool.
 
 [x] Implement unit tests for comparisons with scalar Flint types
 [x] Implement scalar comparisons
-[_] Figure out and document the appropriate equivalent comparisons for array types
-[_] Implement unit tests for array comparisons
-[_] Implement array comparisons
+[x] Figure out and document the appropriate equivalent comparisons for array types
+    Decision: do NOT implement PartialEq/PartialOrd for array types — the return type
+    would need to be an array of bools, which the standard traits cannot express.
+    Instead, provide named methods on each array type:
+      - eq_intervals / lt_intervals / gt_intervals -> [bool;N] or Vec<bool>
+      - all_eq / all_lt / all_gt -> bool (aggregates)
+    FlintArray uses SIMD (portable_simd) for the element-wise methods.
+    FlintVec and FlintView use chunked SIMD (lane=8) with scalar fallback.
+[x] Implement unit tests for array comparisons
+[x] Implement array comparisons
 
 ### Arithmatic
 
@@ -91,8 +98,11 @@ We would like to implement the arithmatic operators: unary `-`, `+`, `+=`, `-`, 
 implement `Into` flint. The output for the non-assignments are always an owned type,
 but the assignment operators can reassign the ref-types.
 
-[_] implement unit tests for scalar, and matching size array arithmatic
-[_] Implement scalar and matching size array arithmatic
+[x] implement unit tests for scalar, and matching size array arithmatic
+[x] Implement scalar and matching size array arithmatic
+    Scalar (Flint, FlintRef): Neg, Add, Sub, Mul, Div + *Assign ops; Rhs generic over Into<Flint<T>>.
+    Arrays (FlintArray, FlintVec, FlintView): element-wise SIMD; chunked f32x8/f64x8 for Vec/View
+    with scalar remainder; 4-boundary min/max for Mul/Div; FlintView ops return FlintVec (owned).
 
 ### Broadcasting
 

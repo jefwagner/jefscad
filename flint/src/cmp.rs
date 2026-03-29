@@ -1,7 +1,8 @@
 use num_traits::Float;
 use std::cmp::{Ordering, PartialEq, PartialOrd};
+use std::simd::prelude::*;
 
-use crate::{Flint, FlintRef};
+use crate::{Flint, FlintArray, FlintRef, FlintVec, FlintView};
 
 // ----------------------
 // Copmarisons for Flints
@@ -293,6 +294,260 @@ impl_partial_cmp!(f64, u64);
 impl_partial_cmp!(f64, u128);
 impl_partial_cmp!(f64, usize);
 
+// ----------------------------------------------------
+// Comparisons for FlintArray
+// ----------------------------------------------------
+
+impl<const N: usize> FlintArray<f32, N> {
+    /// Returns an element-wise array indicating whether each interval pair overlaps.
+    pub fn eq_intervals(&self, other: &Self) -> [bool; N] {
+        let self_lb = Simd::<f32, N>::from_array(self.lb);
+        let self_ub = Simd::<f32, N>::from_array(self.ub);
+        let other_lb = Simd::<f32, N>::from_array(other.lb);
+        let other_ub = Simd::<f32, N>::from_array(other.ub);
+        (self_ub.simd_ge(other_lb) & self_lb.simd_le(other_ub)).to_array()
+    }
+
+    /// Returns an element-wise array indicating whether each self interval lies
+    /// entirely below the corresponding other interval (no overlap, self upper < other lower).
+    pub fn lt_intervals(&self, other: &Self) -> [bool; N] {
+        Simd::<f32, N>::from_array(self.ub)
+            .simd_lt(Simd::<f32, N>::from_array(other.lb))
+            .to_array()
+    }
+
+    /// Returns an element-wise array indicating whether each self interval lies
+    /// entirely above the corresponding other interval (no overlap, self lower > other upper).
+    pub fn gt_intervals(&self, other: &Self) -> [bool; N] {
+        Simd::<f32, N>::from_array(self.lb)
+            .simd_gt(Simd::<f32, N>::from_array(other.ub))
+            .to_array()
+    }
+
+    /// True iff every element pair overlaps.
+    pub fn all_eq(&self, other: &Self) -> bool {
+        self.eq_intervals(other).iter().all(|&b| b)
+    }
+
+    /// True iff every self interval lies entirely below the corresponding other interval.
+    pub fn all_lt(&self, other: &Self) -> bool {
+        self.lt_intervals(other).iter().all(|&b| b)
+    }
+
+    /// True iff every self interval lies entirely above the corresponding other interval.
+    pub fn all_gt(&self, other: &Self) -> bool {
+        self.gt_intervals(other).iter().all(|&b| b)
+    }
+}
+
+impl<const N: usize> FlintArray<f64, N> {
+    /// Returns an element-wise array indicating whether each interval pair overlaps.
+    pub fn eq_intervals(&self, other: &Self) -> [bool; N] {
+        let self_lb = Simd::<f64, N>::from_array(self.lb);
+        let self_ub = Simd::<f64, N>::from_array(self.ub);
+        let other_lb = Simd::<f64, N>::from_array(other.lb);
+        let other_ub = Simd::<f64, N>::from_array(other.ub);
+        (self_ub.simd_ge(other_lb) & self_lb.simd_le(other_ub)).to_array()
+    }
+
+    /// Returns an element-wise array indicating whether each self interval lies
+    /// entirely below the corresponding other interval (no overlap, self upper < other lower).
+    pub fn lt_intervals(&self, other: &Self) -> [bool; N] {
+        Simd::<f64, N>::from_array(self.ub)
+            .simd_lt(Simd::<f64, N>::from_array(other.lb))
+            .to_array()
+    }
+
+    /// Returns an element-wise array indicating whether each self interval lies
+    /// entirely above the corresponding other interval (no overlap, self lower > other upper).
+    pub fn gt_intervals(&self, other: &Self) -> [bool; N] {
+        Simd::<f64, N>::from_array(self.lb)
+            .simd_gt(Simd::<f64, N>::from_array(other.ub))
+            .to_array()
+    }
+
+    /// True iff every element pair overlaps.
+    pub fn all_eq(&self, other: &Self) -> bool {
+        self.eq_intervals(other).iter().all(|&b| b)
+    }
+
+    /// True iff every self interval lies entirely below the corresponding other interval.
+    pub fn all_lt(&self, other: &Self) -> bool {
+        self.lt_intervals(other).iter().all(|&b| b)
+    }
+
+    /// True iff every self interval lies entirely above the corresponding other interval.
+    pub fn all_gt(&self, other: &Self) -> bool {
+        self.gt_intervals(other).iter().all(|&b| b)
+    }
+}
+
+// ---------------------------------------------------------------
+// Comparisons for FlintVec and FlintView (chunked SIMD, lane = 8)
+// ---------------------------------------------------------------
+
+// Generates element-wise and aggregate comparison methods for both
+// FlintVec<$T> and FlintView<'_, $T>.  Inner loops use $S8 (a Simd<$T, 8>
+// alias) for SIMD throughput; a scalar tail handles any remainder.
+macro_rules! impl_vec_view_cmp {
+    ($T:ty, $S8:ty) => {
+        impl FlintVec<$T> {
+            /// Returns an element-wise vec indicating whether each interval pair overlaps.
+            pub fn eq_intervals(&self, other: &Self) -> Vec<bool> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..(n / L) {
+                    let s = i * L;
+                    out.extend_from_slice(
+                        &(<$S8>::from_slice(&self.ub[s..]).simd_ge(<$S8>::from_slice(&other.lb[s..]))
+                            & <$S8>::from_slice(&self.lb[s..]).simd_le(<$S8>::from_slice(&other.ub[s..])))
+                        .to_array(),
+                    );
+                }
+                for j in (n / L * L)..n {
+                    out.push(self.ub[j] >= other.lb[j] && self.lb[j] <= other.ub[j]);
+                }
+                out
+            }
+
+            /// Returns an element-wise vec indicating whether each self interval lies
+            /// entirely below the corresponding other interval.
+            pub fn lt_intervals(&self, other: &Self) -> Vec<bool> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..(n / L) {
+                    let s = i * L;
+                    out.extend_from_slice(
+                        &<$S8>::from_slice(&self.ub[s..])
+                            .simd_lt(<$S8>::from_slice(&other.lb[s..]))
+                            .to_array(),
+                    );
+                }
+                for j in (n / L * L)..n {
+                    out.push(self.ub[j] < other.lb[j]);
+                }
+                out
+            }
+
+            /// Returns an element-wise vec indicating whether each self interval lies
+            /// entirely above the corresponding other interval.
+            pub fn gt_intervals(&self, other: &Self) -> Vec<bool> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..(n / L) {
+                    let s = i * L;
+                    out.extend_from_slice(
+                        &<$S8>::from_slice(&self.lb[s..])
+                            .simd_gt(<$S8>::from_slice(&other.ub[s..]))
+                            .to_array(),
+                    );
+                }
+                for j in (n / L * L)..n {
+                    out.push(self.lb[j] > other.ub[j]);
+                }
+                out
+            }
+
+            /// True iff every element pair overlaps.
+            pub fn all_eq(&self, other: &Self) -> bool {
+                self.eq_intervals(other).iter().all(|&b| b)
+            }
+
+            /// True iff every self interval lies entirely below the corresponding other interval.
+            pub fn all_lt(&self, other: &Self) -> bool {
+                self.lt_intervals(other).iter().all(|&b| b)
+            }
+
+            /// True iff every self interval lies entirely above the corresponding other interval.
+            pub fn all_gt(&self, other: &Self) -> bool {
+                self.gt_intervals(other).iter().all(|&b| b)
+            }
+        }
+
+        impl<'a> FlintView<'a, $T> {
+            /// Returns an element-wise vec indicating whether each interval pair overlaps.
+            pub fn eq_intervals(&self, other: &Self) -> Vec<bool> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..(n / L) {
+                    let s = i * L;
+                    out.extend_from_slice(
+                        &(<$S8>::from_slice(&self.ub[s..]).simd_ge(<$S8>::from_slice(&other.lb[s..]))
+                            & <$S8>::from_slice(&self.lb[s..]).simd_le(<$S8>::from_slice(&other.ub[s..])))
+                        .to_array(),
+                    );
+                }
+                for j in (n / L * L)..n {
+                    out.push(self.ub[j] >= other.lb[j] && self.lb[j] <= other.ub[j]);
+                }
+                out
+            }
+
+            /// Returns an element-wise vec indicating whether each self interval lies
+            /// entirely below the corresponding other interval.
+            pub fn lt_intervals(&self, other: &Self) -> Vec<bool> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..(n / L) {
+                    let s = i * L;
+                    out.extend_from_slice(
+                        &<$S8>::from_slice(&self.ub[s..])
+                            .simd_lt(<$S8>::from_slice(&other.lb[s..]))
+                            .to_array(),
+                    );
+                }
+                for j in (n / L * L)..n {
+                    out.push(self.ub[j] < other.lb[j]);
+                }
+                out
+            }
+
+            /// Returns an element-wise vec indicating whether each self interval lies
+            /// entirely above the corresponding other interval.
+            pub fn gt_intervals(&self, other: &Self) -> Vec<bool> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let mut out = Vec::with_capacity(n);
+                for i in 0..(n / L) {
+                    let s = i * L;
+                    out.extend_from_slice(
+                        &<$S8>::from_slice(&self.lb[s..])
+                            .simd_gt(<$S8>::from_slice(&other.ub[s..]))
+                            .to_array(),
+                    );
+                }
+                for j in (n / L * L)..n {
+                    out.push(self.lb[j] > other.ub[j]);
+                }
+                out
+            }
+
+            /// True iff every element pair overlaps.
+            pub fn all_eq(&self, other: &Self) -> bool {
+                self.eq_intervals(other).iter().all(|&b| b)
+            }
+
+            /// True iff every self interval lies entirely below the corresponding other interval.
+            pub fn all_lt(&self, other: &Self) -> bool {
+                self.lt_intervals(other).iter().all(|&b| b)
+            }
+
+            /// True iff every self interval lies entirely above the corresponding other interval.
+            pub fn all_gt(&self, other: &Self) -> bool {
+                self.gt_intervals(other).iter().all(|&b| b)
+            }
+        }
+    };
+}
+
+impl_vec_view_cmp!(f32, f32x8);
+impl_vec_view_cmp!(f64, f64x8);
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -581,5 +836,192 @@ mod test {
             Some(Ordering::Greater),
             finf.as_ref().partial_cmp(&fa.as_ref())
         );
+    }
+
+    // ---- FlintArray comparisons ----
+
+    #[test]
+    fn test_array_cmp_flintarray_f32() {
+        // a: [0,1], [2,3], [4,5], [6,7]
+        let a: FlintArray<f32, 4> = FlintArray {
+            lb: [0.0, 2.0, 4.0, 6.0],
+            ub: [1.0, 3.0, 5.0, 7.0],
+        };
+        // b overlaps a at every element
+        let b: FlintArray<f32, 4> = FlintArray {
+            lb: [0.5, 2.5, 4.5, 6.5],
+            ub: [1.5, 3.5, 5.5, 7.5],
+        };
+        // c is entirely above a at every element
+        let c: FlintArray<f32, 4> = FlintArray {
+            lb: [2.0, 4.0, 6.0, 8.0],
+            ub: [3.0, 5.0, 7.0, 9.0],
+        };
+        // d is entirely below a at every element
+        let d: FlintArray<f32, 4> = FlintArray {
+            lb: [-3.0; 4],
+            ub: [-2.0; 4],
+        };
+        // n has NaN in first element, otherwise matches a's intervals
+        let n: FlintArray<f32, 4> = FlintArray {
+            lb: [f32::NAN, 2.0, 4.0, 6.0],
+            ub: [f32::NAN, 3.0, 5.0, 7.0],
+        };
+        // touch_a and touch_b share endpoint 1.0 → equal (overlap at a single point)
+        let touch_a: FlintArray<f32, 4> = FlintArray {
+            lb: [0.0; 4],
+            ub: [1.0; 4],
+        };
+        let touch_b: FlintArray<f32, 4> = FlintArray {
+            lb: [1.0; 4],
+            ub: [2.0; 4],
+        };
+
+        // eq_intervals
+        assert_eq!(a.eq_intervals(&a), [true; 4]);
+        assert_eq!(a.eq_intervals(&b), [true; 4]);
+        assert_eq!(a.eq_intervals(&c), [false; 4]);
+        assert_eq!(a.eq_intervals(&d), [false; 4]);
+        assert_eq!(a.eq_intervals(&n), [false, true, true, true]); // n[0] is NaN
+        assert_eq!(touch_a.eq_intervals(&touch_b), [true; 4]); // touching = equal
+
+        // lt_intervals: self.ub < other.lb
+        assert_eq!(a.lt_intervals(&c), [true; 4]); // a entirely below c
+        assert_eq!(c.lt_intervals(&a), [false; 4]); // c is above a, not below
+        assert_eq!(a.lt_intervals(&b), [false; 4]); // overlap → not lt
+        assert_eq!(n.lt_intervals(&c), [false, true, true, true]); // NaN → false
+
+        // gt_intervals: self.lb > other.ub
+        assert_eq!(c.gt_intervals(&a), [true; 4]); // c entirely above a
+        assert_eq!(a.gt_intervals(&c), [false; 4]); // a is below c, not above
+        assert_eq!(a.gt_intervals(&b), [false; 4]); // overlap → not gt
+        assert_eq!(n.gt_intervals(&d), [false, true, true, true]); // NaN → false
+
+        // all_* aggregates
+        assert!(a.all_eq(&b));
+        assert!(!a.all_eq(&c));
+        assert!(a.all_lt(&c));
+        assert!(!a.all_lt(&b)); // overlap → not all_lt
+        assert!(c.all_gt(&a));
+        assert!(!b.all_gt(&a)); // overlap → not all_gt
+    }
+
+    #[test]
+    fn test_array_cmp_flintarray_f64() {
+        let a: FlintArray<f64, 4> = FlintArray {
+            lb: [0.0, 2.0, 4.0, 6.0],
+            ub: [1.0, 3.0, 5.0, 7.0],
+        };
+        let b: FlintArray<f64, 4> = FlintArray {
+            lb: [0.5, 2.5, 4.5, 6.5],
+            ub: [1.5, 3.5, 5.5, 7.5],
+        };
+        let c: FlintArray<f64, 4> = FlintArray {
+            lb: [2.0, 4.0, 6.0, 8.0],
+            ub: [3.0, 5.0, 7.0, 9.0],
+        };
+        let nan: FlintArray<f64, 4> = FlintArray {
+            lb: [f64::NAN, 2.0, 4.0, 6.0],
+            ub: [f64::NAN, 3.0, 5.0, 7.0],
+        };
+
+        assert_eq!(a.eq_intervals(&b), [true; 4]);
+        assert_eq!(a.eq_intervals(&c), [false; 4]);
+        assert_eq!(a.eq_intervals(&nan), [false, true, true, true]);
+        assert_eq!(a.lt_intervals(&c), [true; 4]);
+        assert_eq!(c.gt_intervals(&a), [true; 4]);
+        assert!(a.all_eq(&b));
+        assert!(a.all_lt(&c));
+        assert!(c.all_gt(&a));
+        assert!(!a.all_lt(&b));
+    }
+
+    // ---- FlintVec comparisons ----
+
+    #[test]
+    fn test_array_cmp_flintvec_f32_len4() {
+        let a = FlintVec::<f32> {
+            lb: vec![0.0, 2.0, 4.0, 6.0],
+            ub: vec![1.0, 3.0, 5.0, 7.0],
+        };
+        let b = FlintVec::<f32> {
+            lb: vec![0.5, 2.5, 4.5, 6.5],
+            ub: vec![1.5, 3.5, 5.5, 7.5],
+        };
+        let c = FlintVec::<f32> {
+            lb: vec![2.0, 4.0, 6.0, 8.0],
+            ub: vec![3.0, 5.0, 7.0, 9.0],
+        };
+        let d = FlintVec::<f32> {
+            lb: vec![-3.0; 4],
+            ub: vec![-2.0; 4],
+        };
+
+        assert_eq!(a.eq_intervals(&b), vec![true; 4]);
+        assert_eq!(a.eq_intervals(&c), vec![false; 4]);
+        assert_eq!(a.lt_intervals(&c), vec![true; 4]);
+        assert_eq!(c.gt_intervals(&a), vec![true; 4]);
+        assert_eq!(a.gt_intervals(&d), vec![true; 4]);
+        assert!(a.all_eq(&b));
+        assert!(!a.all_eq(&c));
+        assert!(a.all_lt(&c));
+        assert!(c.all_gt(&a));
+    }
+
+    #[test]
+    fn test_array_cmp_flintvec_f32_len9() {
+        // length 9 = 8 + 1, exercises the chunked-SIMD remainder path
+        let a = FlintVec::<f32> {
+            lb: vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0],
+            ub: vec![1.0, 3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0],
+        };
+        // b overlaps a at every element
+        let b = FlintVec::<f32> {
+            lb: vec![0.5, 2.5, 4.5, 6.5, 8.5, 10.5, 12.5, 14.5, 16.5],
+            ub: vec![1.5, 3.5, 5.5, 7.5, 9.5, 11.5, 13.5, 15.5, 17.5],
+        };
+        // c is entirely above a
+        let c = FlintVec::<f32> {
+            lb: vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0],
+            ub: vec![3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0],
+        };
+
+        assert_eq!(a.eq_intervals(&b), vec![true; 9]);
+        assert_eq!(a.eq_intervals(&c), vec![false; 9]);
+        assert_eq!(a.lt_intervals(&c), vec![true; 9]);
+        assert_eq!(c.gt_intervals(&a), vec![true; 9]);
+        assert!(a.all_eq(&b));
+        assert!(a.all_lt(&c));
+        assert!(c.all_gt(&a));
+    }
+
+    // ---- FlintView comparisons ----
+
+    #[test]
+    fn test_array_cmp_flintview_f64() {
+        let va = FlintVec::<f64> {
+            lb: vec![0.0, 2.0, 4.0, 6.0],
+            ub: vec![1.0, 3.0, 5.0, 7.0],
+        };
+        let vb = FlintVec::<f64> {
+            lb: vec![0.5, 2.5, 4.5, 6.5],
+            ub: vec![1.5, 3.5, 5.5, 7.5],
+        };
+        let vc = FlintVec::<f64> {
+            lb: vec![2.0, 4.0, 6.0, 8.0],
+            ub: vec![3.0, 5.0, 7.0, 9.0],
+        };
+
+        let a = FlintView::<f64> { lb: &va.lb, ub: &va.ub };
+        let b = FlintView::<f64> { lb: &vb.lb, ub: &vb.ub };
+        let c = FlintView::<f64> { lb: &vc.lb, ub: &vc.ub };
+
+        assert_eq!(a.eq_intervals(&b), vec![true; 4]);
+        assert_eq!(a.eq_intervals(&c), vec![false; 4]);
+        assert_eq!(a.lt_intervals(&c), vec![true; 4]);
+        assert_eq!(c.gt_intervals(&a), vec![true; 4]);
+        assert!(a.all_eq(&b));
+        assert!(a.all_lt(&c));
+        assert!(c.all_gt(&a));
     }
 }
