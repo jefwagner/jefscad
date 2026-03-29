@@ -1,6 +1,7 @@
 #![feature(portable_simd)]
 #![feature(macro_metavar_expr)]
 
+use core::ops::Range;
 use std::simd::prelude::*;
 
 // Module for getting next representable floating point value
@@ -45,6 +46,14 @@ pub struct FlintRef<'a, T> {
     ub: &'a T,
 }
 
+/// A mutable reference to a Flint
+#[repr(C)]
+#[derive(Debug)]
+pub struct FlintMut<'a, T> {
+    lb: &'a mut T,
+    ub: &'a mut T,
+}
+
 /// An owned array of rounded floating point intervals
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -71,6 +80,14 @@ pub struct FlintView<'a, T> {
     ub: &'a [T],
 }
 
+/// A mutable slice of a floating point intervals
+#[repr(C)]
+#[derive(Debug)]
+pub struct FlintViewMut<'a, T> {
+    lb: &'a mut [T],
+    ub: &'a mut [T],
+}
+
 impl<'a, T> Flint<T> {
     /// Get a reference to the Flint object
     pub fn as_ref(&'a self) -> FlintRef<'a, T> {
@@ -81,8 +98,8 @@ impl<'a, T> Flint<T> {
     }
 
     /// Get a mutable reference to the flint object
-    pub fn as_mut(&'a mut self) -> FlintRef<'a, T> {
-        FlintRef {
+    pub fn as_mut(&'a mut self) -> FlintMut<'a, T> {
+        FlintMut {
             lb: &mut self.lb,
             ub: &mut self.ub,
         }
@@ -99,6 +116,97 @@ where
             lb: *self.lb,
             ub: *self.ub,
         }
+    }
+}
+
+impl<'a, T> FlintMut<'a, T>
+where
+    T: Copy,
+{
+    pub fn to_owned(&self) -> Flint<T> {
+        Flint {
+            lb: *self.lb,
+            ub: *self.ub,
+        }
+    }
+}
+
+pub trait FlintSoA<T> {
+    fn parts(&self) -> (&[T], &[T]);
+
+    fn get(&self, i: usize) -> Option<FlintRef<'_, T>> {
+        let (lb, ub) = self.parts();
+        Some(FlintRef {
+            lb: lb.get(i)?,
+            ub: ub.get(i)?,
+        })
+    }
+
+    fn slice(&self, r: core::ops::Range<usize>) -> FlintView<'_, T> {
+        let (lb, ub) = self.parts();
+        FlintView {
+            lb: &lb[r.clone()],
+            ub: &ub[r],
+        }
+    }
+}
+
+pub trait FlintSoAMut<T> {
+    fn parts_mut(&mut self) -> (&mut [T], &mut [T]);
+
+    fn get_mut(&mut self, i: usize) -> Option<FlintMut<'_, T>> {
+        let (lb, ub) = self.parts_mut();
+        Some(FlintMut {
+            lb: lb.get_mut(i)?,
+            ub: ub.get_mut(i)?,
+        })
+    }
+
+    fn slice_mut(&mut self, r: core::ops::Range<usize>) -> FlintViewMut<'_, T> {
+        let (lb, ub) = self.parts_mut();
+        FlintViewMut {
+            lb: &mut lb[r.clone()],
+            ub: &mut ub[r],
+        }
+    }
+}
+
+impl<T, const N: usize> FlintSoA<T> for FlintArray<T, N> {
+    fn parts(&self) -> (&[T], &[T]) {
+        (&self.lb[..], &self.ub[..])
+    }
+}
+impl<T, const N: usize> FlintSoAMut<T> for FlintArray<T, N> {
+    fn parts_mut(&mut self) -> (&mut [T], &mut [T]) {
+        (&mut self.lb[..], &mut self.ub[..])
+    }
+}
+
+impl<T> FlintSoA<T> for FlintVec<T> {
+    fn parts(&self) -> (&[T], &[T]) {
+        (&self.lb[..], &self.ub[..])
+    }
+}
+impl<T> FlintSoAMut<T> for FlintVec<T> {
+    fn parts_mut(&mut self) -> (&mut [T], &mut [T]) {
+        (&mut self.lb[..], &mut self.ub[..])
+    }
+}
+
+impl<'a, T> FlintSoA<T> for FlintView<'a, T> {
+    fn parts(&self) -> (&[T], &[T]) {
+        (self.lb, self.ub)
+    }
+}
+
+impl<'a, T> FlintSoA<T> for FlintViewMut<'a, T> {
+    fn parts(&self) -> (&[T], &[T]) {
+        (self.lb, self.ub)
+    }
+}
+impl<'a, T> FlintSoAMut<T> for FlintViewMut<'a, T> {
+    fn parts_mut(&mut self) -> (&mut [T], &mut [T]) {
+        (self.lb, self.ub)
     }
 }
 
