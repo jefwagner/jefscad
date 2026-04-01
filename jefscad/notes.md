@@ -159,11 +159,10 @@ let statue = CsgNode::union(ball, base);
 ```
 
 #### AST ergonomics / canonicalization
-- [ ] Implement primative constructors (cuboid, cylinder, sphere, code)
-- [ ] Implement trasform methods (translate, rot_x, rot_y, rot_z, rot_aa, scale,
- eventually shear)
-  - the should return a new node? or mutate the existing node?
-- [ ] Implement quantization for flat_matrix to so similar matrices give same hash
+- [x] Implement primative constructors (cuboid, cylinder, sphere, cone)
+- [x] Implement transform methods (translate, rot_x, rot_y, rot_z, rot_aa, scale)
+  - returns a new node (functional style, immutable)
+- [ ] Implement quantization for flat_matrix so similar matrices give same hash
 - [ ] Implement operator constructors (union, intersection, difference)
   - should creation create authored structure, or autoflatten/sort children
 - [ ] Implement a CanonicalCsgNodeView allow manipulation without mutating authored AST
@@ -172,12 +171,14 @@ let statue = CsgNode::union(ball, base);
 - [ ] Implement structural hashing to support evaluation caches
 
 #### Python interface (authoring)
-- [ ] Expose Python `Node` class that holds `Arc<CsgNode>`
-- [ ] Provide Python constructors: `cube()`, `sphere()`, etc.
-- [ ] Provide chainable transforms: `node.translate(...)`, `rotate(...)`, `scale(...)`
+- [x] Expose Python `Node` class that holds `Arc<CsgNode>`
+- [x] Provide Python constructors: `sphere()`, `cuboid()`, `cylinder()`, `cone()`
+- [x] Provide chainable transforms: `node.translate(...)`, `rot_x/y/z(...)`, `rot_aa(...)`, `scale(...)`
   - return new nodes (functional style)
 - [ ] Provide ops: `union(a,b,...)`, `difference(base, sub...)`, etc.
-- [ ] Provide a way to dump/inspect the AST for debugging (`repr`, `to_json`, etc.)
+- [x] Provide `__repr__` showing full AST detail (Rust Debug style)
+- [ ] Implement `__str__` (Python) and `Display` (Rust) with condensed output when
+      transform stack is long (hide stack, just show count)
 
 Deliverable for Phase 1:
 - Python can build AST trees/graphs (with sharing) and introspect them. 

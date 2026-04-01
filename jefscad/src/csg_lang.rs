@@ -1,5 +1,6 @@
 //! Defining the rust types for a Constructive Solid Geometry solid modeling language
 
+use std::fmt;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -50,14 +51,14 @@ pub struct CsgNode {
 }
 
 /// A 'bare' CSG node without transform or metadata
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum CsgBaseNode {
     Prim(CsgPrimitive),
     Op(CsgOp),
 }
 
 /// Solid primitives that make up more complex solids
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum CsgPrimitive {
     Cuboid { dx: Num, dy: Num, dz: Num },
     Cylinder { r: Num, h: Num },
@@ -67,7 +68,7 @@ pub(crate) enum CsgPrimitive {
 }
 
 /// Operations to combine or select CsgNodes
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum CsgOp {
     Union { children: Vec<NodeRef> },
     Intersection { children: Vec<NodeRef> },
@@ -76,7 +77,7 @@ pub(crate) enum CsgOp {
 }
 
 /// A selection policy for the Select operation
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum SelectPolicy {
     ContainsPoint { point: [Num; 3] },
     ClosestToPoint { point: [Num; 3] },
@@ -84,7 +85,7 @@ pub(crate) enum SelectPolicy {
 }
 
 /// A geometric transformation of a CSG solid
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum AffineTransform {
     Translation { delta: [Num; 3] },
     RotationAA { axis: [Num; 3], angle: Num },
@@ -92,8 +93,18 @@ pub(crate) enum AffineTransform {
 }
 
 /// Optional metadata attached to a node
+#[derive(Debug)]
 pub(crate) struct CsgMetadata {
     // TODO: color, material id, label, texture info
+}
+
+impl fmt::Debug for CsgNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Node")
+            .field("base", &self.base)
+            .field("transforms", &self.transforms)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
