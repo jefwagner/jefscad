@@ -1,6 +1,12 @@
 #[cfg(feature = "extension-module")]
 use pyo3::prelude::*;
 
+mod brep_kernel;
+mod csg_lang;
+mod geom;
+mod mesher;
+mod py_bindings;
+
 // ---------------------------------------------------------------------------
 // HelloWorld — demo struct showing a pyo3 class with a constructor and method
 // ---------------------------------------------------------------------------
