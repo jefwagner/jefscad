@@ -179,7 +179,7 @@ fn mat_rot_aa(axis: [f64; 3], angle: f64) -> [f64; 16] {
 }
 
 // ---------------------------------------------------------------------------
-// Matrix quantization
+// Matrix quantization and identity check
 // ---------------------------------------------------------------------------
 
 /// Scale factor for converting f64 matrix entries to i64 buckets.
@@ -193,6 +193,181 @@ fn quantize_matrix(mat: &[f64; 16]) -> [i64; 16] {
     mat.map(|v| (v * QUANTIZE_SCALE).round() as i64)
 }
 
+fn is_identity_transform(mat: &[f64; 16]) -> bool {
+    quantize_matrix(mat) == quantize_matrix(&IDENTITY_4X4)
+}
+
+// ---------------------------------------------------------------------------
+// Canonical view and structural hashing
+// ---------------------------------------------------------------------------
+
+/// The canonical representation of a node's base, used for geometry hashing.
+/// For commutative ops (Union, Intersection) children are flattened and sorted.
+/// For Difference, subtract is sorted; the base is ordered.
+pub(crate) enum CanonicalBase {
+    Prim(CsgPrimitive),
+    Union { children: Vec<u64> },
+    Intersection { children: Vec<u64> },
+    Difference { base: u64, subtract: Vec<u64> },
+    Select { input: u64, policy: SelectPolicy },
+}
+
+/// A view of a CsgNode in its canonical form, used to compute geom_id.
+pub(crate) struct CanonicalCsgNodeView {
+    pub(crate) canonical_base: CanonicalBase,
+    pub(crate) quantized_transform: [i64; 16],
+}
+
+impl CanonicalCsgNodeView {
+    pub(crate) fn from_node(node: &CsgNode) -> Self {
+        let quantized_transform = quantize_matrix(&node.flat_transform);
+        let canonical_base = match &node.base {
+            CsgBaseNode::Prim(prim) => CanonicalBase::Prim(prim.clone()),
+            CsgBaseNode::Op(CsgOp::Union { children }) => {
+                let mut ids = collect_flattened_union(children);
+                ids.sort_unstable();
+                CanonicalBase::Union { children: ids }
+            }
+            CsgBaseNode::Op(CsgOp::Intersection { children }) => {
+                let mut ids = collect_flattened_intersection(children);
+                ids.sort_unstable();
+                CanonicalBase::Intersection { children: ids }
+            }
+            CsgBaseNode::Op(CsgOp::Difference { base, subtract }) => {
+                let mut sub_ids: Vec<u64> = subtract.iter().map(|n| n.geom_id).collect();
+                sub_ids.sort_unstable();
+                CanonicalBase::Difference { base: base.geom_id, subtract: sub_ids }
+            }
+            CsgBaseNode::Op(CsgOp::Select { input, policy }) => {
+                CanonicalBase::Select { input: input.geom_id, policy: policy.clone() }
+            }
+        };
+        CanonicalCsgNodeView { canonical_base, quantized_transform }
+    }
+
+    pub(crate) fn geom_id(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+
+        let mut h = DefaultHasher::new();
+        for &v in &self.quantized_transform {
+            h.write_i64(v);
+        }
+        match &self.canonical_base {
+            CanonicalBase::Prim(prim) => {
+                h.write_u8(0);
+                hash_primitive(&mut h, prim);
+            }
+            CanonicalBase::Union { children } => {
+                h.write_u8(1);
+                h.write_usize(children.len());
+                for &id in children {
+                    h.write_u64(id);
+                }
+            }
+            CanonicalBase::Intersection { children } => {
+                h.write_u8(2);
+                h.write_usize(children.len());
+                for &id in children {
+                    h.write_u64(id);
+                }
+            }
+            CanonicalBase::Difference { base, subtract } => {
+                h.write_u8(3);
+                h.write_u64(*base);
+                h.write_usize(subtract.len());
+                for &id in subtract {
+                    h.write_u64(id);
+                }
+            }
+            CanonicalBase::Select { input, policy } => {
+                h.write_u8(4);
+                h.write_u64(*input);
+                hash_select_policy(&mut h, policy);
+            }
+        }
+        h.finish()
+    }
+}
+
+/// Collect geom_ids for a Union's children, recursively inlining any child
+/// Union that has an identity flat_transform.
+fn collect_flattened_union(children: &[NodeRef]) -> Vec<u64> {
+    let mut ids = Vec::new();
+    for child in children {
+        if let CsgBaseNode::Op(CsgOp::Union { children: grandchildren }) = &child.base {
+            if is_identity_transform(&child.flat_transform) {
+                ids.extend(collect_flattened_union(grandchildren));
+                continue;
+            }
+        }
+        ids.push(child.geom_id);
+    }
+    ids
+}
+
+/// Same as collect_flattened_union but for Intersection.
+fn collect_flattened_intersection(children: &[NodeRef]) -> Vec<u64> {
+    let mut ids = Vec::new();
+    for child in children {
+        if let CsgBaseNode::Op(CsgOp::Intersection { children: grandchildren }) = &child.base {
+            if is_identity_transform(&child.flat_transform) {
+                ids.extend(collect_flattened_intersection(grandchildren));
+                continue;
+            }
+        }
+        ids.push(child.geom_id);
+    }
+    ids
+}
+
+fn hash_primitive(h: &mut impl std::hash::Hasher, prim: &CsgPrimitive) {
+    use std::hash::Hasher;
+    match prim {
+        CsgPrimitive::Cuboid { dx, dy, dz } => {
+            h.write_u8(0);
+            h.write_u64(dx.to_bits());
+            h.write_u64(dy.to_bits());
+            h.write_u64(dz.to_bits());
+        }
+        CsgPrimitive::Cylinder { r, h: height } => {
+            h.write_u8(1);
+            h.write_u64(r.to_bits());
+            h.write_u64(height.to_bits());
+        }
+        CsgPrimitive::Sphere { r } => {
+            h.write_u8(2);
+            h.write_u64(r.to_bits());
+        }
+        CsgPrimitive::Cone { r, h: height } => {
+            h.write_u8(3);
+            h.write_u64(r.to_bits());
+            h.write_u64(height.to_bits());
+        }
+    }
+}
+
+fn hash_select_policy(h: &mut impl std::hash::Hasher, policy: &SelectPolicy) {
+    use std::hash::Hasher;
+    match policy {
+        SelectPolicy::ContainsPoint { point } => {
+            h.write_u8(0);
+            for &v in point {
+                h.write_u64(v.to_bits());
+            }
+        }
+        SelectPolicy::ClosestToPoint { point } => {
+            h.write_u8(1);
+            for &v in point {
+                h.write_u64(v.to_bits());
+            }
+        }
+        SelectPolicy::LargestByVolume => {
+            h.write_u8(2);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CsgNode constructors and transform methods
 // ---------------------------------------------------------------------------
@@ -201,14 +376,16 @@ impl CsgNode {
     // --- internal builders --------------------------------------------------
 
     fn new_primitive(prim: CsgPrimitive) -> NodeRef {
-        Arc::new(CsgNode {
-            geom_id: 0, // stubbed until hashing is implemented
+        let mut node = CsgNode {
+            geom_id: 0,
             prov_id: next_prov_id(),
             base: CsgBaseNode::Prim(prim),
             transforms: Vec::new(),
             flat_transform: IDENTITY_4X4,
             meta: None,
-        })
+        };
+        node.geom_id = CanonicalCsgNodeView::from_node(&node).geom_id();
+        Arc::new(node)
     }
 
     /// Return a new node that is `self` with `t` appended to the transform stack.
@@ -216,27 +393,31 @@ impl CsgNode {
     fn with_transform(&self, t: AffineTransform, mat: [f64; 16]) -> NodeRef {
         let mut transforms = self.transforms.clone();
         transforms.push(t);
-        Arc::new(CsgNode {
+        let mut node = CsgNode {
             geom_id: 0,
             prov_id: next_prov_id(),
             base: self.base.clone(),
             transforms,
             flat_transform: mat_mul(&self.flat_transform, &mat),
             meta: self.meta.clone(),
-        })
+        };
+        node.geom_id = CanonicalCsgNodeView::from_node(&node).geom_id();
+        Arc::new(node)
     }
 
     // --- internal op builder ------------------------------------------------
 
     fn new_op(op: CsgOp) -> NodeRef {
-        Arc::new(CsgNode {
+        let mut node = CsgNode {
             geom_id: 0,
             prov_id: next_prov_id(),
             base: CsgBaseNode::Op(op),
             transforms: Vec::new(),
             flat_transform: IDENTITY_4X4,
             meta: None,
-        })
+        };
+        node.geom_id = CanonicalCsgNodeView::from_node(&node).geom_id();
+        Arc::new(node)
     }
 
     // --- primitive constructors ---------------------------------------------
@@ -811,6 +992,147 @@ mod test {
             }) => assert_eq!(*point, pt),
             _ => panic!("expected Select with ContainsPoint"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Group F: Canonical view and structural hashing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn canonical_view_prim_stores_primitive() {
+        let n = CsgNode::sphere(2.5);
+        let cv = CanonicalCsgNodeView::from_node(&n);
+        assert!(matches!(cv.canonical_base, CanonicalBase::Prim(CsgPrimitive::Sphere { r }) if r == 2.5));
+    }
+
+    #[test]
+    fn canonical_view_fresh_node_has_identity_quantized_transform() {
+        let n = CsgNode::sphere(1.0);
+        let cv = CanonicalCsgNodeView::from_node(&n);
+        let s = QUANTIZE_SCALE as i64;
+        #[rustfmt::skip]
+        let expected: [i64; 16] = [
+            s, 0, 0, 0,
+            0, s, 0, 0,
+            0, 0, s, 0,
+            0, 0, 0, s,
+        ];
+        assert_eq!(cv.quantized_transform, expected);
+    }
+
+    #[test]
+    fn geom_id_same_primitive_params_same_id() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::sphere(1.0);
+        assert_eq!(a.geom_id, b.geom_id);
+    }
+
+    #[test]
+    fn geom_id_different_primitive_params_different_id() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::sphere(2.0);
+        assert_ne!(a.geom_id, b.geom_id);
+    }
+
+    #[test]
+    fn geom_id_different_primitive_types_different_id() {
+        // sphere(1.0) vs cuboid(1.0,1.0,1.0): same numeric values but different type
+        let s = CsgNode::sphere(1.0);
+        let c = CsgNode::cuboid(1.0, 1.0, 1.0);
+        assert_ne!(s.geom_id, c.geom_id);
+    }
+
+    #[test]
+    fn geom_id_same_transform_gives_same_id() {
+        let a = CsgNode::sphere(1.0).translate(3.0, 0.0, 0.0);
+        let b = CsgNode::sphere(1.0).translate(3.0, 0.0, 0.0);
+        assert_eq!(a.geom_id, b.geom_id);
+    }
+
+    #[test]
+    fn geom_id_different_transform_gives_different_id() {
+        let a = CsgNode::sphere(1.0).translate(1.0, 0.0, 0.0);
+        let b = CsgNode::sphere(1.0).translate(2.0, 0.0, 0.0);
+        assert_ne!(a.geom_id, b.geom_id);
+    }
+
+    #[test]
+    fn geom_id_union_is_order_independent() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::cuboid(2.0, 2.0, 2.0);
+        let u1 = CsgNode::union(vec![Arc::clone(&a), Arc::clone(&b)]);
+        let u2 = CsgNode::union(vec![Arc::clone(&b), Arc::clone(&a)]);
+        assert_eq!(u1.geom_id, u2.geom_id);
+    }
+
+    #[test]
+    fn geom_id_intersection_is_order_independent() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::cuboid(2.0, 2.0, 2.0);
+        let i1 = CsgNode::intersection(vec![Arc::clone(&a), Arc::clone(&b)]);
+        let i2 = CsgNode::intersection(vec![Arc::clone(&b), Arc::clone(&a)]);
+        assert_eq!(i1.geom_id, i2.geom_id);
+    }
+
+    #[test]
+    fn geom_id_union_vs_intersection_different() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::cuboid(2.0, 2.0, 2.0);
+        let u = CsgNode::union(vec![Arc::clone(&a), Arc::clone(&b)]);
+        let i = CsgNode::intersection(vec![Arc::clone(&a), Arc::clone(&b)]);
+        assert_ne!(u.geom_id, i.geom_id);
+    }
+
+    #[test]
+    fn geom_id_difference_base_order_matters() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::cuboid(2.0, 2.0, 2.0);
+        let d1 = CsgNode::difference(Arc::clone(&a), vec![Arc::clone(&b)]);
+        let d2 = CsgNode::difference(Arc::clone(&b), vec![Arc::clone(&a)]);
+        assert_ne!(d1.geom_id, d2.geom_id);
+    }
+
+    #[test]
+    fn geom_id_difference_subtract_order_independent() {
+        let base = CsgNode::cuboid(4.0, 4.0, 4.0);
+        let b = CsgNode::sphere(1.0);
+        let c = CsgNode::cylinder(0.5, 2.0);
+        let d1 = CsgNode::difference(Arc::clone(&base), vec![Arc::clone(&b), Arc::clone(&c)]);
+        let d2 = CsgNode::difference(Arc::clone(&base), vec![Arc::clone(&c), Arc::clone(&b)]);
+        assert_eq!(d1.geom_id, d2.geom_id);
+    }
+
+    #[test]
+    fn geom_id_union_flattens_nested_union_without_transform() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::cuboid(1.0, 1.0, 1.0);
+        let c = CsgNode::cylinder(1.0, 2.0);
+        let inner = CsgNode::union(vec![Arc::clone(&a), Arc::clone(&b)]);
+        let nested = CsgNode::union(vec![inner, Arc::clone(&c)]);
+        let flat = CsgNode::union(vec![Arc::clone(&a), Arc::clone(&b), Arc::clone(&c)]);
+        assert_eq!(nested.geom_id, flat.geom_id);
+    }
+
+    #[test]
+    fn geom_id_union_does_not_flatten_when_inner_has_transform() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::cuboid(1.0, 1.0, 1.0);
+        let c = CsgNode::cylinder(1.0, 2.0);
+        let inner = CsgNode::union(vec![Arc::clone(&a), Arc::clone(&b)]).translate(1.0, 0.0, 0.0);
+        let nested = CsgNode::union(vec![inner, Arc::clone(&c)]);
+        let flat = CsgNode::union(vec![Arc::clone(&a), Arc::clone(&b), Arc::clone(&c)]);
+        assert_ne!(nested.geom_id, flat.geom_id);
+    }
+
+    #[test]
+    fn geom_id_intersection_flattens_nested_intersection_without_transform() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::cuboid(2.0, 2.0, 2.0);
+        let c = CsgNode::cylinder(0.5, 3.0);
+        let inner = CsgNode::intersection(vec![Arc::clone(&a), Arc::clone(&b)]);
+        let nested = CsgNode::intersection(vec![inner, Arc::clone(&c)]);
+        let flat = CsgNode::intersection(vec![Arc::clone(&a), Arc::clone(&b), Arc::clone(&c)]);
+        assert_eq!(nested.geom_id, flat.geom_id);
     }
 
     #[test]

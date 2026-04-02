@@ -165,10 +165,10 @@ let statue = CsgNode::union(ball, base);
 - [x] Implement quantization for flat_matrix so similar matrices give same hash
 - [x] Implement operator constructors (union, intersection, difference)
   - creation preserves authored structure (no autoflattening; that's for CanonicalCsgNodeView)
-- [ ] Implement a CanonicalCsgNodeView allow manipulation without mutating authored AST
-  - [ ] allow flattenting of ops
-  - [ ] allow sorting of children
-- [ ] Implement structural hashing to support evaluation caches
+- [x] Implement a CanonicalCsgNodeView allow manipulation without mutating authored AST
+  - [x] allow flattenting of ops
+  - [x] allow sorting of children
+- [x] Implement structural hashing to support evaluation caches
 
 #### Python interface (authoring)
 - [x] Expose Python `Node` class that holds `Arc<CsgNode>`
