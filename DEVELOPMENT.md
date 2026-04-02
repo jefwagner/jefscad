@@ -20,22 +20,32 @@ repo root/
 ├── pyproject.toml              # maturin build config + project metadata + pytest config
 ├── .venv/                      # UV-managed virtualenv (gitignored)
 ├── python/jefscad/             # thin Python wrapper package
-│   └── __init__.py             # re-exports public API from ._jefscad
+│   ├── __init__.py             # re-exports public API from ._jefscad
+│   └── _jefscad/
+│       └── __init__.pyi        # generated type stubs (via stub_gen binary)
+├── docs/                       # Sphinx documentation source
+│   ├── conf.py
+│   ├── index.rst
+│   ├── getting_started.rst
+│   ├── concepts.rst
+│   └── api.rst
 ├── tests/                      # pytest test suite
-│   └── test_hello.py
 ├── notebooks/                  # Jupyter notebooks
-│   └── playground.ipynb
 ├── jefscad/                    # Rust crate — compiled into jefscad._jefscad
 │   ├── Cargo.toml
-│   └── src/lib.rs
+│   ├── notes.md                # design notes and phase-by-phase TODO list
+│   └── src/
+│       ├── lib.rs
+│       ├── csg_lang.rs         # CSG AST types and constructors
+│       ├── py_bindings.rs      # pyo3 Python bindings
+│       └── bin/stub_gen.rs     # generates _jefscad/__init__.pyi
 └── flint/                      # Rust interval arithmetic library
 ```
 
 **How the two layers fit together:**
 The Rust crate compiles to `jefscad._jefscad` (underscore prefix marks it as an
 implementation detail). `python/jefscad/__init__.py` imports from `._jefscad` and
-re-exports the public API, so callers write `from jefscad import HelloWorld` rather
-than reaching into the private submodule.
+re-exports the public API, so callers write `import jefscad; jefscad.sphere(...)`.
 
 The `extension-module` pyo3 feature is *optional* in `jefscad/Cargo.toml`, which
 means `cargo +nightly test` works without linking against Python at all.
@@ -148,6 +158,62 @@ binary stays loaded until the process exits. The workflow is:
 4. Re-run your cells from the top.
 
 You do **not** need to stop the notebook server — just restart the kernel.
+
+---
+
+---
+
+## Documentation
+
+### Three-layer documentation system
+
+| Layer | Source | Audience | Tool |
+|-------|--------|----------|------|
+| Rust API docs | `///` comments in `.rs` files | Rust developers | `cargo doc` |
+| Python docstrings | Same `///` comments — PyO3 maps them to `__doc__` automatically | Python users at runtime (`help()`, `?`) | built-in `help()` |
+| Python type stubs | Generated `.pyi` file | IDEs, type checkers (mypy/pyright) | `pyo3-stub-gen` |
+| User-facing HTML docs | `docs/*.rst` + `__init__.py` docstring | End users | Sphinx |
+
+The Rust `///` comments are the **single source of truth** for docstrings — there is no
+separate Python docstring layer. The `__init__.py` module docstring is the place for
+package-level narrative text (what the package is, a quick example).
+
+### Building the Sphinx docs
+
+Install the docs dependencies (once):
+
+```bash
+uv pip install --python .venv/bin/python sphinx furo
+# or, using the pyproject extras:
+uv pip install --python .venv/bin/python ".[docs]"
+```
+
+Build and view:
+
+```bash
+# The compiled extension must be installed first (maturin develop)
+sphinx-build -b html docs/ docs/_build/html/
+
+# Serve locally for review
+python -m http.server 8080 --directory docs/_build/html/
+# then open http://localhost:8080
+```
+
+### Rebuilding the Rust API docs
+
+```bash
+cargo +nightly doc --no-deps --features extension-module
+# opens target/doc/_jefscad/index.html
+```
+
+### Regenerating the .pyi type stubs
+
+Run after any change to the public Python API (new functions, changed signatures):
+
+```bash
+cargo +nightly run --bin stub_gen --features extension-module
+# writes python/jefscad/_jefscad/__init__.pyi
+```
 
 ---
 

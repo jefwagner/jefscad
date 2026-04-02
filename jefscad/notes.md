@@ -196,9 +196,20 @@ Documentation approach:
     cylinder/cone base circle at z=0 centered at origin, height extends to z=h
 - [x] Python docstrings come from Rust doc-comments (no separate Python layer needed)
 - [x] Set up pyo3-stub-gen for .pyi type stub generation
-- [ ] Build and review `cargo +nightly doc` (rustdoc for the Rust API)
-- [ ] Plan Python discoverability from Jupyter (help(), tab-complete, __doc__ strings)
-- [ ] Plan sphinx/read-the-docs style Python docs
+- [x] Build and review `cargo +nightly doc` (rustdoc for the Rust API)
+  - Rebuild: `cargo +nightly doc --no-deps --features extension-module`
+  - csg_lang is `pub mod`; CsgNode, NodeRef, SelectPolicy re-exported at crate root
+- [x] Python discoverability from Jupyter — no extra work needed:
+  - `import jefscad; jefscad.<TAB>` — works via `__all__` in `__init__.py`
+  - `node.<TAB>` on a Node instance — works via PyO3's automatic `__dir__`
+  - `help(jefscad.sphere)`, `help(jefscad.Node)` — works via Rust `///` → `__doc__`
+  - `jefscad.sphere?` Jupyter magic — works via `__doc__`
+  - `.pyi` stub covers static type checking in VS Code / pyright / mypy (not runtime)
+- [x] Plan and build sphinx/read-the-docs style Python docs
+  - Stack: sphinx + furo theme + napoleon (Google-style Args:)
+  - Source: docs/{index,getting_started,concepts,api}.rst
+  - Build: sphinx-build -b html docs/ docs/_build/html/
+  - concepts.rst intentionally stubbed — fill in as project matures
 
 Deliverable for Phase 1:
 - Python can build AST trees/graphs (with sharing) and introspect them. 

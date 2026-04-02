@@ -5,10 +5,12 @@ use pyo3::prelude::*;
 use pyo3_stub_gen;
 
 mod brep_kernel;
-pub(crate) mod csg_lang;
+pub mod csg_lang;
 mod geom;
 mod mesher;
 mod py_bindings;
+
+pub use csg_lang::{CsgNode, NodeRef, SelectPolicy};
 
 // ---------------------------------------------------------------------------
 // Module entry point

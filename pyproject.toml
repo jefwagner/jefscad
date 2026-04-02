@@ -15,6 +15,10 @@ dev = [
     "jupyterlab",
     "ipykernel",
 ]
+docs = [
+    "sphinx>=7",
+    "furo",
+]
 
 [tool.maturin]
 # Which Rust crate to build

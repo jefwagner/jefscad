@@ -90,7 +90,7 @@ pub(crate) enum CsgOp {
 
 /// A selection policy for the Select operation
 #[derive(Clone, Debug)]
-pub(crate) enum SelectPolicy {
+pub enum SelectPolicy {
     ContainsPoint { point: [Num; 3] },
     ClosestToPoint { point: [Num; 3] },
     LargestByVolume,
