@@ -7,6 +7,18 @@ use std::sync::{
 };
 
 // ---------------------------------------------------------------------------
+// Float formatting helper
+// ---------------------------------------------------------------------------
+
+/// Format a float with at most 4 decimal places, dropping trailing zeros.
+/// We pre-round to 4dp so ryu never emits more precision than needed.
+fn fmt_f64(v: f64) -> String {
+    let rounded = (v * 1e4).round() / 1e4;
+    let mut buf = ryu::Buffer::new();
+    buf.format(rounded).to_owned()
+}
+
+// ---------------------------------------------------------------------------
 // Primitive parameter types
 // ---------------------------------------------------------------------------
 
@@ -104,6 +116,215 @@ impl fmt::Debug for CsgNode {
             .field("base", &self.base)
             .field("transforms", &self.transforms)
             .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Display (tree output)
+// ---------------------------------------------------------------------------
+
+impl fmt::Display for CsgNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_node(self, f, "", "")
+    }
+}
+
+/// Return the header line for a node (primitive or op).
+fn node_header(node: &CsgNode) -> String {
+    match &node.base {
+        CsgBaseNode::Prim(p) => prim_header(p),
+        CsgBaseNode::Op(op) => op_header(op),
+    }
+}
+
+fn prim_header(p: &CsgPrimitive) -> String {
+    match p {
+        CsgPrimitive::Sphere { r } =>
+            format!("sphere(r={})", fmt_f64(*r)),
+        CsgPrimitive::Cuboid { dx, dy, dz } =>
+            format!("cuboid(dx={}, dy={}, dz={})", fmt_f64(*dx), fmt_f64(*dy), fmt_f64(*dz)),
+        CsgPrimitive::Cylinder { r, h } =>
+            format!("cylinder(r={}, h={})", fmt_f64(*r), fmt_f64(*h)),
+        CsgPrimitive::Cone { r, h } =>
+            format!("cone(r={}, h={})", fmt_f64(*r), fmt_f64(*h)),
+    }
+}
+
+fn op_header(op: &CsgOp) -> String {
+    match op {
+        CsgOp::Union { .. }        => "union".to_owned(),
+        CsgOp::Intersection { .. } => "intersection".to_owned(),
+        CsgOp::Difference { .. }   => "difference".to_owned(),
+        CsgOp::Select { policy, .. } => format!("select(policy={})", policy_str(policy)),
+    }
+}
+
+fn policy_str(p: &SelectPolicy) -> String {
+    match p {
+        SelectPolicy::LargestByVolume => "largest_by_volume".to_owned(),
+        SelectPolicy::ClosestToPoint { point } =>
+            format!("closest_to_point({}, {}, {})",
+                fmt_f64(point[0]), fmt_f64(point[1]), fmt_f64(point[2])),
+        SelectPolicy::ContainsPoint { point } =>
+            format!("contains_point({}, {}, {})",
+                fmt_f64(point[0]), fmt_f64(point[1]), fmt_f64(point[2])),
+    }
+}
+
+fn transform_str(t: &AffineTransform) -> String {
+    match t {
+        AffineTransform::Translation { delta: [dx, dy, dz] } =>
+            format!("translate(dx={}, dy={}, dz={})", fmt_f64(*dx), fmt_f64(*dy), fmt_f64(*dz)),
+        AffineTransform::Scale { sx, sy, sz } =>
+            format!("scale(sx={}, sy={}, sz={})", fmt_f64(*sx), fmt_f64(*sy), fmt_f64(*sz)),
+        AffineTransform::RotationAA { axis: [ax, ay, az], angle } =>
+            format!("rot_aa(ax={}, ay={}, az={}, angle={})",
+                fmt_f64(*ax), fmt_f64(*ay), fmt_f64(*az), fmt_f64(*angle)),
+    }
+}
+
+/// Write a node and all its display-children to `f`.
+///
+/// `connector` is the tree prefix for this node's own header line.
+/// `child_prefix` is the prefix inherited by all lines *below* this node.
+fn write_node(
+    node: &CsgNode,
+    f: &mut fmt::Formatter<'_>,
+    connector: &str,
+    child_prefix: &str,
+) -> fmt::Result {
+    writeln!(f, "{}{}", connector, node_header(node))?;
+
+    // Collect the logical children for display purposes.
+    // Each entry: (label_or_inline_string, sub-items to recurse into)
+    // We model everything as "named groups" or "leaf lines" and write them
+    // uniformly with the tree connector logic.
+    write_node_children(node, f, child_prefix)
+}
+
+/// Write the tree children of a node: transforms branch first, then CSG children.
+fn write_node_children(
+    node: &CsgNode,
+    f: &mut fmt::Formatter<'_>,
+    prefix: &str,
+) -> fmt::Result {
+    // Build the list of top-level display children.
+    // Each item is either:
+    //   - A transforms branch (handled specially)
+    //   - A NodeRef child (for ops)
+    //   - A labeled group containing NodeRefs ("base" / "subtract")
+
+    // We enumerate all children first so we know which is last.
+    let has_transforms = !node.transforms.is_empty();
+
+    match &node.base {
+        CsgBaseNode::Prim(_) => {
+            // Only child (if any) is the transforms branch.
+            if has_transforms {
+                write_transforms_branch(&node.transforms, f, prefix, true)?;
+            }
+        }
+        CsgBaseNode::Op(CsgOp::Union { children } | CsgOp::Intersection { children }) => {
+            let n = children.len();
+            // transforms first (if any), then CSG children
+            let total = if has_transforms { 1 + n } else { n };
+            let mut idx = 0usize;
+            if has_transforms {
+                let is_last = total == 1;
+                write_transforms_branch(&node.transforms, f, prefix, is_last)?;
+                idx += 1;
+            }
+            for child in children.iter() {
+                let is_last = idx == total - 1;
+                let (conn, child_pfx) = branch_strs(prefix, is_last);
+                write_node(child, f, &conn, &child_pfx)?;
+                idx += 1;
+            }
+        }
+        CsgBaseNode::Op(CsgOp::Difference { base, subtract }) => {
+            let total = if has_transforms { 3 } else { 2 }; // transforms? + base + subtract
+            let mut idx = 0usize;
+            if has_transforms {
+                write_transforms_branch(&node.transforms, f, prefix, false)?;
+                idx += 1;
+            }
+            // base group
+            {
+                let is_last = idx == total - 1;
+                let (conn, child_pfx) = branch_strs(prefix, is_last);
+                write_label_group("base", std::slice::from_ref(base), f, &conn, &child_pfx)?;
+                idx += 1;
+            }
+            // subtract group
+            {
+                let is_last = idx == total - 1;
+                let (conn, child_pfx) = branch_strs(prefix, is_last);
+                write_label_group("subtract", subtract, f, &conn, &child_pfx)?;
+            }
+        }
+        CsgBaseNode::Op(CsgOp::Select { input, .. }) => {
+            let total = if has_transforms { 2 } else { 1 };
+            let mut idx = 0usize;
+            if has_transforms {
+                write_transforms_branch(&node.transforms, f, prefix, false)?;
+                idx += 1;
+            }
+            let is_last = idx == total - 1;
+            let (conn, child_pfx) = branch_strs(prefix, is_last);
+            write_node(input, f, &conn, &child_pfx)?;
+        }
+    }
+    Ok(())
+}
+
+/// Write a "transforms" branch.  If the stack has ≥4 entries, collapse to
+/// "transforms[N]".  Otherwise, show each transform as a leaf.
+fn write_transforms_branch(
+    transforms: &[AffineTransform],
+    f: &mut fmt::Formatter<'_>,
+    prefix: &str,
+    is_last: bool,
+) -> fmt::Result {
+    let (conn, child_pfx) = branch_strs(prefix, is_last);
+    if transforms.len() >= 4 {
+        writeln!(f, "{}transforms[{}]", conn, transforms.len())?;
+    } else {
+        writeln!(f, "{}transforms", conn)?;
+        let n = transforms.len();
+        for (i, t) in transforms.iter().enumerate() {
+            let t_last = i == n - 1;
+            let (t_conn, _) = branch_strs(&child_pfx, t_last);
+            writeln!(f, "{}{}", t_conn, transform_str(t))?;
+        }
+    }
+    Ok(())
+}
+
+/// Write a labeled group node ("base" or "subtract") followed by its children.
+fn write_label_group(
+    label: &str,
+    children: &[NodeRef],
+    f: &mut fmt::Formatter<'_>,
+    connector: &str,
+    child_prefix: &str,
+) -> fmt::Result {
+    writeln!(f, "{}{}", connector, label)?;
+    let n = children.len();
+    for (i, child) in children.iter().enumerate() {
+        let is_last = i == n - 1;
+        let (conn, child_pfx) = branch_strs(child_prefix, is_last);
+        write_node(child, f, &conn, &child_pfx)?;
+    }
+    Ok(())
+}
+
+/// Return the (connector, child_prefix) string pair for a child at the given
+/// nesting prefix, depending on whether it is the last sibling.
+fn branch_strs(prefix: &str, is_last: bool) -> (String, String) {
+    if is_last {
+        (format!("{}└── ", prefix), format!("{}    ", prefix))
+    } else {
+        (format!("{}├── ", prefix), format!("{}│   ", prefix))
     }
 }
 
@@ -1155,5 +1376,206 @@ mod test {
         ];
         assert!(mat_approx_eq(&step1.flat_transform, &t_expected));
         assert_eq!(step1.transforms.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Group G: Display (tree output)
+    // -----------------------------------------------------------------------
+
+    // --- primitive headers --------------------------------------------------
+
+    #[test]
+    fn display_sphere_header() {
+        let s = format!("{}", CsgNode::sphere(2.5));
+        assert_eq!(s.lines().next().unwrap(), "sphere(r=2.5)");
+    }
+
+    #[test]
+    fn display_cuboid_header() {
+        let s = format!("{}", CsgNode::cuboid(1.0, 2.0, 3.0));
+        assert_eq!(s.lines().next().unwrap(), "cuboid(dx=1.0, dy=2.0, dz=3.0)");
+    }
+
+    #[test]
+    fn display_cylinder_header() {
+        let s = format!("{}", CsgNode::cylinder(1.5, 4.0));
+        assert_eq!(s.lines().next().unwrap(), "cylinder(r=1.5, h=4.0)");
+    }
+
+    #[test]
+    fn display_cone_header() {
+        let s = format!("{}", CsgNode::cone(1.0, 3.0));
+        assert_eq!(s.lines().next().unwrap(), "cone(r=1.0, h=3.0)");
+    }
+
+    // --- no transforms: no transforms branch --------------------------------
+
+    #[test]
+    fn display_primitive_no_transforms_is_single_line() {
+        let s = format!("{}", CsgNode::sphere(1.0));
+        assert_eq!(s.lines().count(), 1);
+    }
+
+    // --- transforms branch (1–3 entries shown individually) -----------------
+
+    #[test]
+    fn display_one_transform_shows_transforms_branch() {
+        let s = format!("{}", CsgNode::sphere(1.0).translate(0.0, 0.0, 1.5));
+        let lines: Vec<_> = s.lines().collect();
+        assert!(lines.iter().any(|l| l.contains("transforms")));
+        assert!(lines.iter().any(|l| l.contains("translate")));
+    }
+
+    #[test]
+    fn display_translate_shows_correct_params() {
+        let s = format!("{}", CsgNode::sphere(1.0).translate(1.0, 2.0, 3.0));
+        assert!(s.contains("translate(dx=1.0, dy=2.0, dz=3.0)"));
+    }
+
+    #[test]
+    fn display_scale_shows_correct_params() {
+        let s = format!("{}", CsgNode::sphere(1.0).scale(2.0, 3.0, 4.0));
+        assert!(s.contains("scale(sx=2.0, sy=3.0, sz=4.0)"));
+    }
+
+    #[test]
+    fn display_rot_aa_shows_axis_and_angle() {
+        let s = format!("{}", CsgNode::sphere(1.0).rot_z(PI / 2.0));
+        // rot_z stores as rot_aa with axis [0,0,1]; angle rounds to 1.5708
+        assert!(s.contains("rot_aa("));
+        assert!(s.contains("angle=1.5708"));
+    }
+
+    #[test]
+    fn display_three_transforms_all_shown() {
+        let n = CsgNode::sphere(1.0)
+            .translate(1.0, 0.0, 0.0)
+            .scale(2.0, 2.0, 2.0)
+            .rot_z(PI / 4.0);
+        let s = format!("{}", n);
+        assert!(s.contains("translate"));
+        assert!(s.contains("scale"));
+        assert!(s.contains("rot_aa"));
+    }
+
+    // --- transforms branch (≥4 entries collapsed) ---------------------------
+
+    #[test]
+    fn display_four_transforms_collapsed() {
+        let n = CsgNode::sphere(1.0)
+            .translate(1.0, 0.0, 0.0)
+            .scale(2.0, 2.0, 2.0)
+            .rot_z(PI / 4.0)
+            .translate(0.0, 1.0, 0.0);
+        let s = format!("{}", n);
+        assert!(s.contains("transforms[4]"));
+        // individual transform names must NOT appear
+        assert!(!s.contains("translate("));
+        assert!(!s.contains("scale("));
+        assert!(!s.contains("rot_aa("));
+    }
+
+    // --- op headers ---------------------------------------------------------
+
+    #[test]
+    fn display_union_header() {
+        let u = CsgNode::union(vec![CsgNode::sphere(1.0), CsgNode::cuboid(2.0, 2.0, 2.0)]);
+        assert_eq!(format!("{}", u).lines().next().unwrap(), "union");
+    }
+
+    #[test]
+    fn display_intersection_header() {
+        let i = CsgNode::intersection(vec![CsgNode::sphere(1.0), CsgNode::cuboid(2.0, 2.0, 2.0)]);
+        assert_eq!(format!("{}", i).lines().next().unwrap(), "intersection");
+    }
+
+    // --- op children appear as tree branches --------------------------------
+
+    #[test]
+    fn display_union_children_appear_in_output() {
+        let u = CsgNode::union(vec![CsgNode::sphere(1.0), CsgNode::cuboid(2.0, 2.0, 2.0)]);
+        let s = format!("{}", u);
+        assert!(s.contains("sphere(r=1.0)"));
+        assert!(s.contains("cuboid(dx=2.0"));
+    }
+
+    #[test]
+    fn display_last_child_uses_corner_connector() {
+        let u = CsgNode::union(vec![CsgNode::sphere(1.0), CsgNode::cuboid(2.0, 2.0, 2.0)]);
+        let s = format!("{}", u);
+        // The last child must use └── ; the first must use ├──
+        assert!(s.contains("├──"));
+        assert!(s.contains("└──"));
+    }
+
+    // --- difference base / subtract grouping --------------------------------
+
+    #[test]
+    fn display_difference_header() {
+        let d = CsgNode::difference(CsgNode::cuboid(4.0, 4.0, 4.0), vec![CsgNode::sphere(1.0)]);
+        assert_eq!(format!("{}", d).lines().next().unwrap(), "difference");
+    }
+
+    #[test]
+    fn display_difference_has_base_and_subtract_groups() {
+        let d = CsgNode::difference(CsgNode::cuboid(4.0, 4.0, 4.0), vec![CsgNode::sphere(1.0)]);
+        let s = format!("{}", d);
+        assert!(s.contains("base"));
+        assert!(s.contains("subtract"));
+    }
+
+    #[test]
+    fn display_difference_base_and_subtract_contain_children() {
+        let d = CsgNode::difference(
+            CsgNode::cuboid(4.0, 4.0, 4.0),
+            vec![CsgNode::sphere(1.0), CsgNode::cylinder(0.5, 2.0)],
+        );
+        let s = format!("{}", d);
+        assert!(s.contains("cuboid(dx=4.0"));
+        assert!(s.contains("sphere(r=1.0)"));
+        assert!(s.contains("cylinder(r=0.5"));
+    }
+
+    // --- select header with inline policy -----------------------------------
+
+    #[test]
+    fn display_select_largest_header() {
+        let s = format!("{}", CsgNode::select(CsgNode::sphere(1.0), SelectPolicy::LargestByVolume));
+        assert_eq!(s.lines().next().unwrap(), "select(policy=largest_by_volume)");
+    }
+
+    #[test]
+    fn display_select_closest_to_header() {
+        let s = format!(
+            "{}",
+            CsgNode::select(CsgNode::sphere(1.0), SelectPolicy::ClosestToPoint { point: [1.0, 2.0, 3.0] }),
+        );
+        assert_eq!(s.lines().next().unwrap(), "select(policy=closest_to_point(1.0, 2.0, 3.0))");
+    }
+
+    #[test]
+    fn display_select_contains_header() {
+        let s = format!(
+            "{}",
+            CsgNode::select(CsgNode::sphere(1.0), SelectPolicy::ContainsPoint { point: [0.0, 0.0, 1.0] }),
+        );
+        assert_eq!(s.lines().next().unwrap(), "select(policy=contains_point(0.0, 0.0, 1.0))");
+    }
+
+    // --- float formatting ---------------------------------------------------
+
+    #[test]
+    fn display_pi_over_2_rounds_to_4dp() {
+        let s = format!("{}", CsgNode::sphere(1.0).rot_z(PI / 2.0));
+        assert!(s.contains("1.5708"));
+        assert!(!s.contains("1.57079")); // not more than 4dp
+    }
+
+    #[test]
+    fn display_trailing_zeros_dropped() {
+        // 2.5 should show as "2.5" not "2.5000"
+        let s = format!("{}", CsgNode::sphere(2.5));
+        assert!(s.contains("r=2.5"));
+        assert!(!s.contains("r=2.5000"));
     }
 }

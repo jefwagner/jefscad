@@ -17,6 +17,8 @@ crate-type = ["cdylib", "rlib"]
 # pyo3 is optional so that `cargo +nightly test` works without linking Python.
 # maturin activates the "extension-module" feature when building for Python.
 pyo3 = { version = "0.28", optional = true }
+# ryu: shortest round-trip float-to-decimal formatter (used in Display output).
+ryu = "1"
 
 [features]
 extension-module = ["pyo3/extension-module"]

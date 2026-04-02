@@ -244,3 +244,57 @@ def test_select_contains_returns_node():
         jefscad.select_contains(jefscad.sphere(1.0), [0.0, 0.0, 0.0]),
         jefscad.Node,
     )
+
+
+# ---------------------------------------------------------------------------
+# Group 9 — __str__ (tree display)
+# ---------------------------------------------------------------------------
+
+def test_str_differs_from_repr():
+    n = jefscad.sphere(1.0)
+    assert str(n) != repr(n)
+
+
+def test_str_sphere_header():
+    assert str(jefscad.sphere(2.5)).splitlines()[0] == "sphere(r=2.5)"
+
+
+def test_str_primitive_no_transforms_is_single_line():
+    assert len(str(jefscad.sphere(1.0)).splitlines()) == 1
+
+
+def test_str_translate_shows_transforms_branch():
+    s = str(jefscad.sphere(1.0).translate(0.0, 0.0, 1.5))
+    assert "transforms" in s
+    assert "translate" in s
+
+
+def test_str_four_transforms_collapsed():
+    n = (jefscad.sphere(1.0)
+         .translate(1.0, 0.0, 0.0)
+         .scale(2.0, 2.0, 2.0)
+         .rot_z(1.0)
+         .translate(0.0, 1.0, 0.0))
+    s = str(n)
+    assert "transforms[4]" in s
+    assert "translate(" not in s
+
+
+def test_str_union_header_and_children():
+    s = str(jefscad.union(jefscad.sphere(1.0), jefscad.cuboid(2.0, 2.0, 2.0)))
+    lines = s.splitlines()
+    assert lines[0] == "union"
+    assert any("sphere" in l for l in lines)
+    assert any("cuboid" in l for l in lines)
+
+
+def test_str_difference_has_base_and_subtract():
+    s = str(jefscad.difference(jefscad.cuboid(4.0, 4.0, 4.0), jefscad.sphere(1.0)))
+    assert "base" in s
+    assert "subtract" in s
+
+
+def test_str_tree_connectors_present():
+    s = str(jefscad.union(jefscad.sphere(1.0), jefscad.cuboid(2.0, 2.0, 2.0)))
+    assert "├──" in s
+    assert "└──" in s

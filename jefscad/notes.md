@@ -177,7 +177,7 @@ let statue = CsgNode::union(ball, base);
   - return new nodes (functional style)
 - [x] Provide ops: `union(a,b,...)`, `intersection(a,b,...)`, `difference(base, sub...)`, `select_largest`, `select_closest_to`, `select_contains`
 - [x] Provide `__repr__` showing full AST detail (Rust Debug style)
-- [ ] Implement `__str__` (Python) and `Display` (Rust) with condensed output when
+- [x] Implement `__str__` (Python) and `Display` (Rust) with condensed output when
       transform stack is long (hide stack, just show count)
 
 #### Rust and Python documentation

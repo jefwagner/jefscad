@@ -46,6 +46,10 @@ impl PyNode {
         format!("{:?}", self.inner)
     }
 
+    fn __str__(&self) -> String {
+        format!("{}", self.inner)
+    }
+
     // --- transform methods --------------------------------------------------
 
     /// Return a new Node translated by (dx, dy, dz).
