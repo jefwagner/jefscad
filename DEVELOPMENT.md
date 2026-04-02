@@ -53,25 +53,31 @@ uv venv .venv
 # 2. Install Python dev dependencies
 uv pip install --python .venv/bin/python maturin pytest jupyterlab ipykernel
 
-# 3. Build the Rust extension and install it in editable mode
-#    If you use miniconda/anaconda, CONDA_PREFIX must be unset first (see Gotchas).
-unset CONDA_PREFIX
-VIRTUAL_ENV=$(pwd)/.venv .venv/bin/maturin develop --features extension-module
+# 3. Activate the virtualenv
+source .venv/bin/activate
+
+# 4. Build the Rust extension and install it in editable mode
+maturin develop --features extension-module
 ```
 
-After step 3 you have an editable install: Python-side changes in
+After step 4 you have an editable install: Python-side changes in
 `python/jefscad/` take effect immediately; Rust-side changes require
-re-running `maturin develop` (step 3).
+re-running `maturin develop` (step 4).
 
 ---
 
 ## Daily development loop
 
+Activate the virtualenv once per shell session, then run commands directly:
+
+```bash
+source .venv/bin/activate
+```
+
 ### After editing Rust code
 
 ```bash
-unset CONDA_PREFIX
-VIRTUAL_ENV=$(pwd)/.venv .venv/bin/maturin develop --features extension-module
+maturin develop --features extension-module
 ```
 
 This recompiles only the changed Rust and reinstalls the `.so` in place.
@@ -86,8 +92,7 @@ cargo +nightly test
 ### Run Python tests
 
 ```bash
-unset CONDA_PREFIX
-VIRTUAL_ENV=$(pwd)/.venv .venv/bin/pytest -v
+pytest -v
 ```
 
 ---
@@ -96,20 +101,18 @@ VIRTUAL_ENV=$(pwd)/.venv .venv/bin/pytest -v
 
 ### Launching the notebook server
 
-Always launch Jupyter from inside the venv so the kernel finds the installed
-package. From the repo root:
+Activate the virtualenv, then launch Jupyter from the repo root:
 
 ```bash
-unset CONDA_PREFIX
-VIRTUAL_ENV=$(pwd)/.venv .venv/bin/jupyter lab
+source .venv/bin/activate
+jupyter lab
 ```
 
 This opens JupyterLab in your browser. Navigate to `notebooks/playground.ipynb`
 to start experimenting. You can also open it directly:
 
 ```bash
-unset CONDA_PREFIX
-VIRTUAL_ENV=$(pwd)/.venv .venv/bin/jupyter lab notebooks/playground.ipynb
+jupyter lab notebooks/playground.ipynb
 ```
 
 ### Reloading after changes
@@ -137,8 +140,7 @@ binary stays loaded until the process exits. The workflow is:
 1. Edit the Rust source.
 2. In a terminal (the notebook server keeps running):
    ```bash
-   unset CONDA_PREFIX
-   VIRTUAL_ENV=$(pwd)/.venv .venv/bin/maturin develop --features extension-module
+   maturin develop --features extension-module
    ```
 3. Back in JupyterLab: **Kernel → Restart Kernel** (or click the ↺ button in the
    toolbar). This unloads the old `.so` and the next `import jefscad` loads the
@@ -150,15 +152,6 @@ You do **not** need to stop the notebook server — just restart the kernel.
 ---
 
 ## Gotchas
-
-**miniconda / anaconda conflict**
-`CONDA_PREFIX` and `VIRTUAL_ENV` cannot both be set; maturin refuses to run.
-If you use conda, prepend `unset CONDA_PREFIX` to every maturin and pytest
-command, or add it to your shell session:
-
-```bash
-unset CONDA_PREFIX   # add to .bashrc / .zshrc if you always work in this repo
-```
 
 **`.venv/` is gitignored**
 Every new clone requires the one-time setup above. The compiled `.so`
