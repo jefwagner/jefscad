@@ -7,6 +7,16 @@ the place to add pure-Python helpers, submodules, or documentation
 augmentations on top of the Rust layer.
 """
 
-from ._jefscad import Node, sphere, cuboid, cylinder, cone  # noqa: F401
+from ._jefscad import (  # noqa: F401
+    Node,
+    sphere, cuboid, cylinder, cone,
+    union, intersection, difference,
+    select_largest, select_closest_to, select_contains,
+)
 
-__all__ = ["Node", "sphere", "cuboid", "cylinder", "cone"]
+__all__ = [
+    "Node",
+    "sphere", "cuboid", "cylinder", "cone",
+    "union", "intersection", "difference",
+    "select_largest", "select_closest_to", "select_contains",
+]

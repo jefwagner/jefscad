@@ -130,3 +130,117 @@ def test_repr_original_unchanged_after_transform():
     n = jefscad.sphere(1.0)
     _ = n.translate(0.0, 0.0, 1.5)
     assert "[]" in repr(n)  # original still has an empty transform stack
+
+
+# ---------------------------------------------------------------------------
+# Group 7 — geom_id property
+# ---------------------------------------------------------------------------
+
+def test_geom_id_is_int():
+    assert isinstance(jefscad.sphere(1.0).geom_id, int)
+
+
+def test_geom_id_same_primitive_same_id():
+    assert jefscad.sphere(1.0).geom_id == jefscad.sphere(1.0).geom_id
+
+
+def test_geom_id_different_params_different_id():
+    assert jefscad.sphere(1.0).geom_id != jefscad.sphere(2.0).geom_id
+
+
+def test_geom_id_differs_from_prov_id():
+    # geom_id is geometry-based; prov_id is instance-unique
+    n = jefscad.sphere(1.0)
+    m = jefscad.sphere(1.0)
+    assert n.prov_id != m.prov_id
+    assert n.geom_id == m.geom_id
+
+
+# ---------------------------------------------------------------------------
+# Group 8 — Op constructors
+# ---------------------------------------------------------------------------
+
+def test_module_exports_ops():
+    for name in ("union", "intersection", "difference",
+                 "select_largest", "select_closest_to", "select_contains"):
+        assert callable(getattr(jefscad, name)), f"jefscad.{name} is not callable"
+
+
+def test_union_returns_node():
+    a, b = jefscad.sphere(1.0), jefscad.cuboid(2.0, 2.0, 2.0)
+    assert isinstance(jefscad.union(a, b), jefscad.Node)
+
+
+def test_union_repr_contains_op_name():
+    r = repr(jefscad.union(jefscad.sphere(1.0), jefscad.cuboid(2.0, 2.0, 2.0)))
+    assert "union" in r.lower()
+
+
+def test_union_geom_id_is_order_independent():
+    a, b = jefscad.sphere(1.0), jefscad.cuboid(2.0, 2.0, 2.0)
+    assert jefscad.union(a, b).geom_id == jefscad.union(b, a).geom_id
+
+
+def test_union_raises_on_no_args():
+    try:
+        jefscad.union()
+        assert False, "expected an exception"
+    except (ValueError, TypeError):
+        pass
+
+
+def test_intersection_returns_node():
+    a, b = jefscad.sphere(1.0), jefscad.cuboid(2.0, 2.0, 2.0)
+    assert isinstance(jefscad.intersection(a, b), jefscad.Node)
+
+
+def test_intersection_geom_id_is_order_independent():
+    a, b = jefscad.sphere(1.0), jefscad.cuboid(2.0, 2.0, 2.0)
+    assert jefscad.intersection(a, b).geom_id == jefscad.intersection(b, a).geom_id
+
+
+def test_union_and_intersection_have_different_geom_id():
+    a, b = jefscad.sphere(1.0), jefscad.cuboid(2.0, 2.0, 2.0)
+    assert jefscad.union(a, b).geom_id != jefscad.intersection(a, b).geom_id
+
+
+def test_difference_returns_node():
+    base = jefscad.cuboid(4.0, 4.0, 4.0)
+    hole = jefscad.sphere(1.0)
+    assert isinstance(jefscad.difference(base, hole), jefscad.Node)
+
+
+def test_difference_repr_contains_op_name():
+    r = repr(jefscad.difference(jefscad.cuboid(4.0, 4.0, 4.0), jefscad.sphere(1.0)))
+    assert "difference" in r.lower()
+
+
+def test_difference_base_order_matters_for_geom_id():
+    a, b = jefscad.sphere(1.0), jefscad.cuboid(2.0, 2.0, 2.0)
+    assert jefscad.difference(a, b).geom_id != jefscad.difference(b, a).geom_id
+
+
+def test_difference_raises_on_missing_subtract():
+    try:
+        jefscad.difference(jefscad.sphere(1.0))
+        assert False, "expected an exception"
+    except (ValueError, TypeError):
+        pass
+
+
+def test_select_largest_returns_node():
+    assert isinstance(jefscad.select_largest(jefscad.sphere(1.0)), jefscad.Node)
+
+
+def test_select_closest_to_returns_node():
+    assert isinstance(
+        jefscad.select_closest_to(jefscad.sphere(1.0), [0.0, 0.0, 0.0]),
+        jefscad.Node,
+    )
+
+
+def test_select_contains_returns_node():
+    assert isinstance(
+        jefscad.select_contains(jefscad.sphere(1.0), [0.0, 0.0, 0.0]),
+        jefscad.Node,
+    )

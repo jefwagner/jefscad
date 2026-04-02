@@ -4,7 +4,10 @@
 use pyo3::prelude::*;
 
 #[cfg(feature = "extension-module")]
-use crate::csg_lang::CsgNode;
+use std::sync::Arc;
+
+#[cfg(feature = "extension-module")]
+use crate::csg_lang::{CsgNode, SelectPolicy};
 
 // ---------------------------------------------------------------------------
 // Python-visible Node class
@@ -30,6 +33,13 @@ impl PyNode {
     #[getter]
     fn prov_id(&self) -> u64 {
         self.inner.prov_id
+    }
+
+    /// Geometry hash: equal for structurally identical shapes regardless of
+    /// authoring order or Arc identity.
+    #[getter]
+    fn geom_id(&self) -> u64 {
+        self.inner.geom_id
     }
 
     fn __repr__(&self) -> String {
@@ -99,6 +109,68 @@ fn cone(r: f64, h: f64) -> PyNode {
 }
 
 // ---------------------------------------------------------------------------
+// Op constructor functions
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "extension-module")]
+#[pyfunction]
+#[pyo3(signature = (*children))]
+fn union(children: Vec<Bound<'_, PyNode>>) -> PyResult<PyNode> {
+    if children.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "union requires at least one child",
+        ));
+    }
+    let refs: Vec<_> = children.iter().map(|n| Arc::clone(&n.borrow().inner)).collect();
+    Ok(PyNode { inner: CsgNode::union(refs) })
+}
+
+#[cfg(feature = "extension-module")]
+#[pyfunction]
+#[pyo3(signature = (*children))]
+fn intersection(children: Vec<Bound<'_, PyNode>>) -> PyResult<PyNode> {
+    if children.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "intersection requires at least one child",
+        ));
+    }
+    let refs: Vec<_> = children.iter().map(|n| Arc::clone(&n.borrow().inner)).collect();
+    Ok(PyNode { inner: CsgNode::intersection(refs) })
+}
+
+#[cfg(feature = "extension-module")]
+#[pyfunction]
+#[pyo3(signature = (base, *subtract))]
+fn difference(base: Bound<'_, PyNode>, subtract: Vec<Bound<'_, PyNode>>) -> PyResult<PyNode> {
+    if subtract.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "difference requires at least one node to subtract",
+        ));
+    }
+    let base_ref = Arc::clone(&base.borrow().inner);
+    let sub_refs: Vec<_> = subtract.iter().map(|n| Arc::clone(&n.borrow().inner)).collect();
+    Ok(PyNode { inner: CsgNode::difference(base_ref, sub_refs) })
+}
+
+#[cfg(feature = "extension-module")]
+#[pyfunction]
+fn select_largest(node: Bound<'_, PyNode>) -> PyNode {
+    PyNode { inner: CsgNode::select(Arc::clone(&node.borrow().inner), SelectPolicy::LargestByVolume) }
+}
+
+#[cfg(feature = "extension-module")]
+#[pyfunction]
+fn select_closest_to(node: Bound<'_, PyNode>, point: [f64; 3]) -> PyNode {
+    PyNode { inner: CsgNode::select(Arc::clone(&node.borrow().inner), SelectPolicy::ClosestToPoint { point }) }
+}
+
+#[cfg(feature = "extension-module")]
+#[pyfunction]
+fn select_contains(node: Bound<'_, PyNode>, point: [f64; 3]) -> PyNode {
+    PyNode { inner: CsgNode::select(Arc::clone(&node.borrow().inner), SelectPolicy::ContainsPoint { point }) }
+}
+
+// ---------------------------------------------------------------------------
 // Module registration (called from lib.rs)
 // ---------------------------------------------------------------------------
 
@@ -109,5 +181,11 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cuboid, m)?)?;
     m.add_function(wrap_pyfunction!(cylinder, m)?)?;
     m.add_function(wrap_pyfunction!(cone, m)?)?;
+    m.add_function(wrap_pyfunction!(union, m)?)?;
+    m.add_function(wrap_pyfunction!(intersection, m)?)?;
+    m.add_function(wrap_pyfunction!(difference, m)?)?;
+    m.add_function(wrap_pyfunction!(select_largest, m)?)?;
+    m.add_function(wrap_pyfunction!(select_closest_to, m)?)?;
+    m.add_function(wrap_pyfunction!(select_contains, m)?)?;
     Ok(())
 }
