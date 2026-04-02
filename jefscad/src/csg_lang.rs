@@ -226,6 +226,19 @@ impl CsgNode {
         })
     }
 
+    // --- internal op builder ------------------------------------------------
+
+    fn new_op(op: CsgOp) -> NodeRef {
+        Arc::new(CsgNode {
+            geom_id: 0,
+            prov_id: next_prov_id(),
+            base: CsgBaseNode::Op(op),
+            transforms: Vec::new(),
+            flat_transform: IDENTITY_4X4,
+            meta: None,
+        })
+    }
+
     // --- primitive constructors ---------------------------------------------
 
     pub fn sphere(r: f64) -> NodeRef {
@@ -242,6 +255,29 @@ impl CsgNode {
 
     pub fn cone(r: f64, h: f64) -> NodeRef {
         Self::new_primitive(CsgPrimitive::Cone { r, h })
+    }
+
+    // --- transform methods (each returns a new NodeRef) ---------------------
+
+    // --- operator constructors ----------------------------------------------
+
+    pub fn union(children: Vec<NodeRef>) -> NodeRef {
+        assert!(!children.is_empty(), "union requires at least one child");
+        Self::new_op(CsgOp::Union { children })
+    }
+
+    pub fn intersection(children: Vec<NodeRef>) -> NodeRef {
+        assert!(!children.is_empty(), "intersection requires at least one child");
+        Self::new_op(CsgOp::Intersection { children })
+    }
+
+    pub fn difference(base: NodeRef, subtract: Vec<NodeRef>) -> NodeRef {
+        assert!(!subtract.is_empty(), "difference requires at least one node to subtract");
+        Self::new_op(CsgOp::Difference { base, subtract })
+    }
+
+    pub fn select(input: NodeRef, policy: SelectPolicy) -> NodeRef {
+        Self::new_op(CsgOp::Select { input, policy })
     }
 
     // --- transform methods (each returns a new NodeRef) ---------------------
@@ -616,6 +652,165 @@ mod test {
         let a = mat_translation(1.0, 0.0, 0.0);
         let b = mat_translation(2.0, 0.0, 0.0);
         assert_ne!(quantize_matrix(&a), quantize_matrix(&b));
+    }
+
+    // -----------------------------------------------------------------------
+    // Group E: Operator constructors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn union_base_is_union_op() {
+        let u = CsgNode::union(vec![CsgNode::sphere(1.0), CsgNode::cuboid(1.0, 1.0, 1.0)]);
+        assert!(matches!(&u.base, CsgBaseNode::Op(CsgOp::Union { .. })));
+    }
+
+    #[test]
+    fn union_stores_correct_child_count() {
+        let u = CsgNode::union(vec![
+            CsgNode::sphere(1.0),
+            CsgNode::cuboid(1.0, 1.0, 1.0),
+            CsgNode::cylinder(1.0, 2.0),
+        ]);
+        match &u.base {
+            CsgBaseNode::Op(CsgOp::Union { children }) => assert_eq!(children.len(), 3),
+            _ => panic!("expected Union"),
+        }
+    }
+
+    #[test]
+    fn union_preserves_child_arc_identity() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::cuboid(1.0, 1.0, 1.0);
+        let u = CsgNode::union(vec![Arc::clone(&a), Arc::clone(&b)]);
+        match &u.base {
+            CsgBaseNode::Op(CsgOp::Union { children }) => {
+                assert!(Arc::ptr_eq(&children[0], &a));
+                assert!(Arc::ptr_eq(&children[1], &b));
+            }
+            _ => panic!("expected Union"),
+        }
+    }
+
+    #[test]
+    fn union_has_identity_flat_transform() {
+        let u = CsgNode::union(vec![CsgNode::sphere(1.0), CsgNode::sphere(2.0)]);
+        assert!(mat_approx_eq(&u.flat_transform, &IDENTITY));
+    }
+
+    #[test]
+    fn union_has_empty_transform_stack() {
+        let u = CsgNode::union(vec![CsgNode::sphere(1.0), CsgNode::sphere(2.0)]);
+        assert!(u.transforms.is_empty());
+    }
+
+    #[test]
+    fn union_prov_id_differs_from_children() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::sphere(2.0);
+        let u = CsgNode::union(vec![Arc::clone(&a), Arc::clone(&b)]);
+        assert_ne!(u.prov_id, a.prov_id);
+        assert_ne!(u.prov_id, b.prov_id);
+    }
+
+    #[test]
+    #[should_panic]
+    fn union_panics_on_empty_children() {
+        CsgNode::union(vec![]);
+    }
+
+    #[test]
+    fn intersection_base_is_intersection_op() {
+        let i = CsgNode::intersection(vec![
+            CsgNode::sphere(1.0),
+            CsgNode::cuboid(2.0, 2.0, 2.0),
+        ]);
+        assert!(matches!(&i.base, CsgBaseNode::Op(CsgOp::Intersection { .. })));
+    }
+
+    #[test]
+    fn intersection_preserves_child_arc_identity() {
+        let a = CsgNode::sphere(1.0);
+        let b = CsgNode::cuboid(2.0, 2.0, 2.0);
+        let i = CsgNode::intersection(vec![Arc::clone(&a), Arc::clone(&b)]);
+        match &i.base {
+            CsgBaseNode::Op(CsgOp::Intersection { children }) => {
+                assert_eq!(children.len(), 2);
+                assert!(Arc::ptr_eq(&children[0], &a));
+                assert!(Arc::ptr_eq(&children[1], &b));
+            }
+            _ => panic!("expected Intersection"),
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn intersection_panics_on_empty_children() {
+        CsgNode::intersection(vec![]);
+    }
+
+    #[test]
+    fn difference_base_is_difference_op() {
+        let d = CsgNode::difference(CsgNode::cuboid(2.0, 2.0, 2.0), vec![CsgNode::sphere(0.5)]);
+        assert!(matches!(&d.base, CsgBaseNode::Op(CsgOp::Difference { .. })));
+    }
+
+    #[test]
+    fn difference_preserves_base_and_subtract_arc_identity() {
+        let base = CsgNode::cuboid(2.0, 2.0, 2.0);
+        let hole = CsgNode::sphere(0.5);
+        let d = CsgNode::difference(Arc::clone(&base), vec![Arc::clone(&hole)]);
+        match &d.base {
+            CsgBaseNode::Op(CsgOp::Difference { base: b, subtract }) => {
+                assert!(Arc::ptr_eq(b, &base));
+                assert_eq!(subtract.len(), 1);
+                assert!(Arc::ptr_eq(&subtract[0], &hole));
+            }
+            _ => panic!("expected Difference"),
+        }
+    }
+
+    #[test]
+    fn difference_has_identity_flat_transform() {
+        let d = CsgNode::difference(CsgNode::cuboid(2.0, 2.0, 2.0), vec![CsgNode::sphere(0.5)]);
+        assert!(mat_approx_eq(&d.flat_transform, &IDENTITY));
+    }
+
+    #[test]
+    #[should_panic]
+    fn difference_panics_on_empty_subtract() {
+        CsgNode::difference(CsgNode::sphere(1.0), vec![]);
+    }
+
+    #[test]
+    fn select_base_is_select_op() {
+        let s = CsgNode::select(CsgNode::sphere(1.0), SelectPolicy::LargestByVolume);
+        assert!(matches!(&s.base, CsgBaseNode::Op(CsgOp::Select { .. })));
+    }
+
+    #[test]
+    fn select_preserves_input_arc_identity() {
+        let input = CsgNode::sphere(1.0);
+        let s = CsgNode::select(Arc::clone(&input), SelectPolicy::LargestByVolume);
+        match &s.base {
+            CsgBaseNode::Op(CsgOp::Select { input: i, policy }) => {
+                assert!(Arc::ptr_eq(i, &input));
+                assert!(matches!(policy, SelectPolicy::LargestByVolume));
+            }
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn select_contains_point_stores_point() {
+        let pt = [1.0, 2.0, 3.0];
+        let s = CsgNode::select(CsgNode::sphere(1.0), SelectPolicy::ContainsPoint { point: pt });
+        match &s.base {
+            CsgBaseNode::Op(CsgOp::Select {
+                policy: SelectPolicy::ContainsPoint { point },
+                ..
+            }) => assert_eq!(*point, pt),
+            _ => panic!("expected Select with ContainsPoint"),
+        }
     }
 
     #[test]

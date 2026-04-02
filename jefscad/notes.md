@@ -163,8 +163,8 @@ let statue = CsgNode::union(ball, base);
 - [x] Implement transform methods (translate, rot_x, rot_y, rot_z, rot_aa, scale)
   - returns a new node (functional style, immutable)
 - [x] Implement quantization for flat_matrix so similar matrices give same hash
-- [ ] Implement operator constructors (union, intersection, difference)
-  - should creation create authored structure, or autoflatten/sort children
+- [x] Implement operator constructors (union, intersection, difference)
+  - creation preserves authored structure (no autoflattening; that's for CanonicalCsgNodeView)
 - [ ] Implement a CanonicalCsgNodeView allow manipulation without mutating authored AST
   - [ ] allow flattenting of ops
   - [ ] allow sorting of children
