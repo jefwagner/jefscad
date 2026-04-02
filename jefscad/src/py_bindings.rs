@@ -4,6 +4,9 @@
 use pyo3::prelude::*;
 
 #[cfg(feature = "extension-module")]
+use pyo3_stub_gen::derive::*;
+
+#[cfg(feature = "extension-module")]
 use std::sync::Arc;
 
 #[cfg(feature = "extension-module")]
@@ -19,12 +22,14 @@ use crate::csg_lang::{CsgNode, SelectPolicy};
 /// and chain transforms with the methods below. All transform methods return
 /// a **new** Node; the original is never mutated.
 #[cfg(feature = "extension-module")]
+#[gen_stub_pyclass]
 #[pyclass(name = "Node")]
 pub struct PyNode {
     pub(crate) inner: crate::csg_lang::NodeRef,
 }
 
 #[cfg(feature = "extension-module")]
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyNode {
     // --- introspection ------------------------------------------------------
@@ -78,7 +83,10 @@ impl PyNode {
     }
 
     /// Return a new Node rotated around `axis` by `angle_rad` (right-hand rule).
-    /// `axis` may be any non-zero 3-element sequence; it is normalised internally.
+    ///
+    /// Args:
+    ///     axis: Rotation axis as `[x, y, z]`. Need not be a unit vector; normalised internally.
+    ///     angle_rad: Rotation angle in radians.
     fn rot_aa(&self, axis: [f64; 3], angle_rad: f64) -> PyNode {
         PyNode { inner: self.inner.rot_aa(axis, angle_rad) }
     }
@@ -88,25 +96,35 @@ impl PyNode {
 // Primitive constructor functions
 // ---------------------------------------------------------------------------
 
+/// Create a sphere with radius `r`, centered at the origin.
 #[cfg(feature = "extension-module")]
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn sphere(r: f64) -> PyNode {
     PyNode { inner: CsgNode::sphere(r) }
 }
 
+/// Create an axis-aligned cuboid with one corner at the origin and the opposite corner at `(dx, dy, dz)`.
 #[cfg(feature = "extension-module")]
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn cuboid(dx: f64, dy: f64, dz: f64) -> PyNode {
     PyNode { inner: CsgNode::cuboid(dx, dy, dz) }
 }
 
+/// Create a cylinder with radius `r` and height `h`.
+/// The base circle lies in the z = 0 plane centered at the origin; the top is at z = h.
 #[cfg(feature = "extension-module")]
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn cylinder(r: f64, h: f64) -> PyNode {
     PyNode { inner: CsgNode::cylinder(r, h) }
 }
 
+/// Create a cone with base radius `r` and height `h`.
+/// The base circle lies in the z = 0 plane centered at the origin; the apex is at z = h.
 #[cfg(feature = "extension-module")]
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn cone(r: f64, h: f64) -> PyNode {
     PyNode { inner: CsgNode::cone(r, h) }
@@ -116,7 +134,11 @@ fn cone(r: f64, h: f64) -> PyNode {
 // Op constructor functions
 // ---------------------------------------------------------------------------
 
+/// Return the boolean union of the given nodes: `union(a, b, c, ...)`.
+///
+/// Raises `ValueError` if no nodes are provided.
 #[cfg(feature = "extension-module")]
+#[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (*children))]
 fn union(children: Vec<Bound<'_, PyNode>>) -> PyResult<PyNode> {
@@ -129,7 +151,11 @@ fn union(children: Vec<Bound<'_, PyNode>>) -> PyResult<PyNode> {
     Ok(PyNode { inner: CsgNode::union(refs) })
 }
 
+/// Return the intersection (common volume) of the given nodes: `intersection(a, b, c, ...)`.
+///
+/// Raises `ValueError` if no nodes are provided.
 #[cfg(feature = "extension-module")]
+#[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (*children))]
 fn intersection(children: Vec<Bound<'_, PyNode>>) -> PyResult<PyNode> {
@@ -142,7 +168,11 @@ fn intersection(children: Vec<Bound<'_, PyNode>>) -> PyResult<PyNode> {
     Ok(PyNode { inner: CsgNode::intersection(refs) })
 }
 
+/// Subtract volumes from a base shape: `difference(base, sub1, sub2, ...)`.
+///
+/// Raises `ValueError` if no subtracted nodes are provided.
 #[cfg(feature = "extension-module")]
+#[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (base, *subtract))]
 fn difference(base: Bound<'_, PyNode>, subtract: Vec<Bound<'_, PyNode>>) -> PyResult<PyNode> {
@@ -156,19 +186,27 @@ fn difference(base: Bound<'_, PyNode>, subtract: Vec<Bound<'_, PyNode>>) -> PyRe
     Ok(PyNode { inner: CsgNode::difference(base_ref, sub_refs) })
 }
 
+/// Select the single largest connected component of `node` by volume.
 #[cfg(feature = "extension-module")]
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn select_largest(node: Bound<'_, PyNode>) -> PyNode {
     PyNode { inner: CsgNode::select(Arc::clone(&node.borrow().inner), SelectPolicy::LargestByVolume) }
 }
 
+/// Select the connected component of `node` whose centroid is closest to `point`.
+/// `point` is a 3-element sequence `[x, y, z]`.
 #[cfg(feature = "extension-module")]
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn select_closest_to(node: Bound<'_, PyNode>, point: [f64; 3]) -> PyNode {
     PyNode { inner: CsgNode::select(Arc::clone(&node.borrow().inner), SelectPolicy::ClosestToPoint { point }) }
 }
 
+/// Select the connected component of `node` that contains `point`.
+/// `point` is a 3-element sequence `[x, y, z]`.
 #[cfg(feature = "extension-module")]
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn select_contains(node: Bound<'_, PyNode>, point: [f64; 3]) -> PyNode {
     PyNode { inner: CsgNode::select(Arc::clone(&node.borrow().inner), SelectPolicy::ContainsPoint { point }) }

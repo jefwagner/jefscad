@@ -13,12 +13,19 @@ description = "Solid modeling language"
 name = "_jefscad"
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "stub_gen"
+required-features = ["extension-module"]
+
 [dependencies]
 # pyo3 is optional so that `cargo +nightly test` works without linking Python.
 # maturin activates the "extension-module" feature when building for Python.
 pyo3 = { version = "0.28", optional = true }
 # ryu: shortest round-trip float-to-decimal formatter (used in Display output).
 ryu = "1"
+# pyo3-stub-gen: generates .pyi type stub files from PyO3 annotations.
+pyo3-stub-gen = { version = "0.21", optional = true, default-features = false }
+pyo3-stub-gen-derive = { version = "0.21", optional = true, default-features = false }
 
 [features]
-extension-module = ["pyo3/extension-module"]
+extension-module = ["pyo3/extension-module", "pyo3-stub-gen", "pyo3-stub-gen-derive"]

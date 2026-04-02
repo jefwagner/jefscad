@@ -181,14 +181,24 @@ let statue = CsgNode::union(ball, base);
       transform stack is long (hide stack, just show count)
 
 #### Rust and Python documentation
-- [ ] Add doc-comments to rust constructors and methods
-- [ ] Add doc-strings to python constuctors and methods
-- [ ] build initial rust doc package
-- [ ] figure out how to make idiomatically make python interface queriable/discoverable
-      from within the jupyter notebook.
-  - [ ] Add implementation details to this todo block
-- [ ] come of with a plan for sphinx/read-the-docs style python docs
-  - [ ] Add implementation details to this todo block
+Documentation approach:
+- Rust `///` doc-comments are the **single source of truth**. PyO3 maps them directly
+  to Python `__doc__`, so there is no separate Python docstring layer.
+- Format: plain prose for self-evident items; Google-style `Args:` blocks only where
+  parameter semantics are non-obvious (e.g. `rot_aa` axis normalisation).
+- Type information lives in `.pyi` stub files, not in docstrings.
+- Stubs are generated with pyo3-stub-gen:
+  `cargo +nightly run --bin stub_gen --features extension-module`
+  → output: `python/jefscad/_jefscad/__init__.pyi`
+
+- [x] Add Rust doc-comments to all public constructors and methods (csg_lang.rs, py_bindings.rs)
+  - Primitive placement convention: sphere centered at origin; cuboid corner at origin;
+    cylinder/cone base circle at z=0 centered at origin, height extends to z=h
+- [x] Python docstrings come from Rust doc-comments (no separate Python layer needed)
+- [x] Set up pyo3-stub-gen for .pyi type stub generation
+- [ ] Build and review `cargo +nightly doc` (rustdoc for the Rust API)
+- [ ] Plan Python discoverability from Jupyter (help(), tab-complete, __doc__ strings)
+- [ ] Plan sphinx/read-the-docs style Python docs
 
 Deliverable for Phase 1:
 - Python can build AST trees/graphs (with sharing) and introspect them. 

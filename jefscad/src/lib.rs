@@ -1,6 +1,9 @@
 #[cfg(feature = "extension-module")]
 use pyo3::prelude::*;
 
+#[cfg(feature = "extension-module")]
+use pyo3_stub_gen;
+
 mod brep_kernel;
 pub(crate) mod csg_lang;
 mod geom;
@@ -17,6 +20,19 @@ mod py_bindings;
 #[pymodule]
 fn _jefscad(m: &Bound<'_, PyModule>) -> PyResult<()> {
     py_bindings::register(m)
+}
+
+// Exposes stub metadata collected by gen_stub_* annotations.
+// The call to StubInfo::from_pyproject_toml must live in *this* crate (not the
+// binary) so that the linker includes all inventory-registered items.
+// pyproject.toml is in the workspace root, one level above CARGO_MANIFEST_DIR.
+#[cfg(feature = "extension-module")]
+pub fn stub_info() -> pyo3_stub_gen::Result<pyo3_stub_gen::StubInfo> {
+    let pyproject = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join("pyproject.toml");
+    pyo3_stub_gen::StubInfo::from_pyproject_toml(pyproject)
 }
 
 // ---------------------------------------------------------------------------

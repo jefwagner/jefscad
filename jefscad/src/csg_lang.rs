@@ -643,47 +643,63 @@ impl CsgNode {
 
     // --- primitive constructors ---------------------------------------------
 
+    /// Sphere primitive with radius `r`, centered at the origin.
     pub fn sphere(r: f64) -> NodeRef {
         Self::new_primitive(CsgPrimitive::Sphere { r })
     }
 
+    /// Axis-aligned cuboid with one corner at the origin and the opposite corner at `(dx, dy, dz)`.
     pub fn cuboid(dx: f64, dy: f64, dz: f64) -> NodeRef {
         Self::new_primitive(CsgPrimitive::Cuboid { dx, dy, dz })
     }
 
+    /// Cylinder with radius `r` and height `h`.
+    /// The base circle lies in the z = 0 plane centered at the origin; the top is at z = h.
     pub fn cylinder(r: f64, h: f64) -> NodeRef {
         Self::new_primitive(CsgPrimitive::Cylinder { r, h })
     }
 
+    /// Cone with base radius `r` and height `h`.
+    /// The base circle lies in the z = 0 plane centered at the origin; the apex is at z = h.
     pub fn cone(r: f64, h: f64) -> NodeRef {
         Self::new_primitive(CsgPrimitive::Cone { r, h })
     }
 
-    // --- transform methods (each returns a new NodeRef) ---------------------
-
     // --- operator constructors ----------------------------------------------
 
+    /// Return the boolean union of all `children`.
+    ///
+    /// Panics if `children` is empty.
     pub fn union(children: Vec<NodeRef>) -> NodeRef {
         assert!(!children.is_empty(), "union requires at least one child");
         Self::new_op(CsgOp::Union { children })
     }
 
+    /// Return the intersection (common volume) of all `children`.
+    ///
+    /// Panics if `children` is empty.
     pub fn intersection(children: Vec<NodeRef>) -> NodeRef {
         assert!(!children.is_empty(), "intersection requires at least one child");
         Self::new_op(CsgOp::Intersection { children })
     }
 
+    /// Subtract each node in `subtract` from `base`.
+    ///
+    /// Panics if `subtract` is empty.
     pub fn difference(base: NodeRef, subtract: Vec<NodeRef>) -> NodeRef {
         assert!(!subtract.is_empty(), "difference requires at least one node to subtract");
         Self::new_op(CsgOp::Difference { base, subtract })
     }
 
+    /// Wrap `input` in a Select node that picks a single connected component
+    /// according to `policy` (e.g. largest by volume, or closest to a point).
     pub fn select(input: NodeRef, policy: SelectPolicy) -> NodeRef {
         Self::new_op(CsgOp::Select { input, policy })
     }
 
     // --- transform methods (each returns a new NodeRef) ---------------------
 
+    /// Return a new node translated by `(dx, dy, dz)`.
     pub fn translate(&self, dx: f64, dy: f64, dz: f64) -> NodeRef {
         self.with_transform(
             AffineTransform::Translation { delta: [dx, dy, dz] },
@@ -691,6 +707,7 @@ impl CsgNode {
         )
     }
 
+    /// Return a new node scaled non-uniformly by `(sx, sy, sz)`.
     pub fn scale(&self, sx: f64, sy: f64, sz: f64) -> NodeRef {
         self.with_transform(
             AffineTransform::Scale { sx, sy, sz },
@@ -698,6 +715,7 @@ impl CsgNode {
         )
     }
 
+    /// Return a new node rotated around the X axis by `angle_rad` (right-hand rule).
     pub fn rot_x(&self, angle_rad: f64) -> NodeRef {
         self.with_transform(
             AffineTransform::RotationAA { axis: [1.0, 0.0, 0.0], angle: angle_rad },
@@ -705,6 +723,7 @@ impl CsgNode {
         )
     }
 
+    /// Return a new node rotated around the Y axis by `angle_rad` (right-hand rule).
     pub fn rot_y(&self, angle_rad: f64) -> NodeRef {
         self.with_transform(
             AffineTransform::RotationAA { axis: [0.0, 1.0, 0.0], angle: angle_rad },
@@ -712,6 +731,7 @@ impl CsgNode {
         )
     }
 
+    /// Return a new node rotated around the Z axis by `angle_rad` (right-hand rule).
     pub fn rot_z(&self, angle_rad: f64) -> NodeRef {
         self.with_transform(
             AffineTransform::RotationAA { axis: [0.0, 0.0, 1.0], angle: angle_rad },
