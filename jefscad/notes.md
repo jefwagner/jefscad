@@ -162,7 +162,7 @@ let statue = CsgNode::union(ball, base);
 - [x] Implement primative constructors (cuboid, cylinder, sphere, cone)
 - [x] Implement transform methods (translate, rot_x, rot_y, rot_z, rot_aa, scale)
   - returns a new node (functional style, immutable)
-- [ ] Implement quantization for flat_matrix so similar matrices give same hash
+- [x] Implement quantization for flat_matrix so similar matrices give same hash
 - [ ] Implement operator constructors (union, intersection, difference)
   - should creation create authored structure, or autoflatten/sort children
 - [ ] Implement a CanonicalCsgNodeView allow manipulation without mutating authored AST
@@ -179,6 +179,16 @@ let statue = CsgNode::union(ball, base);
 - [x] Provide `__repr__` showing full AST detail (Rust Debug style)
 - [ ] Implement `__str__` (Python) and `Display` (Rust) with condensed output when
       transform stack is long (hide stack, just show count)
+
+### Rust and Python documentation
+- [ ] Add doc-comments to rust constructors and methods
+- [ ] Add doc-strings to python constuctors and methods
+- [ ] build initial rust doc package
+- [ ] figure out how to make idiomatically make python interface queriable/discoverable
+      from within the jupyter notebook.
+  - [ ] Add implementation details to this todo block
+- [ ] come of with a plan for sphinx/read-the-docs style python docs
+  - [ ] Add implementation details to this todo block
 
 Deliverable for Phase 1:
 - Python can build AST trees/graphs (with sharing) and introspect them. 

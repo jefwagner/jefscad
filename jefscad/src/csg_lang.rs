@@ -179,6 +179,21 @@ fn mat_rot_aa(axis: [f64; 3], angle: f64) -> [f64; 16] {
 }
 
 // ---------------------------------------------------------------------------
+// Matrix quantization
+// ---------------------------------------------------------------------------
+
+/// Scale factor for converting f64 matrix entries to i64 buckets.
+/// Noise smaller than `1 / QUANTIZE_SCALE` (i.e. < 1e-6) is absorbed by rounding,
+/// while values differing by ≥ 1e-6 produce distinct integers.
+const QUANTIZE_SCALE: f64 = 1e6;
+
+/// Quantize a 4×4 f64 matrix to i64 by scaling and rounding each entry.
+/// Used to build geometry hashes that are stable under floating-point noise.
+fn quantize_matrix(mat: &[f64; 16]) -> [i64; 16] {
+    mat.map(|v| (v * QUANTIZE_SCALE).round() as i64)
+}
+
+// ---------------------------------------------------------------------------
 // CsgNode constructors and transform methods
 // ---------------------------------------------------------------------------
 
@@ -535,6 +550,72 @@ mod test {
             0.0, 0.0, 0.0, 1.0,
         ];
         assert!(mat_approx_eq(&n.flat_transform, &expected));
+    }
+
+    // -----------------------------------------------------------------------
+    // Group D: Matrix quantization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn quantize_identity_gives_expected_integers() {
+        // 1.0 → QUANTIZE_SCALE (as i64), 0.0 → 0
+        let q = quantize_matrix(&IDENTITY_4X4);
+        let s = QUANTIZE_SCALE as i64;
+        #[rustfmt::skip]
+        let expected: [i64; 16] = [
+            s, 0, 0, 0,
+            0, s, 0, 0,
+            0, 0, s, 0,
+            0, 0, 0, s,
+        ];
+        assert_eq!(q, expected);
+    }
+
+    #[test]
+    fn quantize_translation_correct() {
+        // Translation (2.5, -1.0, 0.0): dx/dy/dz live in column 3 (indices 3, 7, 11)
+        let mat = mat_translation(2.5, -1.0, 0.0);
+        let q = quantize_matrix(&mat);
+        let s = QUANTIZE_SCALE as i64;
+        #[rustfmt::skip]
+        let expected: [i64; 16] = [
+            s, 0, 0,  2_500_000,
+            0, s, 0, -1_000_000,
+            0, 0, s,  0,
+            0, 0, 0,  s,
+        ];
+        assert_eq!(q, expected);
+    }
+
+    #[test]
+    fn quantize_rot90_snaps_near_zero_entries() {
+        // rot_z(π/2): cos(π/2) ≈ 6.1e-17 should snap to 0; sin(π/2) = 1.0 → SCALE
+        let mat = mat_rot_aa([0.0, 0.0, 1.0], PI / 2.0);
+        let q = quantize_matrix(&mat);
+        let s = QUANTIZE_SCALE as i64;
+        #[rustfmt::skip]
+        let expected: [i64; 16] = [
+             0, -s, 0, 0,
+             s,  0, 0, 0,
+             0,  0, s, 0,
+             0,  0, 0, s,
+        ];
+        assert_eq!(q, expected);
+    }
+
+    #[test]
+    fn quantize_noise_below_precision_is_stable() {
+        // Noise smaller than 1/QUANTIZE_SCALE (= 1e-6) must not affect the result
+        let clean = mat_translation(1.0, 1.0, 1.0);
+        let noisy: [f64; 16] = clean.map(|v| v + 1e-10);
+        assert_eq!(quantize_matrix(&clean), quantize_matrix(&noisy));
+    }
+
+    #[test]
+    fn quantize_distinct_inputs_give_distinct_outputs() {
+        let a = mat_translation(1.0, 0.0, 0.0);
+        let b = mat_translation(2.0, 0.0, 0.0);
+        assert_ne!(quantize_matrix(&a), quantize_matrix(&b));
     }
 
     #[test]
