@@ -180,6 +180,13 @@ the following linear algebra operations
 Implement all the standard math functions defined on floating point numbers for scalar
 and array types, with broadcasting as appropriate for two-input functions.
 
-[_] implement unit tests
-[_] implement math functions
+[x] implement unit tests
+[x] implement math functions
+    Scalar Flint<T>: is_nan/infinite/finite, abs, sqrt, cbrt, powf, hypot,
+    exp/exp2/exp_m1, ln/log2/log10/ln_1p/log, sin/cos/tan, asin/acos/atan/atan2,
+    sinh/cosh/tanh, asinh/acosh/atanh.
+    Arrays (FlintArray, FlintVec, FlintView): element-wise loop via macro.
+    Binary functions (powf, hypot, log, atan2): scalar-broadcast second argument.
+    Note: exp_m1/ln_1p tests check containment of the actual float result, not the
+    exact input, because the quadratic correction term makes f(x) ≠ x near zero.
 
