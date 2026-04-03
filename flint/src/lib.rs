@@ -15,6 +15,8 @@ mod conv;
 mod cmp;
 // Module for arithmetic operators
 mod arith;
+// Module for linear algebra on FlintArray<T,4> and FlintArray<T,16>
+mod linalg;
 
 pub fn add<const N: usize>(a: Simd<f32, N>, b: Simd<f32, N>) -> Simd<f32, N> {
     a + b

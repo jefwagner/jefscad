@@ -161,15 +161,19 @@ the following linear algebra operations
   - the singular values should be sorted to be unique as possible (largest to smallest
     absolute value? if one must be negative, make it the last one? - dunno)
 
-[_] Implement unit tests for simple mat-mat, mat-vec, and vec-vec products
-[_] Implement lin-alg methods for mat_mul, the mat-vec product, and dot
-[_] Implement unit tests for matrix array-of-vectors and vector array-of-vectors
-[_] Implement lin-alg methods for array-of-vectors products
-[_] Implement unit tests for determinants
-[_] Implement methods for determinants
+[x] Implement unit tests for simple mat-mat, mat-vec, and vec-vec products
+[x] Implement lin-alg methods for mat_mul, the mat-vec product, and dot
+[x] Implement unit tests for matrix array-of-vectors and vector array-of-vectors
+[x] Implement lin-alg methods for array-of-vectors products
+    apply_batch / dot_batch: vectors stored as rows in a flat 4N SoA (Nx4 layout).
+[x] Implement unit tests for determinants
+[x] Implement methods for determinants
+    det3: upper-left 3x3 submatrix; det4: full 4x4 cofactor expansion along row 0.
 [_] Document the choices to try and make the svd unique
 [_] Implement unit tests for svd
 [_] Implement method for svd
+    Note: svd3 deferred — it's a convenience method (simplify transforms into
+    rotate-scale-rotate-translate) and not needed for authoring or evaluation.
 
 ### Standard math function
 
