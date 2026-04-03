@@ -8,6 +8,7 @@ Cargo.lock
 
 # Personal knowledge base (may be a symlink to ../kb)
 kb
+flint/tmp-old-flint-link
 
 # Python environment and build artifacts
 .venv/
@@ -15,6 +16,7 @@ python/jefscad/*.so
 __pycache__/
 *.pyc
 .pytest_cache/
+**/.ipynb_checkpoints/
 
 # Editor and OS files
 .vscode/
@@ -22,4 +24,6 @@ __pycache__/
 *.swp
 *.swo
 .DS_Store
+
+# Python doc build artifacts
 docs/_build/
