@@ -533,6 +533,70 @@ impl_array_arith!(f32);
 impl_array_arith!(f64);
 
 // -----------------------------------------------------------------------
+// Scalar-on-left FlintArray ops: Flint<T> op FlintArray<T,N>
+// For Add and Mul (commutative) we splat the scalar and delegate to the
+// array impl.  For Sub and Div (non-commutative) the SIMD splat pattern
+// is applied directly.
+// -----------------------------------------------------------------------
+
+macro_rules! impl_scalar_array_arith {
+    ($T:ty) => {
+        impl<const N: usize> Add<FlintArray<$T, N>> for Flint<$T> {
+            type Output = FlintArray<$T, N>;
+            fn add(self, rhs: FlintArray<$T, N>) -> FlintArray<$T, N> {
+                rhs + self  // commutative: delegate to array + scalar
+            }
+        }
+
+        impl<const N: usize> Sub<FlintArray<$T, N>> for Flint<$T> {
+            type Output = FlintArray<$T, N>;
+            fn sub(self, rhs: FlintArray<$T, N>) -> FlintArray<$T, N> {
+                // splat(self) - rhs element-wise
+                let slb = Simd::<$T, N>::splat(self.lb);
+                let sub = Simd::<$T, N>::splat(self.ub);
+                let rlb = Simd::<$T, N>::from_array(rhs.lb);
+                let rub = Simd::<$T, N>::from_array(rhs.ub);
+                FlintArray {
+                    lb: (slb - rub).nd().to_array(),
+                    ub: (sub - rlb).nu().to_array(),
+                }
+            }
+        }
+
+        impl<const N: usize> Mul<FlintArray<$T, N>> for Flint<$T> {
+            type Output = FlintArray<$T, N>;
+            fn mul(self, rhs: FlintArray<$T, N>) -> FlintArray<$T, N> {
+                rhs * self  // commutative: delegate to array * scalar
+            }
+        }
+
+        impl<const N: usize> Div<FlintArray<$T, N>> for Flint<$T> {
+            type Output = FlintArray<$T, N>;
+            fn div(self, rhs: FlintArray<$T, N>) -> FlintArray<$T, N> {
+                // splat(self) / rhs element-wise using 4-boundary min/max
+                let slb = Simd::<$T, N>::splat(self.lb);
+                let sub = Simd::<$T, N>::splat(self.ub);
+                let rlb = Simd::<$T, N>::from_array(rhs.lb);
+                let rub = Simd::<$T, N>::from_array(rhs.ub);
+                let q1 = slb / rlb;
+                let q2 = slb / rub;
+                let q3 = sub / rlb;
+                let q4 = sub / rub;
+                let lo = q1.simd_min(q2).simd_min(q3).simd_min(q4);
+                let hi = q1.simd_max(q2).simd_max(q3).simd_max(q4);
+                FlintArray {
+                    lb: lo.nd().to_array(),
+                    ub: hi.nu().to_array(),
+                }
+            }
+        }
+    };
+}
+
+impl_scalar_array_arith!(f32);
+impl_scalar_array_arith!(f64);
+
+// -----------------------------------------------------------------------
 // FlintVec / FlintView arithmetic
 // Chunked SIMD (lane = 8) with scalar fallback for the remainder.
 // FlintView binary ops return FlintVec (owned) since slices are immutable.
@@ -1013,11 +1077,616 @@ macro_rules! impl_vec_view_arith {
                 }
             }
         }
+
+        // -----------------------------------------------------------------------
+        // Scalar broadcast ops: FlintVec / FlintView / FlintViewMut op Flint<T>
+        // and the reverse Flint<T> op FlintVec / FlintView.
+        // These are separate from the slice-based ops above and use Simd::splat
+        // to broadcast the scalar bounds across each chunk.
+        // -----------------------------------------------------------------------
+
+        impl Add<Flint<$T>> for FlintVec<$T> {
+            type Output = FlintVec<$T>;
+            fn add(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    lb.extend_from_slice(&(<$S8>::from_slice(&self.lb[s..]) + rlb).nd().to_array());
+                    ub.extend_from_slice(&(<$S8>::from_slice(&self.ub[s..]) + rub).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    lb.push((self.lb[j] + rhs.lb).nd());
+                    ub.push((self.ub[j] + rhs.ub).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        impl AddAssign<Flint<$T>> for FlintVec<$T> {
+            fn add_assign(&mut self, rhs: Flint<$T>) {
+                let owned = std::mem::replace(self, FlintVec { lb: vec![], ub: vec![] });
+                *self = owned + rhs;
+            }
+        }
+
+        impl Sub<Flint<$T>> for FlintVec<$T> {
+            type Output = FlintVec<$T>;
+            fn sub(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    lb.extend_from_slice(&(<$S8>::from_slice(&self.lb[s..]) - rub).nd().to_array());
+                    ub.extend_from_slice(&(<$S8>::from_slice(&self.ub[s..]) - rlb).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    lb.push((self.lb[j] - rhs.ub).nd());
+                    ub.push((self.ub[j] - rhs.lb).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        impl SubAssign<Flint<$T>> for FlintVec<$T> {
+            fn sub_assign(&mut self, rhs: Flint<$T>) {
+                let owned = std::mem::replace(self, FlintVec { lb: vec![], ub: vec![] });
+                *self = owned - rhs;
+            }
+        }
+
+        impl Mul<Flint<$T>> for FlintVec<$T> {
+            type Output = FlintVec<$T>;
+            fn mul(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let slb = <$S8>::from_slice(&self.lb[s..]);
+                    let sub = <$S8>::from_slice(&self.ub[s..]);
+                    let p1 = slb * rlb; let p2 = slb * rub;
+                    let p3 = sub * rlb; let p4 = sub * rub;
+                    lb.extend_from_slice(&p1.simd_min(p2).simd_min(p3).simd_min(p4).nd().to_array());
+                    ub.extend_from_slice(&p1.simd_max(p2).simd_max(p3).simd_max(p4).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    let p1 = self.lb[j] * rhs.lb; let p2 = self.lb[j] * rhs.ub;
+                    let p3 = self.ub[j] * rhs.lb; let p4 = self.ub[j] * rhs.ub;
+                    lb.push(p1.min(p2).min(p3).min(p4).nd());
+                    ub.push(p1.max(p2).max(p3).max(p4).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        impl MulAssign<Flint<$T>> for FlintVec<$T> {
+            fn mul_assign(&mut self, rhs: Flint<$T>) {
+                let owned = std::mem::replace(self, FlintVec { lb: vec![], ub: vec![] });
+                *self = owned * rhs;
+            }
+        }
+
+        impl Div<Flint<$T>> for FlintVec<$T> {
+            type Output = FlintVec<$T>;
+            fn div(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let slb = <$S8>::from_slice(&self.lb[s..]);
+                    let sub = <$S8>::from_slice(&self.ub[s..]);
+                    let q1 = slb / rlb; let q2 = slb / rub;
+                    let q3 = sub / rlb; let q4 = sub / rub;
+                    lb.extend_from_slice(&q1.simd_min(q2).simd_min(q3).simd_min(q4).nd().to_array());
+                    ub.extend_from_slice(&q1.simd_max(q2).simd_max(q3).simd_max(q4).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    let q1 = self.lb[j] / rhs.lb; let q2 = self.lb[j] / rhs.ub;
+                    let q3 = self.ub[j] / rhs.lb; let q4 = self.ub[j] / rhs.ub;
+                    lb.push(q1.min(q2).min(q3).min(q4).nd());
+                    ub.push(q1.max(q2).max(q3).max(q4).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        impl DivAssign<Flint<$T>> for FlintVec<$T> {
+            fn div_assign(&mut self, rhs: Flint<$T>) {
+                let owned = std::mem::replace(self, FlintVec { lb: vec![], ub: vec![] });
+                *self = owned / rhs;
+            }
+        }
+
+        // scalar + / - / * / / FlintVec (scalar on left, consumes vec)
+        impl Add<FlintVec<$T>> for Flint<$T> {
+            type Output = FlintVec<$T>;
+            fn add(self, rhs: FlintVec<$T>) -> FlintVec<$T> { rhs + self }
+        }
+
+        impl Sub<FlintVec<$T>> for Flint<$T> {
+            type Output = FlintVec<$T>;
+            fn sub(self, rhs: FlintVec<$T>) -> FlintVec<$T> {
+                // splat(self) - rhs[i] for each i
+                const L: usize = 8;
+                let n = rhs.lb.len();
+                let slb = <$S8>::splat(self.lb);
+                let sub = <$S8>::splat(self.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    lb.extend_from_slice(&(slb - <$S8>::from_slice(&rhs.ub[s..])).nd().to_array());
+                    ub.extend_from_slice(&(sub - <$S8>::from_slice(&rhs.lb[s..])).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    lb.push((self.lb - rhs.ub[j]).nd());
+                    ub.push((self.ub - rhs.lb[j]).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        impl Mul<FlintVec<$T>> for Flint<$T> {
+            type Output = FlintVec<$T>;
+            fn mul(self, rhs: FlintVec<$T>) -> FlintVec<$T> { rhs * self }
+        }
+
+        impl Div<FlintVec<$T>> for Flint<$T> {
+            type Output = FlintVec<$T>;
+            fn div(self, rhs: FlintVec<$T>) -> FlintVec<$T> {
+                // splat(self) / rhs[i] using 4-boundary min/max
+                const L: usize = 8;
+                let n = rhs.lb.len();
+                let slb = <$S8>::splat(self.lb);
+                let sub = <$S8>::splat(self.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let rl = <$S8>::from_slice(&rhs.lb[s..]);
+                    let ru = <$S8>::from_slice(&rhs.ub[s..]);
+                    let q1 = slb / rl; let q2 = slb / ru;
+                    let q3 = sub / rl; let q4 = sub / ru;
+                    lb.extend_from_slice(&q1.simd_min(q2).simd_min(q3).simd_min(q4).nd().to_array());
+                    ub.extend_from_slice(&q1.simd_max(q2).simd_max(q3).simd_max(q4).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    let q1 = self.lb / rhs.lb[j]; let q2 = self.lb / rhs.ub[j];
+                    let q3 = self.ub / rhs.lb[j]; let q4 = self.ub / rhs.ub[j];
+                    lb.push(q1.min(q2).min(q3).min(q4).nd());
+                    ub.push(q1.max(q2).max(q3).max(q4).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        // FlintView + scalar and scalar + FlintView (no assign — views are immutable)
+
+        impl<'a> Add<Flint<$T>> for FlintView<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn add(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    lb.extend_from_slice(&(<$S8>::from_slice(&self.lb[s..]) + rlb).nd().to_array());
+                    ub.extend_from_slice(&(<$S8>::from_slice(&self.ub[s..]) + rub).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    lb.push((self.lb[j] + rhs.lb).nd());
+                    ub.push((self.ub[j] + rhs.ub).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        impl<'a> Sub<Flint<$T>> for FlintView<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn sub(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    lb.extend_from_slice(&(<$S8>::from_slice(&self.lb[s..]) - rub).nd().to_array());
+                    ub.extend_from_slice(&(<$S8>::from_slice(&self.ub[s..]) - rlb).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    lb.push((self.lb[j] - rhs.ub).nd());
+                    ub.push((self.ub[j] - rhs.lb).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        impl<'a> Mul<Flint<$T>> for FlintView<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn mul(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let slb = <$S8>::from_slice(&self.lb[s..]);
+                    let sub = <$S8>::from_slice(&self.ub[s..]);
+                    let p1 = slb * rlb; let p2 = slb * rub;
+                    let p3 = sub * rlb; let p4 = sub * rub;
+                    lb.extend_from_slice(&p1.simd_min(p2).simd_min(p3).simd_min(p4).nd().to_array());
+                    ub.extend_from_slice(&p1.simd_max(p2).simd_max(p3).simd_max(p4).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    let p1 = self.lb[j] * rhs.lb; let p2 = self.lb[j] * rhs.ub;
+                    let p3 = self.ub[j] * rhs.lb; let p4 = self.ub[j] * rhs.ub;
+                    lb.push(p1.min(p2).min(p3).min(p4).nd());
+                    ub.push(p1.max(p2).max(p3).max(p4).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        impl<'a> Div<Flint<$T>> for FlintView<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn div(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let slb = <$S8>::from_slice(&self.lb[s..]);
+                    let sub = <$S8>::from_slice(&self.ub[s..]);
+                    let q1 = slb / rlb; let q2 = slb / rub;
+                    let q3 = sub / rlb; let q4 = sub / rub;
+                    lb.extend_from_slice(&q1.simd_min(q2).simd_min(q3).simd_min(q4).nd().to_array());
+                    ub.extend_from_slice(&q1.simd_max(q2).simd_max(q3).simd_max(q4).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    let q1 = self.lb[j] / rhs.lb; let q2 = self.lb[j] / rhs.ub;
+                    let q3 = self.ub[j] / rhs.lb; let q4 = self.ub[j] / rhs.ub;
+                    lb.push(q1.min(q2).min(q3).min(q4).nd());
+                    ub.push(q1.max(q2).max(q3).max(q4).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        impl<'a> Add<FlintView<'a, $T>> for Flint<$T> {
+            type Output = FlintVec<$T>;
+            fn add(self, rhs: FlintView<'a, $T>) -> FlintVec<$T> { rhs + self }
+        }
+
+        impl<'a> Sub<FlintView<'a, $T>> for Flint<$T> {
+            type Output = FlintVec<$T>;
+            fn sub(self, rhs: FlintView<'a, $T>) -> FlintVec<$T> {
+                const L: usize = 8;
+                let n = rhs.lb.len();
+                let slb = <$S8>::splat(self.lb);
+                let sub = <$S8>::splat(self.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    lb.extend_from_slice(&(slb - <$S8>::from_slice(&rhs.ub[s..])).nd().to_array());
+                    ub.extend_from_slice(&(sub - <$S8>::from_slice(&rhs.lb[s..])).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    lb.push((self.lb - rhs.ub[j]).nd());
+                    ub.push((self.ub - rhs.lb[j]).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        impl<'a> Mul<FlintView<'a, $T>> for Flint<$T> {
+            type Output = FlintVec<$T>;
+            fn mul(self, rhs: FlintView<'a, $T>) -> FlintVec<$T> { rhs * self }
+        }
+
+        impl<'a> Div<FlintView<'a, $T>> for Flint<$T> {
+            type Output = FlintVec<$T>;
+            fn div(self, rhs: FlintView<'a, $T>) -> FlintVec<$T> {
+                const L: usize = 8;
+                let n = rhs.lb.len();
+                let slb = <$S8>::splat(self.lb);
+                let sub = <$S8>::splat(self.ub);
+                let mut lb = Vec::with_capacity(n);
+                let mut ub = Vec::with_capacity(n);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let rl = <$S8>::from_slice(&rhs.lb[s..]);
+                    let ru = <$S8>::from_slice(&rhs.ub[s..]);
+                    let q1 = slb / rl; let q2 = slb / ru;
+                    let q3 = sub / rl; let q4 = sub / ru;
+                    lb.extend_from_slice(&q1.simd_min(q2).simd_min(q3).simd_min(q4).nd().to_array());
+                    ub.extend_from_slice(&q1.simd_max(q2).simd_max(q3).simd_max(q4).nu().to_array());
+                }
+                for j in (chunks * L)..n {
+                    let q1 = self.lb / rhs.lb[j]; let q2 = self.lb / rhs.ub[j];
+                    let q3 = self.ub / rhs.lb[j]; let q4 = self.ub / rhs.ub[j];
+                    lb.push(q1.min(q2).min(q3).min(q4).nd());
+                    ub.push(q1.max(q2).max(q3).max(q4).nu());
+                }
+                FlintVec { lb, ub }
+            }
+        }
+
+        // FlintViewMut + scalar (non-assign delegates to FlintView + scalar)
+
+        impl<'a> Add<Flint<$T>> for FlintViewMut<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn add(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                FlintView::<$T> { lb: self.lb, ub: self.ub } + rhs
+            }
+        }
+
+        impl<'a> Sub<Flint<$T>> for FlintViewMut<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn sub(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                FlintView::<$T> { lb: self.lb, ub: self.ub } - rhs
+            }
+        }
+
+        impl<'a> Mul<Flint<$T>> for FlintViewMut<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn mul(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                FlintView::<$T> { lb: self.lb, ub: self.ub } * rhs
+            }
+        }
+
+        impl<'a> Div<Flint<$T>> for FlintViewMut<'a, $T> {
+            type Output = FlintVec<$T>;
+            fn div(self, rhs: Flint<$T>) -> FlintVec<$T> {
+                FlintView::<$T> { lb: self.lb, ub: self.ub } / rhs
+            }
+        }
+
+        impl AddAssign<Flint<$T>> for FlintViewMut<'_, $T> {
+            fn add_assign(&mut self, rhs: Flint<$T>) {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let lo = (<$S8>::from_slice(&self.lb[s..]) + rlb).nd();
+                    let hi = (<$S8>::from_slice(&self.ub[s..]) + rub).nu();
+                    self.lb[s..s + L].copy_from_slice(&lo.to_array());
+                    self.ub[s..s + L].copy_from_slice(&hi.to_array());
+                }
+                for j in (chunks * L)..n {
+                    self.lb[j] = (self.lb[j] + rhs.lb).nd();
+                    self.ub[j] = (self.ub[j] + rhs.ub).nu();
+                }
+            }
+        }
+
+        impl SubAssign<Flint<$T>> for FlintViewMut<'_, $T> {
+            fn sub_assign(&mut self, rhs: Flint<$T>) {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let lo = (<$S8>::from_slice(&self.lb[s..]) - rub).nd();
+                    let hi = (<$S8>::from_slice(&self.ub[s..]) - rlb).nu();
+                    self.lb[s..s + L].copy_from_slice(&lo.to_array());
+                    self.ub[s..s + L].copy_from_slice(&hi.to_array());
+                }
+                for j in (chunks * L)..n {
+                    self.lb[j] = (self.lb[j] - rhs.ub).nd();
+                    self.ub[j] = (self.ub[j] - rhs.lb).nu();
+                }
+            }
+        }
+
+        impl MulAssign<Flint<$T>> for FlintViewMut<'_, $T> {
+            fn mul_assign(&mut self, rhs: Flint<$T>) {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let slb = <$S8>::from_slice(&self.lb[s..]);
+                    let sub = <$S8>::from_slice(&self.ub[s..]);
+                    let p1 = slb * rlb; let p2 = slb * rub;
+                    let p3 = sub * rlb; let p4 = sub * rub;
+                    let lo = p1.simd_min(p2).simd_min(p3).simd_min(p4).nd();
+                    let hi = p1.simd_max(p2).simd_max(p3).simd_max(p4).nu();
+                    self.lb[s..s + L].copy_from_slice(&lo.to_array());
+                    self.ub[s..s + L].copy_from_slice(&hi.to_array());
+                }
+                for j in (chunks * L)..n {
+                    let p1 = self.lb[j] * rhs.lb; let p2 = self.lb[j] * rhs.ub;
+                    let p3 = self.ub[j] * rhs.lb; let p4 = self.ub[j] * rhs.ub;
+                    self.lb[j] = p1.min(p2).min(p3).min(p4).nd();
+                    self.ub[j] = p1.max(p2).max(p3).max(p4).nu();
+                }
+            }
+        }
+
+        impl DivAssign<Flint<$T>> for FlintViewMut<'_, $T> {
+            fn div_assign(&mut self, rhs: Flint<$T>) {
+                const L: usize = 8;
+                let n = self.lb.len();
+                let rlb = <$S8>::splat(rhs.lb);
+                let rub = <$S8>::splat(rhs.ub);
+                let chunks = n / L;
+                for i in 0..chunks {
+                    let s = i * L;
+                    let slb = <$S8>::from_slice(&self.lb[s..]);
+                    let sub = <$S8>::from_slice(&self.ub[s..]);
+                    let q1 = slb / rlb; let q2 = slb / rub;
+                    let q3 = sub / rlb; let q4 = sub / rub;
+                    let lo = q1.simd_min(q2).simd_min(q3).simd_min(q4).nd();
+                    let hi = q1.simd_max(q2).simd_max(q3).simd_max(q4).nu();
+                    self.lb[s..s + L].copy_from_slice(&lo.to_array());
+                    self.ub[s..s + L].copy_from_slice(&hi.to_array());
+                }
+                for j in (chunks * L)..n {
+                    let q1 = self.lb[j] / rhs.lb; let q2 = self.lb[j] / rhs.ub;
+                    let q3 = self.ub[j] / rhs.lb; let q4 = self.ub[j] / rhs.ub;
+                    self.lb[j] = q1.min(q2).min(q3).min(q4).nd();
+                    self.ub[j] = q1.max(q2).max(q3).max(q4).nu();
+                }
+            }
+        }
     };
 }
 
 impl_vec_view_arith!(f32, f32x8);
 impl_vec_view_arith!(f64, f64x8);
+
+// -----------------------------------------------------------------------
+// Row/column-wise broadcasting: FlintArray<T,16> op FlintArray<T,4>
+//
+// Row-major 4×4 layout: element at (row, col) is stored at index row*4+col.
+//   row_wise: element i uses rhs[i/4]  → [a,a,a,a, b,b,b,b, c,c,c,c, d,d,d,d]
+//   col_wise: element i uses rhs[i%4]  → [a,b,c,d, a,b,c,d, a,b,c,d, a,b,c,d]
+//
+// Both return a new owned FlintArray<T,16>.
+// -----------------------------------------------------------------------
+
+macro_rules! impl_row_col_wise {
+    ($T:ty) => {
+        impl FlintArray<$T, 16> {
+            fn row_broadcast(rhs: FlintArray<$T, 4>) -> (Simd<$T, 16>, Simd<$T, 16>) {
+                let lb = std::array::from_fn::<$T, 16, _>(|i| rhs.lb[i / 4]);
+                let ub = std::array::from_fn::<$T, 16, _>(|i| rhs.ub[i / 4]);
+                (Simd::from_array(lb), Simd::from_array(ub))
+            }
+
+            fn col_broadcast(rhs: FlintArray<$T, 4>) -> (Simd<$T, 16>, Simd<$T, 16>) {
+                let lb = std::array::from_fn::<$T, 16, _>(|i| rhs.lb[i % 4]);
+                let ub = std::array::from_fn::<$T, 16, _>(|i| rhs.ub[i % 4]);
+                (Simd::from_array(lb), Simd::from_array(ub))
+            }
+
+            pub fn row_wise_add(&self, rhs: FlintArray<$T, 4>) -> FlintArray<$T, 16> {
+                let (rlb, rub) = Self::row_broadcast(rhs);
+                let slb = Simd::<$T, 16>::from_array(self.lb);
+                let sub = Simd::<$T, 16>::from_array(self.ub);
+                FlintArray { lb: (slb + rlb).nd().to_array(), ub: (sub + rub).nu().to_array() }
+            }
+
+            pub fn row_wise_sub(&self, rhs: FlintArray<$T, 4>) -> FlintArray<$T, 16> {
+                let (rlb, rub) = Self::row_broadcast(rhs);
+                let slb = Simd::<$T, 16>::from_array(self.lb);
+                let sub = Simd::<$T, 16>::from_array(self.ub);
+                FlintArray { lb: (slb - rub).nd().to_array(), ub: (sub - rlb).nu().to_array() }
+            }
+
+            pub fn row_wise_mul(&self, rhs: FlintArray<$T, 4>) -> FlintArray<$T, 16> {
+                let (rlb, rub) = Self::row_broadcast(rhs);
+                let slb = Simd::<$T, 16>::from_array(self.lb);
+                let sub = Simd::<$T, 16>::from_array(self.ub);
+                let p1 = slb * rlb; let p2 = slb * rub;
+                let p3 = sub * rlb; let p4 = sub * rub;
+                FlintArray {
+                    lb: p1.simd_min(p2).simd_min(p3).simd_min(p4).nd().to_array(),
+                    ub: p1.simd_max(p2).simd_max(p3).simd_max(p4).nu().to_array(),
+                }
+            }
+
+            pub fn row_wise_div(&self, rhs: FlintArray<$T, 4>) -> FlintArray<$T, 16> {
+                let (rlb, rub) = Self::row_broadcast(rhs);
+                let slb = Simd::<$T, 16>::from_array(self.lb);
+                let sub = Simd::<$T, 16>::from_array(self.ub);
+                let q1 = slb / rlb; let q2 = slb / rub;
+                let q3 = sub / rlb; let q4 = sub / rub;
+                FlintArray {
+                    lb: q1.simd_min(q2).simd_min(q3).simd_min(q4).nd().to_array(),
+                    ub: q1.simd_max(q2).simd_max(q3).simd_max(q4).nu().to_array(),
+                }
+            }
+
+            pub fn col_wise_add(&self, rhs: FlintArray<$T, 4>) -> FlintArray<$T, 16> {
+                let (rlb, rub) = Self::col_broadcast(rhs);
+                let slb = Simd::<$T, 16>::from_array(self.lb);
+                let sub = Simd::<$T, 16>::from_array(self.ub);
+                FlintArray { lb: (slb + rlb).nd().to_array(), ub: (sub + rub).nu().to_array() }
+            }
+
+            pub fn col_wise_sub(&self, rhs: FlintArray<$T, 4>) -> FlintArray<$T, 16> {
+                let (rlb, rub) = Self::col_broadcast(rhs);
+                let slb = Simd::<$T, 16>::from_array(self.lb);
+                let sub = Simd::<$T, 16>::from_array(self.ub);
+                FlintArray { lb: (slb - rub).nd().to_array(), ub: (sub - rlb).nu().to_array() }
+            }
+
+            pub fn col_wise_mul(&self, rhs: FlintArray<$T, 4>) -> FlintArray<$T, 16> {
+                let (rlb, rub) = Self::col_broadcast(rhs);
+                let slb = Simd::<$T, 16>::from_array(self.lb);
+                let sub = Simd::<$T, 16>::from_array(self.ub);
+                let p1 = slb * rlb; let p2 = slb * rub;
+                let p3 = sub * rlb; let p4 = sub * rub;
+                FlintArray {
+                    lb: p1.simd_min(p2).simd_min(p3).simd_min(p4).nd().to_array(),
+                    ub: p1.simd_max(p2).simd_max(p3).simd_max(p4).nu().to_array(),
+                }
+            }
+
+            pub fn col_wise_div(&self, rhs: FlintArray<$T, 4>) -> FlintArray<$T, 16> {
+                let (rlb, rub) = Self::col_broadcast(rhs);
+                let slb = Simd::<$T, 16>::from_array(self.lb);
+                let sub = Simd::<$T, 16>::from_array(self.ub);
+                let q1 = slb / rlb; let q2 = slb / rub;
+                let q3 = sub / rlb; let q4 = sub / rub;
+                FlintArray {
+                    lb: q1.simd_min(q2).simd_min(q3).simd_min(q4).nd().to_array(),
+                    ub: q1.simd_max(q2).simd_max(q3).simd_max(q4).nu().to_array(),
+                }
+            }
+        }
+    };
+}
+
+impl_row_col_wise!(f32);
+impl_row_col_wise!(f64);
 
 #[cfg(test)]
 mod test {
@@ -1585,5 +2254,446 @@ mod test {
         assert!(lb[0] <= 2.0_f32 && 2.0_f32 <= ub[0]);
         assert!(lb[1] <= 3.0_f32 && 3.0_f32 <= ub[1]);
         assert!(lb[2] <= 4.0_f32 && 4.0_f32 <= ub[2]);
+    }
+
+    // ---- Broadcasting: FlintArray + scalar (array-on-left) ----
+
+    #[test]
+    fn test_array_add_scalar() {
+        let arr = flint32_arr!(1, 2, 3, 4);
+        let result = arr + flint32!(10_i32);
+        for (i, e) in [11.0_f32, 12.0, 13.0, 14.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_array_sub_scalar() {
+        let arr = flint32_arr!(10, 20, 30, 40);
+        let result = arr - flint32!(5_i32);
+        for (i, e) in [5.0_f32, 15.0, 25.0, 35.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_array_mul_scalar() {
+        let arr = flint64_arr!(1, 2, 3, 4);
+        let result = arr * flint64!(3_i32);
+        for (i, e) in [3.0_f64, 6.0, 9.0, 12.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_array_div_scalar() {
+        let arr = flint64_arr!(4, 8, 12, 16);
+        let result = arr / flint64!(4_i32);
+        for (i, e) in [1.0_f64, 2.0, 3.0, 4.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_array_add_assign_scalar() {
+        let mut arr = flint32_arr!(1, 2, 3, 4);
+        arr += flint32!(10_i32);
+        for (i, e) in [11.0_f32, 12.0, 13.0, 14.0].iter().enumerate() {
+            assert!(arr.lb[i] <= *e && *e <= arr.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_array_sub_assign_scalar() {
+        let mut arr = flint64_arr!(10, 20, 30);
+        arr -= flint64!(5_i32);
+        for (i, e) in [5.0_f64, 15.0, 25.0].iter().enumerate() {
+            assert!(arr.lb[i] <= *e && *e <= arr.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_array_mul_assign_scalar() {
+        let mut arr = flint32_arr!(1, 2, 3);
+        arr *= flint32!(4_i32);
+        for (i, e) in [4.0_f32, 8.0, 12.0].iter().enumerate() {
+            assert!(arr.lb[i] <= *e && *e <= arr.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_array_div_assign_scalar() {
+        let mut arr = flint64_arr!(6, 12, 18);
+        arr /= flint64!(3_i32);
+        for (i, e) in [2.0_f64, 4.0, 6.0].iter().enumerate() {
+            assert!(arr.lb[i] <= *e && *e <= arr.ub[i]);
+        }
+    }
+
+    // ---- Broadcasting: scalar + FlintArray (scalar-on-left) ----
+
+    #[test]
+    fn test_scalar_add_array() {
+        let arr = flint32_arr!(1, 2, 3, 4);
+        let result = flint32!(10_i32) + arr;
+        for (i, e) in [11.0_f32, 12.0, 13.0, 14.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_scalar_sub_array() {
+        // scalar - arr[i] for each i (non-commutative)
+        let arr = flint32_arr!(1, 2, 3, 4);
+        let result = flint32!(10_i32) - arr;
+        for (i, e) in [9.0_f32, 8.0, 7.0, 6.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_scalar_mul_array() {
+        let arr = flint64_arr!(1, 2, 3, 4);
+        let result = flint64!(3_i32) * arr;
+        for (i, e) in [3.0_f64, 6.0, 9.0, 12.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_scalar_div_array() {
+        // scalar / arr[i] for each i (non-commutative)
+        let arr = flint64_arr!(1, 2, 4, 8);
+        let result = flint64!(8_i32) / arr;
+        for (i, e) in [8.0_f64, 4.0, 2.0, 1.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_scalar_sub_array_asymmetric() {
+        // scalar - arr ≠ arr - scalar when values differ
+        let arr = flint32_arr!(1, 2, 3);
+        let s = flint32!(2_i32);
+        let arr_minus_s = arr - s;  // [1, 0, -1]
+        let s_minus_arr = s - arr;  // [1, 0, -1] reversed sign on arr side... actually [1, 0, -1]
+        // element 2: arr[2]-s = 1, s-arr[2] = -1
+        assert!(arr_minus_s.lb[2] <= 1.0_f32 && 1.0_f32 <= arr_minus_s.ub[2]);
+        assert!(s_minus_arr.lb[2] <= -1.0_f32 && -1.0_f32 <= s_minus_arr.ub[2]);
+    }
+
+    // ---- Broadcasting: FlintVec + scalar (both directions) ----
+
+    #[test]
+    fn test_vec_add_scalar() {
+        let v = flint32_vec![1, 2, 3, 4];
+        let result = v + flint32!(10_i32);
+        for (i, e) in [11.0_f32, 12.0, 13.0, 14.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_vec_sub_scalar() {
+        let v = flint64_vec![10, 20, 30];
+        let result = v - flint64!(5_i32);
+        for (i, e) in [5.0_f64, 15.0, 25.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_vec_mul_scalar() {
+        let v = flint32_vec![1, 2, 3];
+        let result = v * flint32!(4_i32);
+        for (i, e) in [4.0_f32, 8.0, 12.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_vec_div_scalar() {
+        let v = flint64_vec![4, 8, 12];
+        let result = v / flint64!(4_i32);
+        for (i, e) in [1.0_f64, 2.0, 3.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_vec_add_assign_scalar() {
+        let mut v = flint32_vec![1, 2, 3];
+        v += flint32!(10_i32);
+        for (i, e) in [11.0_f32, 12.0, 13.0].iter().enumerate() {
+            assert!(v.lb[i] <= *e && *e <= v.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_vec_sub_assign_scalar() {
+        let mut v = flint64_vec![10, 20, 30];
+        v -= flint64!(5_i32);
+        for (i, e) in [5.0_f64, 15.0, 25.0].iter().enumerate() {
+            assert!(v.lb[i] <= *e && *e <= v.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_vec_mul_assign_scalar() {
+        let mut v = flint32_vec![1, 2, 3];
+        v *= flint32!(3_i32);
+        for (i, e) in [3.0_f32, 6.0, 9.0].iter().enumerate() {
+            assert!(v.lb[i] <= *e && *e <= v.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_vec_div_assign_scalar() {
+        let mut v = flint64_vec![6, 12, 18];
+        v /= flint64!(3_i32);
+        for (i, e) in [2.0_f64, 4.0, 6.0].iter().enumerate() {
+            assert!(v.lb[i] <= *e && *e <= v.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_scalar_add_vec() {
+        let v = flint32_vec![1, 2, 3];
+        let result = flint32!(10_i32) + v;
+        for (i, e) in [11.0_f32, 12.0, 13.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_scalar_sub_vec() {
+        let v = flint32_vec![1, 2, 3];
+        let result = flint32!(10_i32) - v;
+        for (i, e) in [9.0_f32, 8.0, 7.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_scalar_mul_vec() {
+        let v = flint64_vec![1, 2, 3];
+        let result = flint64!(4_i32) * v;
+        for (i, e) in [4.0_f64, 8.0, 12.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_scalar_div_vec() {
+        let v = flint64_vec![1, 2, 3, 4];
+        let result = flint64!(12_i32) / v;
+        for (i, e) in [12.0_f64, 6.0, 4.0, 3.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    // test that chunked SIMD + scalar remainder both fire for scalar broadcast
+    #[test]
+    fn test_vec_scalar_broadcast_long() {
+        let n = 9_usize;
+        let v = flint32_vec![1, 1, 1, 1, 1, 1, 1, 1, 1];
+        let result = v + flint32!(5_i32);
+        assert_eq!(result.lb.len(), n);
+        for i in 0..n {
+            assert!(result.lb[i] <= 6.0_f32 && 6.0_f32 <= result.ub[i]);
+        }
+    }
+
+    // ---- Broadcasting: FlintView + scalar (both directions) ----
+
+    #[test]
+    fn test_view_add_scalar() {
+        let v = flint64_vec![1, 2, 3, 4];
+        let view = FlintView { lb: &v.lb, ub: &v.ub };
+        let result = view + flint64!(10_i32);
+        for (i, e) in [11.0_f64, 12.0, 13.0, 14.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_view_sub_scalar() {
+        let v = flint32_vec![10, 20, 30];
+        let view = FlintView { lb: &v.lb, ub: &v.ub };
+        let result = view - flint32!(5_i32);
+        for (i, e) in [5.0_f32, 15.0, 25.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_scalar_add_view() {
+        let v = flint32_vec![1, 2, 3];
+        let view = FlintView { lb: &v.lb, ub: &v.ub };
+        let result = flint32!(10_i32) + view;
+        for (i, e) in [11.0_f32, 12.0, 13.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_scalar_sub_view() {
+        let v = flint64_vec![1, 2, 3];
+        let view = FlintView { lb: &v.lb, ub: &v.ub };
+        let result = flint64!(10_i32) - view;
+        for (i, e) in [9.0_f64, 8.0, 7.0].iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    // ---- Broadcasting: FlintViewMut assign ops ----
+
+    #[test]
+    fn test_viewmut_add_assign_scalar() {
+        let mut v = flint32_vec![1, 2, 3];
+        {
+            let mut vm = FlintViewMut { lb: &mut v.lb, ub: &mut v.ub };
+            vm += flint32!(10_i32);
+        }
+        for (i, e) in [11.0_f32, 12.0, 13.0].iter().enumerate() {
+            assert!(v.lb[i] <= *e && *e <= v.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_viewmut_sub_assign_scalar() {
+        let mut v = flint64_vec![10, 20, 30];
+        {
+            let mut vm = FlintViewMut { lb: &mut v.lb, ub: &mut v.ub };
+            vm -= flint64!(5_i32);
+        }
+        for (i, e) in [5.0_f64, 15.0, 25.0].iter().enumerate() {
+            assert!(v.lb[i] <= *e && *e <= v.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_viewmut_mul_assign_scalar() {
+        let mut v = flint32_vec![1, 2, 3];
+        {
+            let mut vm = FlintViewMut { lb: &mut v.lb, ub: &mut v.ub };
+            vm *= flint32!(4_i32);
+        }
+        for (i, e) in [4.0_f32, 8.0, 12.0].iter().enumerate() {
+            assert!(v.lb[i] <= *e && *e <= v.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_viewmut_div_assign_scalar() {
+        let mut v = flint64_vec![6, 12, 18];
+        {
+            let mut vm = FlintViewMut { lb: &mut v.lb, ub: &mut v.ub };
+            vm /= flint64!(3_i32);
+        }
+        for (i, e) in [2.0_f64, 4.0, 6.0].iter().enumerate() {
+            assert!(v.lb[i] <= *e && *e <= v.ub[i]);
+        }
+    }
+
+    // ---- Row/col-wise 4→16 methods ----
+
+    #[test]
+    fn test_row_wise_add_f32() {
+        // each row i gets +rhs[i]
+        let mat = flint32_arr!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+        let rhs = flint32_arr!(10, 20, 30, 40);
+        let result = mat.row_wise_add(rhs);
+        let expected = [11.0_f32, 12.0, 13.0, 14.0,
+                        25.0,     26.0, 27.0, 28.0,
+                        39.0,     40.0, 41.0, 42.0,
+                        53.0,     54.0, 55.0, 56.0];
+        for (i, e) in expected.iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i],
+                    "row_wise_add[{i}]: expected {e}, got [{}, {}]", result.lb[i], result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_col_wise_add_f32() {
+        // each col j gets +rhs[j]
+        let mat = flint32_arr!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16);
+        let rhs = flint32_arr!(10, 20, 30, 40);
+        let result = mat.col_wise_add(rhs);
+        let expected = [11.0_f32, 22.0, 33.0, 44.0,
+                        15.0,     26.0, 37.0, 48.0,
+                        19.0,     30.0, 41.0, 52.0,
+                        23.0,     34.0, 45.0, 56.0];
+        for (i, e) in expected.iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i],
+                    "col_wise_add[{i}]: expected {e}, got [{}, {}]", result.lb[i], result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_row_wise_sub_f64() {
+        // mat - splat_row(rhs): each row i subtracts rhs[i]
+        let mat = flint64_arr!(5, 5, 5, 5, 10, 10, 10, 10, 15, 15, 15, 15, 20, 20, 20, 20);
+        let rhs = flint64_arr!(1, 2, 3, 4);
+        let result = mat.row_wise_sub(rhs);
+        let expected = [4.0_f64, 4.0, 4.0, 4.0,
+                        8.0,     8.0, 8.0, 8.0,
+                        12.0,    12.0, 12.0, 12.0,
+                        16.0,    16.0, 16.0, 16.0];
+        for (i, e) in expected.iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_col_wise_mul_f32() {
+        // col j is scaled by rhs[j]
+        let mat = flint32_arr!(1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4);
+        let rhs = flint32_arr!(1, 2, 3, 4);
+        let result = mat.col_wise_mul(rhs);
+        let expected = [1.0_f32, 2.0, 3.0, 4.0,
+                        2.0,     4.0, 6.0, 8.0,
+                        3.0,     6.0, 9.0, 12.0,
+                        4.0,     8.0, 12.0, 16.0];
+        for (i, e) in expected.iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_row_wise_div_f64() {
+        let mat = flint64_arr!(2, 4, 6, 8, 3, 6, 9, 12, 4, 8, 12, 16, 5, 10, 15, 20);
+        let rhs = flint64_arr!(1, 3, 4, 5);
+        let result = mat.row_wise_div(rhs);
+        let expected = [2.0_f64, 4.0, 6.0, 8.0,
+                        1.0,     2.0, 3.0, 4.0,
+                        1.0,     2.0, 3.0, 4.0,
+                        1.0,     2.0, 3.0, 4.0];
+        for (i, e) in expected.iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+    }
+
+    #[test]
+    fn test_col_wise_sub_div_f32() {
+        // col_wise_sub: mat[i*4+j] - rhs[j]
+        let mat = flint32_arr!(5, 6, 7, 8, 5, 6, 7, 8, 5, 6, 7, 8, 5, 6, 7, 8);
+        let rhs = flint32_arr!(1, 2, 3, 4);
+        let result = mat.col_wise_sub(rhs);
+        let expected = [4.0_f32, 4.0, 4.0, 4.0,
+                        4.0,     4.0, 4.0, 4.0,
+                        4.0,     4.0, 4.0, 4.0,
+                        4.0,     4.0, 4.0, 4.0];
+        for (i, e) in expected.iter().enumerate() {
+            assert!(result.lb[i] <= *e && *e <= result.ub[i]);
+        }
+        // col_wise_div: mat[i*4+j] / rhs[j], rhs = [1,2,4,8]
+        let rhs2 = flint32_arr!(1, 2, 4, 8);
+        let mat2 = flint32_arr!(2, 4, 8, 16, 2, 4, 8, 16, 2, 4, 8, 16, 2, 4, 8, 16);
+        let result2 = mat2.col_wise_div(rhs2);
+        let expected2 = [2.0_f32; 16];
+        for (i, e) in expected2.iter().enumerate() {
+            assert!(result2.lb[i] <= *e && *e <= result2.ub[i]);
+        }
     }
 }

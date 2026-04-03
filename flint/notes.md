@@ -116,18 +116,60 @@ arrays of different sizes. I doubt it is possible without the full size (m,n), b
 maybe want to add some methods that allow operations between 1x4, 4x4, and 4x1 matrices 
 since they are likely common operations when working in 3D with homogenous coordinates.
 
-[_] Figure out and document appropriate broadcasting between for scalar->array and
+[x] Figure out and document appropriate broadcasting between for scalar->array and
     non-matching array size.
-[_] Implement unit tests for broadcasting arithmatic
-[_] Implement broadcasting arithmatic
+    - for array <op> scalar and scalar <op> array: treat the scalar as an equal sized 
+      array with uniform elements.
+    - for operations between 16-length arrays and 4-length arrays -> make explicit
+      named methods on the 16 length array:
+      - row_wise_<op>: broadcast the 4-length [a,b,c,d] ->
+        [a,a,a,a,b,b,b,b,c,c,c,c,d,d,d,d] (uniform rows in row major storage)
+      - col_wise_<op>: broadcast the 4-length [a,b,c,d] ->
+        [a,b,c,d,a,b,c,d,a,b,c,d,a,b,c,d] (uniform cols in row major storage)
+[x] Implement unit tests for broadcasting arithmatic
+[x] Implement broadcasting arithmatic
+    - From<Flint<T>> for FlintArray<T,N> (splat) enables array op scalar via existing Rhs: Into<> bound
+    - impl_scalar_array_arith! macro: Flint<T> op FlintArray<T,N> for all 4 ops (both types)
+    - FlintVec + Flint<T> and Flint<T> + FlintVec: all 4 ops + *Assign, chunked SIMD (lane=8) with splat
+    - FlintView + Flint<T> and Flint<T> + FlintView: all 4 ops (no assign — views immutable)
+    - FlintViewMut: non-assign delegates to FlintView; assign ops with Simd::splat in-place
+    - impl_row_col_wise! macro: row_wise_*/col_wise_* named methods on FlintArray<T,16>
+      row-wise: rhs[i/4], col-wise: rhs[i%4]; all 4 ops; SIMD<T,16> for both f32 and f64
 
 ### Basic linear algebra
 
-I would like to implement simple vector for 4x4 matrices including: matrix-matrix and
-matrix-vector multiplication, and singular value decomposition.
+The 4-length arrays will be thought of a 1x4 column vectors and the 16-length arrays
+will be thought of as 4x4 matrices stored in C-style row major format. I want to support
+the following linear algebra operations
+* matrix-matrix multiplication for two 16-length arrays (method with name mat_mul)
+* matrix-vector multiplication for 16-length and 4-length (method with name dot? -> not
+  sure on name here. I don't like overloading method names, but dot seems the most
+  natural)
+* vector-vector dot product for 4-length and 4-length (method with name dot)
+* matrix-[array-of-vectors] -> [array-of-vectors]. In this case I want to support
+  matrix multiplication for a larger 4N-length array and we do matrix vector 
+  multiplication (in matrix notation, if A is 4x4 and B is 4xN, I want
+  A-matmul-Transpose(B))
+* vector-[array-of-vectors] -> [array-of-scalars]. Similar to above - apply a dot
+  product to a 4N-length array (in matrix notation if A is 1x4 and B is 4xN, I want
+  Transpose(A)-dot-Transpose(B))
+* det3 -> take the 3x3 determinant of the upper left 3x3 submatrix of a 4x4 matrix
+* det4 -> take the 4x4 determinant
+* svd3 -> do a singular value decomp of the upper left 3x3 submatrix of a 4x4 matrix
+  with some conditions so that it represents rotation-scale-rotation operations
+  - both rotations matrices should have determinant positive 1
+  - the singular values should be sorted to be unique as possible (largest to smallest
+    absolute value? if one must be negative, make it the last one? - dunno)
 
-[_] Implement unit tests
-[_] Implement vector math
+[_] Implement unit tests for simple mat-mat, mat-vec, and vec-vec products
+[_] Implement lin-alg methods for mat_mul, the mat-vec product, and dot
+[_] Implement unit tests for matrix array-of-vectors and vector array-of-vectors
+[_] Implement lin-alg methods for array-of-vectors products
+[_] Implement unit tests for determinants
+[_] Implement methods for determinants
+[_] Document the choices to try and make the svd unique
+[_] Implement unit tests for svd
+[_] Implement method for svd
 
 ### Standard math function
 

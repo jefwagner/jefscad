@@ -185,6 +185,22 @@ impl_large_uint!(f64, u128);
 impl_large_uint!(f64, usize);
 
 // -------------------------------------------
+// From Flint<T> -> FlintArray<T,N>  (splat)
+// -------------------------------------------
+
+impl<const N: usize> From<Flint<f32>> for FlintArray<f32, N> {
+    fn from(s: Flint<f32>) -> Self {
+        FlintArray { lb: [s.lb; N], ub: [s.ub; N] }
+    }
+}
+
+impl<const N: usize> From<Flint<f64>> for FlintArray<f64, N> {
+    fn from(s: Flint<f64>) -> Self {
+        FlintArray { lb: [s.lb; N], ub: [s.ub; N] }
+    }
+}
+
+// -------------------------------------------
 // From [f32; N] / [f64; N] -> FlintArray<T,N>
 // -------------------------------------------
 
