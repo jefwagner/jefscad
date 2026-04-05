@@ -217,6 +217,29 @@ Deliverable for Phase 1:
 ---
 
 ### Phase 2 — Geometry foundation (`geom` crate)
+- [x] Verify that storage is appropriate to allow proper provenance of full rounded
+  interval arithmetic/mathematics from creation through to predicate tests. (I'm not
+  yet conviced that the storage type for the combined translation matrices in the CSG
+  AST phase shouldn't be Flint<f64> types to make sure the 'is this point
+  inside/outside/indeterminant this solid queries possible without making some
+  assumption about tolerance.)
+
+  **Decision (2026-04-03):** Replace `flat_transform: [f64; 16]` in `CsgNode` with
+  `FlintArray<f64, 16>` (Option B). Rationale:
+  - f64 accumulates ~5 ULPs of error per composition step. Converting to Flint at
+    evaluation time only captures the last step — silently discarding accumulated error
+    from prior compositions, making predicates look rigorous but not be so.
+  - For typical models (short chains, unit scale) the error is ~1e-13 m — negligible
+    against a 0.01 mm feature size by 8 orders of magnitude. But two cases matter:
+      1. Coincident surfaces (e.g. cube face-on-face): boundary classification can flip.
+      2. Near-singular transforms (tiny scales, nearly-coplanar rotations): error
+         can reach thousands of ULPs.
+  - FlintArray<f64,16> is the cleanest single source of truth: compose with Flint
+    mat_mul, extract midpoint for quantization/hashing. Marginal cost since `flint`
+    already exists.
+  - **Deferral:** The refactor is self-contained (CsgNode struct + composition code
+    only) and is not needed until Phase 5 boolean ops require inside/outside predicates.
+    Do the refactor as the first step of Phase 5.
 - [ ] Implement vector/matrix utilities + affine transform application
 - [ ] Implement NURBS curve/surface data structures:
   - [ ] evaluation `(u,v)->R^3`
@@ -234,29 +257,71 @@ Deliverable for Phase 2:
 Goal: “primitive -> B-rep -> mesh” pipeline working.
 
 #### B-rep representation principles (STEP-friendly later)
-- [ ] Keep **topology** separate from **geometry**
-- [ ] Plan for faces as **trimmed parametric surfaces**
-  - loops defined in surface UV domain
-  - long-term edges carry both 3D curves and per-face 2D p-curves
+- [x] Keep **topology** separate from **geometry**
+  - [x] NodeBRep as collection of BRepSolid's
+  - [x] BRepSolid (Solid) as outer shell + optional inner shells (voids)
+  - [x] Face as surface + outer loop + optional inner loops (holes); yes, faces can have
+        holes — inner loops wind opposite to the outer loop
+- [x] Plan for faces as **trimmed parametric surfaces**
+  - loops defined in surface UV domain via per-coedge pcurves (Curve2)
+  - edges carry both a 3D curve (Curve3) and per-face 2D p-curves (Curve2)
 
 #### Core B-rep types
-- [ ] Geometry handles:
-  - [ ] `Surface` enum: NurbsSurface + analytic surfaces (plane/cyl/cone/sphere)
-  - [ ] `Curve3` enum: NurbsCurve + analytic (line/circle/ellipse)
-  - [ ] `Curve2` enum for trimming curves in UV space
+- [x] Geometry — `Surface` trait + `SurfaceKind` enum (geom.rs):
+  - [x] `Surface` trait — eval(u,v)->Point3, eval_du/dv->Point3, eval_n->Option<Point3>
+  - [x] `Plane` — p0, u_dir, v_dir; all eval methods closed-form; eval_n always Some
+  - [x] `SurfaceKind` enum skeleton — Plane (implemented), Cylinder/Cone/Sphere/Nurbs (stubs)
+  - [ ] `CylindricalSurface` — origin, axis, ref_dir, radius; u=angle, v=height
+  - [ ] `ConicalSurface` — apex, axis, ref_dir, half_angle; u=angle, v=slant distance;
+        eval_n returns None at apex (v=0)
+  - [ ] `SphericalSurface` — center, radius, ref_dir, axis; u=longitude, v=latitude;
+        eval_n well-defined everywhere including poles
+  - [ ] `NurbsSurf` — freeform; for future use
+- [x] Geometry — `Curve3` trait + `Curve3Kind` enum (geom.rs):
+  - [x] `Point3` — x, y, z; Add/Sub/Mul<f64>, length/normalize/cross
+  - [x] `Curve3` trait — eval(t)->Point3, eval_dt(t)->Point3, is_degenerate()->bool
+  - [x] `Line3` — p0, p1, t_min, t_max; t=0 at p0, t=1 at p1; implements Curve3
+  - [x] `Curve3Kind` enum skeleton — Line3 (implemented), CircularArc3/Nurbs/Ssi (stubs)
+  - [ ] `CircularArc3` — center, normal, ref_dir, radius, t0, t1 (angle parameterization);
+        ref_dir stored explicitly to ensure deterministic u=0 direction for coincidence
+        checks and STEP export; full circle when t1 - t0 = 2π
+  - [ ] `NurbsCurve3` — freeform; for future use
+  - [ ] `SsiCurve3` — Phase 5: general surface-surface intersection curve
+- [x] Geometry — `Curve2` trait + `Curve2Kind` enum (geom.rs):
+  - [x] `Point2` — u, v; Add/Sub/Mul<f64>
+  - [x] `Curve2` trait — eval(t)->Point2, eval_dt(t)->Point2, is_degenerate()->bool
+  - [x] `Line2` — p0, p1, t_min, t_max; implements Curve2
+  - [x] `Curve2Kind` enum skeleton — Line2 (implemented), Nurbs (stub)
+  - [ ] `NurbsCurve2` — for freeform surface pcurves; future use
 - [ ] Topology:
-  - [ ] `Vertex { position, tol, ... }`
-  - [ ] `Edge { v0, v1, curve3, ... }`
-  - [ ] `Coedge/Halfedge` (edge-use with orientation)
-  - [ ] `Loop { coedges... }`
-  - [ ] `Face { surface, loops, pcurves(per coedge), provenance(NodeId), ... }`
-  - [ ] `Shell`, `Solid`
+  - [ ] `Vertex { point: Point3, tol: f64 }`
+  - [ ] `Edge { curve3, v0, v1, t0, t1, coedges: SmallVec<[CoedgeId; 2]> }`
+        degenerate edges (v0==v1, constant 3D curve) handle sphere poles and cone apex
+  - [ ] `CoEdge { edge, orientation, face, pcurve: Curve2Id }`
+  - [ ] `Loop { coedges, face, is_outer }`
+  - [ ] `Face { shell, surface, outer, inners, sense, prov, attr }`
+  - [ ] `Shell { solid, faces, is_outer }`
+  - [ ] `Solid { outer: ShellId, inners: Vec<ShellId> }`
+  - [ ] `NodeBRep { solids: Vec<SolidId>, source_csg_id }`
+- [ ] `SolidModelingContext` arena (typed Vecs + newtype IDs for each entity)
 - [ ] Kernel-wide tolerance struct (in evaluation context, not per-node)
   - `pos_tol`, `ang_tol`, `param_tol`, merge policies
 
 #### Primitive -> B-rep construction
 - [ ] Build B-rep for each primitive (initially without CSG booleans)
-- [ ] Ensure transforms are applied correctly (prefer push-down + compose early)
+- [ ] Apply `flat_transform` from the CSG node during compilation (see brep_notes.md for
+      the transform-handling strategy):
+  - `Cuboid`: any affine transform produces planar faces — always absorb directly into
+    `Plane` parameters. No check needed.
+  - `Sphere`: check if linear part M satisfies `M^T · M = s²·I` (uniform scale ×
+    rotation). If yes, absorb into `SphericalSurface` (new center, new radius). If no,
+    fall back to `NurbsSurf`.
+  - `Cylinder`, `Cone`: check if M restricted to the plane perpendicular to the axis is
+    isotropic (two equal eigenvalues in the projected 2×2 block). If yes, absorb into
+    `CylindricalSurface`/`ConicalSurface`. If no, fall back to `NurbsSurf`.
+  - Edges on NURBS-fallback surfaces: circular arc edges become `NurbsCurve3` (degree-2
+    rational NURBS represents the ellipse exactly; apply the full transform to the
+    control points).
 
 Deliverable for Phase 3:
 - `compile_primitive_to_brep(prim)` works and produces a valid trimmed-surface B-rep.
@@ -276,18 +341,39 @@ Deliverable for Phase 4:
 ---
 
 ### Phase 5 — Add boolean ops gradually
-#### Start with restricted subset](#)
+#### Prerequisite — flat_transform refactor
+- [ ] Refactor `CsgNode` to use `FlintArray<f64, 16>` for `flat_transform`
+  - Replace `[f64; 16]` with `FlintArray<f64, 16>`
+  - Compose transforms via Flint mat_mul so accumulated rounding is tracked outward
+  - Extract midpoint of each entry for quantization/hashing (geom_id logic unchanged)
+  - This is the prerequisite for correct inside/outside classification at coincident
+    surfaces and under near-singular transform chains (see Phase 2 decision record)
+
+#### Predicate infrastructure
+- [ ] Implement point-in-primitive predicates using Flint transforms:
+  - `classify(p: FlintArray<f64,4>, node: &CsgNode) -> Classification`
+    where `Classification` is `Inside | Outside | Indeterminate`
+  - For each primitive: transform query point to local frame via Flint mat_mul,
+    then evaluate the primitive's implicit function with outward rounding
+  - Sphere: `||T⁻¹p||² < r²` (with Flint arithmetic)
+  - Cuboid: AABB test in local frame
+  - Cylinder/Cone: analytic implicit in local frame
+- [ ] Implement tolerance/indeterminate-zone policy:
+  - When Flint interval straddles the boundary, return `Indeterminate`
+  - Caller decides: refine, fallback to subdivision, or treat as on-surface
+
+#### Start with restricted subset
 - [ ] Implement boolean scaffolding:
   - surface/surface intersection infrastructure
   - face splitting + trimming update machinery
-  - classification (inside/outside) framework
+  - classification (inside/outside) framework using Flint predicates above
   - sewing/healing basics + snapping with tolerances
 - [ ] First boolean targets:
   - [ ] either: planar-only polyhedra subset
   - [ ] or: analytic pairs (plane/cyl/sphere) before full NURBS
 - [ ] Use interval arithmetic as a robustness filter:
-  - predicates + bounding checks
-  - if uncertain -> subdivision/refinement/fallback path
+  - predicates + bounding checks using FlintArray<f64,16> transforms
+  - if uncertain (Indeterminate) -> subdivision/refinement/fallback path
 
 Deliverable for Phase 5:
 - `Union/Difference/Intersection` works for a limited subset with stable output mesh.
