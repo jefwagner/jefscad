@@ -293,19 +293,27 @@ Goal: “primitive -> B-rep -> mesh” pipeline working.
   - [x] `Line2` — p0, p1, t_min, t_max; implements Curve2
   - [x] `Curve2Kind` enum skeleton — Line2 (implemented), Nurbs (stub)
   - [ ] `NurbsCurve2` — for freeform surface pcurves; future use
-- [ ] Topology:
-  - [ ] `Vertex { point: Point3, tol: f64 }`
-  - [ ] `Edge { curve3, v0, v1, t0, t1, coedges: SmallVec<[CoedgeId; 2]> }`
+- [x] Topology (brep_kernel.rs):
+  - [x] Newtype IDs: VertexId, EdgeId, CoEdgeId, LoopId, FaceId, ShellId, SolidId,
+        NodeBRepId, SurfaceId, Curve3Id, Curve2Id, AttrId — via `define_id!` macro
+  - [x] `FaceSense { Aligned, AntiAligned }`, `Orientation { Forward, Reverse }`,
+        `OpType { Union, Difference, Intersection }`
+  - [x] `CsgSource { prov_id: u64, geom_id: u64 }`
+  - [x] `ProvenanceData { sources: SmallVec<[CsgSource; 1]>, last_op: Option<OpType> }`
+        with `primitive(prov_id, geom_id)` convenience constructor
+  - [x] `KernelTolerance { pos_tol, ang_tol, param_tol }` with Default impl
+  - [x] `Vertex { point: Point3, tol: f64 }`
+  - [x] `Edge { curve3, v0, v1, t0, t1, coedges: SmallVec<[CoEdgeId; 2]> }`
         degenerate edges (v0==v1, constant 3D curve) handle sphere poles and cone apex
-  - [ ] `CoEdge { edge, orientation, face, pcurve: Curve2Id }`
-  - [ ] `Loop { coedges, face, is_outer }`
-  - [ ] `Face { shell, surface, outer, inners, sense, prov, attr }`
-  - [ ] `Shell { solid, faces, is_outer }`
-  - [ ] `Solid { outer: ShellId, inners: Vec<ShellId> }`
-  - [ ] `NodeBRep { solids: Vec<SolidId>, source_csg_id }`
-- [ ] `SolidModelingContext` arena (typed Vecs + newtype IDs for each entity)
-- [ ] Kernel-wide tolerance struct (in evaluation context, not per-node)
-  - `pos_tol`, `ang_tol`, `param_tol`, merge policies
+  - [x] `CoEdge { edge, orientation, face, pcurve: Curve2Id }`
+  - [x] `Loop { coedges, face, is_outer }` — coedges starts empty
+  - [x] `Face { shell, surface, outer, inners, sense, prov, attr: Option<AttrId> }`
+        inners/attr start empty/None; attr set after creation
+  - [x] `Shell { solid, faces, is_outer }` — faces starts empty
+  - [x] `Solid { outer: ShellId, inners: Vec<ShellId> }` — inners starts empty
+  - [x] `NodeBRep { solids: Vec<SolidId>, source_csg_id }` — solids starts empty
+- [x] `SolidModelingContext` arena — typed Vecs, push/get/get_mut via `impl_push_get!`
+      macro; `new()` creates empty context with `KernelTolerance::default()`
 
 #### Primitive -> B-rep construction
 - [ ] Build B-rep for each primitive (initially without CSG booleans)
