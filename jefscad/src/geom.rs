@@ -173,10 +173,55 @@ impl Curve3 for Line3 {
     }
 }
 
-// ── Stub types for future Curve3Kind variants ─────────────────────────────────
+// ── CircularArc3 ──────────────────────────────────────────────────────────────
 
-/// A circular arc in 3-D space. Fields TBD — stub for `Curve3Kind`.
-pub struct CircularArc3;
+/// A circular arc (or full circle) in 3-D space.
+///
+/// Parameterized by angle `t` in radians. The frame in the circle's plane is:
+/// - `ref_dir` at `t = 0`
+/// - `normal × ref_dir` at `t = π/2`
+///
+/// The sweep follows the right-hand rule around `normal`. A full circle has
+/// `t1 - t0 = 2π`.
+///
+/// The caller is responsible for ensuring `normal` and `ref_dir` are unit vectors and
+/// mutually perpendicular.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CircularArc3 {
+    pub center:  Point3,
+    pub normal:  Point3,   // unit; defines the circle plane via right-hand rule
+    pub ref_dir: Point3,   // unit, ⊥ normal; direction at t = 0
+    pub radius:  f64,
+    pub t0:      f64,      // start angle (radians)
+    pub t1:      f64,      // end angle (radians); t1 > t0; t1 - t0 = 2π for full circle
+}
+
+impl CircularArc3 {
+    pub fn new(
+        center: Point3, normal: Point3, ref_dir: Point3,
+        radius: f64, t0: f64, t1: f64,
+    ) -> Self {
+        Self { center, normal, ref_dir, radius, t0, t1 }
+    }
+}
+
+impl Curve3 for CircularArc3 {
+    fn eval(&self, t: f64) -> Point3 {
+        let e2 = self.normal.cross(self.ref_dir);
+        self.center + (self.ref_dir * t.cos() + e2 * t.sin()) * self.radius
+    }
+
+    fn eval_dt(&self, t: f64) -> Point3 {
+        let e2 = self.normal.cross(self.ref_dir);
+        (self.ref_dir * (-t.sin()) + e2 * t.cos()) * self.radius
+    }
+
+    fn is_degenerate(&self) -> bool {
+        self.radius == 0.0
+    }
+}
+
+// ── Stub types for remaining Curve3Kind variants ───────────────────────────────
 
 /// A rational B-spline curve in 3-D space. Fields TBD — stub for `Curve3Kind`.
 pub struct NurbsCurve3;
@@ -201,7 +246,7 @@ impl Curve3 for Curve3Kind {
     fn eval(&self, t: f64) -> Point3 {
         match self {
             Curve3Kind::Line3(l) => l.eval(t),
-            Curve3Kind::CircularArc3(_) => todo!("CircularArc3::eval"),
+            Curve3Kind::CircularArc3(a) => a.eval(t),
             Curve3Kind::Nurbs(_) => todo!("NurbsCurve3::eval"),
             Curve3Kind::Ssi(_) => todo!("SsiCurve3::eval"),
         }
@@ -210,7 +255,7 @@ impl Curve3 for Curve3Kind {
     fn eval_dt(&self, t: f64) -> Point3 {
         match self {
             Curve3Kind::Line3(l) => l.eval_dt(t),
-            Curve3Kind::CircularArc3(_) => todo!("CircularArc3::eval_dt"),
+            Curve3Kind::CircularArc3(a) => a.eval_dt(t),
             Curve3Kind::Nurbs(_) => todo!("NurbsCurve3::eval_dt"),
             Curve3Kind::Ssi(_) => todo!("SsiCurve3::eval_dt"),
         }
@@ -219,7 +264,7 @@ impl Curve3 for Curve3Kind {
     fn is_degenerate(&self) -> bool {
         match self {
             Curve3Kind::Line3(l) => l.is_degenerate(),
-            Curve3Kind::CircularArc3(_) => todo!("CircularArc3::is_degenerate"),
+            Curve3Kind::CircularArc3(a) => a.is_degenerate(),
             Curve3Kind::Nurbs(_) => todo!("NurbsCurve3::is_degenerate"),
             Curve3Kind::Ssi(_) => todo!("SsiCurve3::is_degenerate"),
         }
@@ -383,16 +428,152 @@ impl Surface for Plane {
     }
 }
 
-// ── Stub types for future SurfaceKind variants ────────────────────────────────
+// ── CylindricalSurface ────────────────────────────────────────────────────────
 
-/// A cylindrical surface. Fields TBD — stub for `SurfaceKind`.
-pub struct CylindricalSurface;
+/// An infinite cylindrical surface.
+///
+/// Parameterization: `u = angle ∈ [0, 2π)`, `v = height along axis`.
+/// Frame in the cross-section plane: `ref_dir` at `u = 0`, `axis × ref_dir` at `u = π/2`.
+/// The outward normal at `(u, v)` is `cos(u)*ref_dir + sin(u)*(axis × ref_dir)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CylindricalSurface {
+    pub origin:  Point3,   // center of the base circle; eval(u, 0) lies on this circle
+    pub axis:    Point3,   // unit; direction of increasing v
+    pub ref_dir: Point3,   // unit, ⊥ axis; u = 0 meridian
+    pub radius:  f64,
+}
 
-/// A conical surface. Fields TBD — stub for `SurfaceKind`.
-pub struct ConicalSurface;
+impl CylindricalSurface {
+    pub fn new(origin: Point3, axis: Point3, ref_dir: Point3, radius: f64) -> Self {
+        Self { origin, axis, ref_dir, radius }
+    }
+}
 
-/// A spherical surface. Fields TBD — stub for `SurfaceKind`.
-pub struct SphericalSurface;
+impl Surface for CylindricalSurface {
+    fn eval(&self, u: f64, v: f64) -> Point3 {
+        let e2 = self.axis.cross(self.ref_dir);
+        let r_hat = self.ref_dir * u.cos() + e2 * u.sin();
+        self.origin + self.axis * v + r_hat * self.radius
+    }
+
+    fn eval_du(&self, u: f64, _v: f64) -> Point3 {
+        let e2 = self.axis.cross(self.ref_dir);
+        (self.ref_dir * (-u.sin()) + e2 * u.cos()) * self.radius
+    }
+
+    fn eval_dv(&self, _u: f64, _v: f64) -> Point3 {
+        self.axis
+    }
+
+    /// The outward radial unit vector `r̂(u)`. Never `None`.
+    fn eval_n(&self, u: f64, _v: f64) -> Option<Point3> {
+        let e2 = self.axis.cross(self.ref_dir);
+        Some(self.ref_dir * u.cos() + e2 * u.sin())
+    }
+}
+
+// ── ConicalSurface ────────────────────────────────────────────────────────────
+
+/// A conical surface with a singular apex.
+///
+/// Parameterization: `u = angle ∈ [0, 2π)`, `v = slant distance from apex` (not axial
+/// height). `eval_n` returns `None` at `v = 0` (the apex).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConicalSurface {
+    pub apex:       Point3,  // singular point; eval(u, 0) = apex for all u
+    pub axis:       Point3,  // unit; direction of increasing v (toward base)
+    pub ref_dir:    Point3,  // unit, ⊥ axis; u = 0 meridian
+    pub half_angle: f64,     // 0 < half_angle < π/2 (radians)
+}
+
+impl ConicalSurface {
+    pub fn new(apex: Point3, axis: Point3, ref_dir: Point3, half_angle: f64) -> Self {
+        Self { apex, axis, ref_dir, half_angle }
+    }
+}
+
+impl Surface for ConicalSurface {
+    fn eval(&self, u: f64, v: f64) -> Point3 {
+        let e2 = self.axis.cross(self.ref_dir);
+        let r_hat = self.ref_dir * u.cos() + e2 * u.sin();
+        let slant = self.axis * self.half_angle.cos() + r_hat * self.half_angle.sin();
+        self.apex + slant * v
+    }
+
+    fn eval_du(&self, u: f64, v: f64) -> Point3 {
+        let e2 = self.axis.cross(self.ref_dir);
+        let dr_hat = self.ref_dir * (-u.sin()) + e2 * u.cos();
+        dr_hat * (v * self.half_angle.sin())
+    }
+
+    fn eval_dv(&self, u: f64, _v: f64) -> Point3 {
+        let e2 = self.axis.cross(self.ref_dir);
+        let r_hat = self.ref_dir * u.cos() + e2 * u.sin();
+        self.axis * self.half_angle.cos() + r_hat * self.half_angle.sin()
+    }
+
+    /// Returns `None` at `v = 0` (the apex). Otherwise returns the outward unit normal
+    /// `cos(ha)*r̂(u) - sin(ha)*axis`, which is perpendicular to the slant direction and
+    /// has unit length.
+    fn eval_n(&self, u: f64, v: f64) -> Option<Point3> {
+        if v == 0.0 {
+            return None;
+        }
+        let e2 = self.axis.cross(self.ref_dir);
+        let r_hat = self.ref_dir * u.cos() + e2 * u.sin();
+        Some(r_hat * self.half_angle.cos() - self.axis * self.half_angle.sin())
+    }
+}
+
+// ── SphericalSurface ──────────────────────────────────────────────────────────
+
+/// A spherical surface.
+///
+/// Parameterization: `u = longitude ∈ [0, 2π)`, `v = latitude ∈ [-π/2, +π/2]`.
+/// The outward normal equals the unit radial direction and is well-defined everywhere,
+/// including the poles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SphericalSurface {
+    pub center:  Point3,
+    pub radius:  f64,
+    pub ref_dir: Point3,   // unit; u = 0, v = 0 reference direction
+    pub axis:    Point3,   // unit, ⊥ ref_dir; north pole at v = +π/2
+}
+
+impl SphericalSurface {
+    pub fn new(center: Point3, radius: f64, ref_dir: Point3, axis: Point3) -> Self {
+        Self { center, radius, ref_dir, axis }
+    }
+}
+
+impl Surface for SphericalSurface {
+    fn eval(&self, u: f64, v: f64) -> Point3 {
+        let e2 = self.axis.cross(self.ref_dir);
+        let r_hat = self.ref_dir * u.cos() + e2 * u.sin();
+        self.center + (r_hat * v.cos() + self.axis * v.sin()) * self.radius
+    }
+
+    fn eval_du(&self, u: f64, v: f64) -> Point3 {
+        let e2 = self.axis.cross(self.ref_dir);
+        let dr_hat = self.ref_dir * (-u.sin()) + e2 * u.cos();
+        dr_hat * (v.cos() * self.radius)
+    }
+
+    fn eval_dv(&self, u: f64, v: f64) -> Point3 {
+        let e2 = self.axis.cross(self.ref_dir);
+        let r_hat = self.ref_dir * u.cos() + e2 * u.sin();
+        (r_hat * (-v.sin()) + self.axis * v.cos()) * self.radius
+    }
+
+    /// The outward unit normal `cos(v)*r̂(u) + sin(v)*axis`. Always `Some`.
+    fn eval_n(&self, u: f64, v: f64) -> Option<Point3> {
+        let e2 = self.axis.cross(self.ref_dir);
+        let r_hat = self.ref_dir * u.cos() + e2 * u.sin();
+        Some(r_hat * v.cos() + self.axis * v.sin())
+    }
+}
+
+// ── Stub type for remaining SurfaceKind variant ───────────────────────────────
 
 /// A rational B-spline surface. Fields TBD — stub for `SurfaceKind`.
 pub struct NurbsSurf;
@@ -412,9 +593,9 @@ impl Surface for SurfaceKind {
     fn eval(&self, u: f64, v: f64) -> Point3 {
         match self {
             SurfaceKind::Plane(p) => p.eval(u, v),
-            SurfaceKind::Cylinder(_) => todo!("CylindricalSurface::eval"),
-            SurfaceKind::Cone(_) => todo!("ConicalSurface::eval"),
-            SurfaceKind::Sphere(_) => todo!("SphericalSurface::eval"),
+            SurfaceKind::Cylinder(c) => c.eval(u, v),
+            SurfaceKind::Cone(c) => c.eval(u, v),
+            SurfaceKind::Sphere(s) => s.eval(u, v),
             SurfaceKind::Nurbs(_) => todo!("NurbsSurf::eval"),
         }
     }
@@ -422,9 +603,9 @@ impl Surface for SurfaceKind {
     fn eval_du(&self, u: f64, v: f64) -> Point3 {
         match self {
             SurfaceKind::Plane(p) => p.eval_du(u, v),
-            SurfaceKind::Cylinder(_) => todo!("CylindricalSurface::eval_du"),
-            SurfaceKind::Cone(_) => todo!("ConicalSurface::eval_du"),
-            SurfaceKind::Sphere(_) => todo!("SphericalSurface::eval_du"),
+            SurfaceKind::Cylinder(c) => c.eval_du(u, v),
+            SurfaceKind::Cone(c) => c.eval_du(u, v),
+            SurfaceKind::Sphere(s) => s.eval_du(u, v),
             SurfaceKind::Nurbs(_) => todo!("NurbsSurf::eval_du"),
         }
     }
@@ -432,9 +613,9 @@ impl Surface for SurfaceKind {
     fn eval_dv(&self, u: f64, v: f64) -> Point3 {
         match self {
             SurfaceKind::Plane(p) => p.eval_dv(u, v),
-            SurfaceKind::Cylinder(_) => todo!("CylindricalSurface::eval_dv"),
-            SurfaceKind::Cone(_) => todo!("ConicalSurface::eval_dv"),
-            SurfaceKind::Sphere(_) => todo!("SphericalSurface::eval_dv"),
+            SurfaceKind::Cylinder(c) => c.eval_dv(u, v),
+            SurfaceKind::Cone(c) => c.eval_dv(u, v),
+            SurfaceKind::Sphere(s) => s.eval_dv(u, v),
             SurfaceKind::Nurbs(_) => todo!("NurbsSurf::eval_dv"),
         }
     }
@@ -442,9 +623,9 @@ impl Surface for SurfaceKind {
     fn eval_n(&self, u: f64, v: f64) -> Option<Point3> {
         match self {
             SurfaceKind::Plane(p) => p.eval_n(u, v),
-            SurfaceKind::Cylinder(_) => todo!("CylindricalSurface::eval_n"),
-            SurfaceKind::Cone(_) => todo!("ConicalSurface::eval_n"),
-            SurfaceKind::Sphere(_) => todo!("SphericalSurface::eval_n"),
+            SurfaceKind::Cylinder(c) => c.eval_n(u, v),
+            SurfaceKind::Cone(c) => c.eval_n(u, v),
+            SurfaceKind::Sphere(s) => s.eval_n(u, v),
             SurfaceKind::Nurbs(_) => todo!("NurbsSurf::eval_n"),
         }
     }
@@ -824,5 +1005,252 @@ mod test {
         let pl = Plane::new(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0));
         let sk = SurfaceKind::Plane(pl);
         assert_eq!(sk.eval_n(1.0, 2.0), pl.eval_n(1.0, 2.0));
+    }
+
+    // ── CircularArc3 ──────────────────────────────────────────────────────────
+    //
+    // Canonical frame: center=(0,0,0), normal=(0,0,1), ref_dir=(1,0,0) → ê₂=(0,1,0)
+
+    fn std_arc(radius: f64) -> CircularArc3 {
+        CircularArc3::new(p(0.0,0.0,0.0), p(0.0,0.0,1.0), p(1.0,0.0,0.0), radius, 0.0, 2.0*std::f64::consts::PI)
+    }
+
+    #[test]
+    fn arc3_eval_at_zero() {
+        let a = std_arc(3.0);
+        assert!(approx_eq3(a.eval(0.0), p(3.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn arc3_eval_at_half_pi() {
+        let a = std_arc(3.0);
+        assert!(approx_eq3(a.eval(std::f64::consts::FRAC_PI_2), p(0.0, 3.0, 0.0)));
+    }
+
+    #[test]
+    fn arc3_eval_at_pi() {
+        let a = std_arc(2.0);
+        assert!(approx_eq3(a.eval(std::f64::consts::PI), p(-2.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn arc3_eval_full_circle_closure() {
+        let a = std_arc(1.0);
+        assert!(approx_eq3(a.eval(2.0 * std::f64::consts::PI), a.eval(0.0)));
+    }
+
+    #[test]
+    fn arc3_eval_dt_at_zero() {
+        // tangent at t=0 points in +ê₂ direction, scaled by radius
+        let a = std_arc(3.0);
+        assert!(approx_eq3(a.eval_dt(0.0), p(0.0, 3.0, 0.0)));
+    }
+
+    #[test]
+    fn arc3_eval_dt_at_half_pi() {
+        let a = std_arc(2.0);
+        assert!(approx_eq3(a.eval_dt(std::f64::consts::FRAC_PI_2), p(-2.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn arc3_not_degenerate() {
+        assert!(!std_arc(1.0).is_degenerate());
+    }
+
+    #[test]
+    fn arc3_degenerate_zero_radius() {
+        assert!(std_arc(0.0).is_degenerate());
+    }
+
+    #[test]
+    fn curve3kind_arc3_eval_delegates() {
+        let a = std_arc(2.0);
+        let ck = Curve3Kind::CircularArc3(a);
+        assert!(approx_eq3(ck.eval(0.0), a.eval(0.0)));
+        assert!(approx_eq3(ck.eval(std::f64::consts::FRAC_PI_2), a.eval(std::f64::consts::FRAC_PI_2)));
+    }
+
+    // ── CylindricalSurface ────────────────────────────────────────────────────
+    //
+    // Canonical: origin=(0,0,0), axis=(0,0,1), ref_dir=(1,0,0), radius=2
+
+    fn std_cyl() -> CylindricalSurface {
+        CylindricalSurface::new(p(0.0,0.0,0.0), p(0.0,0.0,1.0), p(1.0,0.0,0.0), 2.0)
+    }
+
+    #[test]
+    fn cyl_eval_at_u0_v0() {
+        assert_eq!(std_cyl().eval(0.0, 0.0), p(2.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn cyl_eval_at_half_pi_v0() {
+        assert!(approx_eq3(std_cyl().eval(std::f64::consts::FRAC_PI_2, 0.0), p(0.0, 2.0, 0.0)));
+    }
+
+    #[test]
+    fn cyl_eval_v_moves_along_axis() {
+        assert!(approx_eq3(std_cyl().eval(0.0, 5.0), p(2.0, 0.0, 5.0)));
+    }
+
+    #[test]
+    fn cyl_eval_du_tangent() {
+        // du-tangent at u=0 points in +ê₂ = (0,1,0), scaled by radius
+        assert!(approx_eq3(std_cyl().eval_du(0.0, 0.0), p(0.0, 2.0, 0.0)));
+    }
+
+    #[test]
+    fn cyl_eval_dv_is_axis() {
+        assert_eq!(std_cyl().eval_dv(0.0, 0.0), p(0.0, 0.0, 1.0));
+        assert_eq!(std_cyl().eval_dv(1.0, 5.0), p(0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn cyl_eval_n_radial() {
+        assert!(approx_eq3(std_cyl().eval_n(0.0, 0.0).unwrap(), p(1.0, 0.0, 0.0)));
+        assert!(approx_eq3(
+            std_cyl().eval_n(std::f64::consts::FRAC_PI_2, 3.0).unwrap(),
+            p(0.0, 1.0, 0.0),
+        ));
+    }
+
+    #[test]
+    fn cyl_eval_n_unit_length() {
+        let n = std_cyl().eval_n(1.0, 7.0).unwrap();
+        assert!((n.length() - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn surfacekind_cylinder_delegates() {
+        let c = std_cyl();
+        let sk = SurfaceKind::Cylinder(c);
+        assert!(approx_eq3(sk.eval(0.0, 1.0), c.eval(0.0, 1.0)));
+        assert!(approx_eq3(sk.eval_du(0.0, 1.0), c.eval_du(0.0, 1.0)));
+        assert!(approx_eq3(sk.eval_dv(0.0, 1.0), c.eval_dv(0.0, 1.0)));
+        assert_eq!(sk.eval_n(0.0, 1.0), c.eval_n(0.0, 1.0));
+    }
+
+    // ── ConicalSurface ────────────────────────────────────────────────────────
+    //
+    // Canonical: apex=(0,0,0), axis=(0,0,1), ref_dir=(1,0,0), half_angle=π/4
+
+    fn std_cone() -> ConicalSurface {
+        ConicalSurface::new(p(0.0,0.0,0.0), p(0.0,0.0,1.0), p(1.0,0.0,0.0), std::f64::consts::FRAC_PI_4)
+    }
+
+    #[test]
+    fn cone_eval_at_apex() {
+        // v=0 always gives the apex regardless of u
+        let c = std_cone();
+        assert_eq!(c.eval(0.0, 0.0), p(0.0, 0.0, 0.0));
+        assert_eq!(c.eval(1.234, 0.0), p(0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn cone_eval_at_u0_v1() {
+        // slant dir = cos(π/4)*(0,0,1) + sin(π/4)*(1,0,0) = (1/√2, 0, 1/√2)
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        assert!(approx_eq3(std_cone().eval(0.0, 1.0), p(s, 0.0, s)));
+    }
+
+    #[test]
+    fn cone_eval_n_none_at_apex() {
+        assert_eq!(std_cone().eval_n(0.0, 0.0), None);
+        assert_eq!(std_cone().eval_n(1.5, 0.0), None);
+    }
+
+    #[test]
+    fn cone_eval_n_at_u0_v1() {
+        // outward normal = cos(π/4)*(1,0,0) - sin(π/4)*(0,0,1) = (1/√2, 0, -1/√2)
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let n = std_cone().eval_n(0.0, 1.0).unwrap();
+        assert!(approx_eq3(n, p(s, 0.0, -s)));
+    }
+
+    #[test]
+    fn cone_eval_n_unit_length() {
+        let n = std_cone().eval_n(1.0, 2.0).unwrap();
+        assert!((n.length() - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn surfacekind_cone_delegates() {
+        let c = std_cone();
+        let sk = SurfaceKind::Cone(c);
+        assert!(approx_eq3(sk.eval(0.0, 1.0), c.eval(0.0, 1.0)));
+        assert_eq!(sk.eval_n(0.0, 0.0), None);
+        assert_eq!(sk.eval_n(0.0, 1.0), c.eval_n(0.0, 1.0));
+    }
+
+    // ── SphericalSurface ──────────────────────────────────────────────────────
+    //
+    // Canonical: center=(0,0,0), radius=3, ref_dir=(1,0,0), axis=(0,0,1)
+
+    fn std_sphere() -> SphericalSurface {
+        SphericalSurface::new(p(0.0,0.0,0.0), 3.0, p(1.0,0.0,0.0), p(0.0,0.0,1.0))
+    }
+
+    #[test]
+    fn sphere_eval_equatorial_ref() {
+        assert!(approx_eq3(std_sphere().eval(0.0, 0.0), p(3.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn sphere_eval_north_pole() {
+        assert!(approx_eq3(std_sphere().eval(0.0, std::f64::consts::FRAC_PI_2), p(0.0, 0.0, 3.0)));
+    }
+
+    #[test]
+    fn sphere_eval_south_pole() {
+        assert!(approx_eq3(std_sphere().eval(0.0, -std::f64::consts::FRAC_PI_2), p(0.0, 0.0, -3.0)));
+    }
+
+    #[test]
+    fn sphere_eval_equatorial_quarter() {
+        assert!(approx_eq3(
+            std_sphere().eval(std::f64::consts::FRAC_PI_2, 0.0),
+            p(0.0, 3.0, 0.0),
+        ));
+    }
+
+    #[test]
+    fn sphere_eval_n_equatorial_ref() {
+        assert!(approx_eq3(std_sphere().eval_n(0.0, 0.0).unwrap(), p(1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn sphere_eval_n_north_pole() {
+        // normal at north pole = axis = (0,0,1), independent of u
+        let n0 = std_sphere().eval_n(0.0, std::f64::consts::FRAC_PI_2).unwrap();
+        let n1 = std_sphere().eval_n(1.234, std::f64::consts::FRAC_PI_2).unwrap();
+        assert!(approx_eq3(n0, p(0.0, 0.0, 1.0)));
+        assert!(approx_eq3(n1, p(0.0, 0.0, 1.0)));
+    }
+
+    #[test]
+    fn sphere_eval_n_south_pole() {
+        let n = std_sphere().eval_n(0.5, -std::f64::consts::FRAC_PI_2).unwrap();
+        assert!(approx_eq3(n, p(0.0, 0.0, -1.0)));
+    }
+
+    #[test]
+    fn sphere_eval_n_always_some() {
+        assert!(std_sphere().eval_n(0.0, 0.0).is_some());
+        assert!(std_sphere().eval_n(0.0, std::f64::consts::FRAC_PI_2).is_some());
+        assert!(std_sphere().eval_n(0.0, -std::f64::consts::FRAC_PI_2).is_some());
+    }
+
+    #[test]
+    fn sphere_eval_n_unit_length() {
+        let n = std_sphere().eval_n(1.0, 0.5).unwrap();
+        assert!((n.length() - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn surfacekind_sphere_delegates() {
+        let s = std_sphere();
+        let sk = SurfaceKind::Sphere(s);
+        assert!(approx_eq3(sk.eval(0.0, 0.0), s.eval(0.0, 0.0)));
+        assert_eq!(sk.eval_n(0.0, 0.0), s.eval_n(0.0, 0.0));
     }
 }

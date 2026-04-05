@@ -270,21 +270,18 @@ Goal: “primitive -> B-rep -> mesh” pipeline working.
 - [x] Geometry — `Surface` trait + `SurfaceKind` enum (geom.rs):
   - [x] `Surface` trait — eval(u,v)->Point3, eval_du/dv->Point3, eval_n->Option<Point3>
   - [x] `Plane` — p0, u_dir, v_dir; all eval methods closed-form; eval_n always Some
-  - [x] `SurfaceKind` enum skeleton — Plane (implemented), Cylinder/Cone/Sphere/Nurbs (stubs)
-  - [ ] `CylindricalSurface` — origin, axis, ref_dir, radius; u=angle, v=height
-  - [ ] `ConicalSurface` — apex, axis, ref_dir, half_angle; u=angle, v=slant distance;
-        eval_n returns None at apex (v=0)
-  - [ ] `SphericalSurface` — center, radius, ref_dir, axis; u=longitude, v=latitude;
-        eval_n well-defined everywhere including poles
+  - [x] `SurfaceKind` enum — Plane, Cylinder, Cone, Sphere implemented; Nurbs stub remains
+  - [x] `CylindricalSurface` — origin, axis, ref_dir, radius; outward normal = r̂(u)
+  - [x] `ConicalSurface` — apex, axis, ref_dir, half_angle; eval_n=None at v=0 (apex)
+  - [x] `SphericalSurface` — center, radius, ref_dir, axis; eval_n always Some, unit
   - [ ] `NurbsSurf` — freeform; for future use
 - [x] Geometry — `Curve3` trait + `Curve3Kind` enum (geom.rs):
   - [x] `Point3` — x, y, z; Add/Sub/Mul<f64>, length/normalize/cross
   - [x] `Curve3` trait — eval(t)->Point3, eval_dt(t)->Point3, is_degenerate()->bool
   - [x] `Line3` — p0, p1, t_min, t_max; t=0 at p0, t=1 at p1; implements Curve3
-  - [x] `Curve3Kind` enum skeleton — Line3 (implemented), CircularArc3/Nurbs/Ssi (stubs)
-  - [ ] `CircularArc3` — center, normal, ref_dir, radius, t0, t1 (angle parameterization);
-        ref_dir stored explicitly to ensure deterministic u=0 direction for coincidence
-        checks and STEP export; full circle when t1 - t0 = 2π
+  - [x] `Curve3Kind` enum — Line3 and CircularArc3 implemented; Nurbs/Ssi stubs remain
+  - [x] `CircularArc3` — center, normal, ref_dir, radius, t0, t1; eval via angle param;
+        eval_dt is tangent scaled by radius; is_degenerate when radius==0
   - [ ] `NurbsCurve3` — freeform; for future use
   - [ ] `SsiCurve3` — Phase 5: general surface-surface intersection curve
 - [x] Geometry — `Curve2` trait + `Curve2Kind` enum (geom.rs):
