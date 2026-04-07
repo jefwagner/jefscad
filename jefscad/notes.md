@@ -316,8 +316,8 @@ Goal: “primitive -> B-rep -> mesh” pipeline working.
 - [_] Build B-rep for each primitive (initially without CSG booleans)
   - [x] `build_cuboid` — 8V, 12E, 24CE, 6 faces; all Line3 edges, all FaceSense::Aligned
   - [x] `build_cylinder` — 2V, 3E (2 closed CircularArc3 + 1 Line3 seam), 6CE, 3 faces
-  - [_] `build_cone`
-  - [_] `build_sphere`
+  - [x] `build_cone`  — 2V, 3E (degenerate apex edge), 5CE, 2 faces
+  - [x] `build_sphere` — 2V, 3E (2 degenerate pole edges), 4CE, 1 face; UV Mercator diagram in source
   - [x] `CircularArc2` added to `Curve2Kind` (needed for cap pcurves)
   - [x] `Point3::dot` added to `geom.rs`
 - [ ] Apply `flat_transform` from the CSG node during compilation (see brep_notes.md for
