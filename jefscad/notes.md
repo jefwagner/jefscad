@@ -313,7 +313,13 @@ Goal: “primitive -> B-rep -> mesh” pipeline working.
       macro; `new()` creates empty context with `KernelTolerance::default()`
 
 #### Primitive -> B-rep construction
-- [ ] Build B-rep for each primitive (initially without CSG booleans)
+- [_] Build B-rep for each primitive (initially without CSG booleans)
+  - [x] `build_cuboid` — 8V, 12E, 24CE, 6 faces; all Line3 edges, all FaceSense::Aligned
+  - [x] `build_cylinder` — 2V, 3E (2 closed CircularArc3 + 1 Line3 seam), 6CE, 3 faces
+  - [_] `build_cone`
+  - [_] `build_sphere`
+  - [x] `CircularArc2` added to `Curve2Kind` (needed for cap pcurves)
+  - [x] `Point3::dot` added to `geom.rs`
 - [ ] Apply `flat_transform` from the CSG node during compilation (see brep_notes.md for
       the transform-handling strategy):
   - `Cuboid`: any affine transform produces planar faces — always absorb directly into

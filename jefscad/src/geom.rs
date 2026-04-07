@@ -44,6 +44,11 @@ impl Point3 {
         self * (1.0 / len)
     }
 
+    /// Dot product `self · rhs`.
+    pub fn dot(self, rhs: Self) -> f64 {
+        self.x * rhs.x + self.y * rhs.y + self.z * rhs.z
+    }
+
     /// Cross product `self × rhs`.
     pub fn cross(self, rhs: Self) -> Self {
         Self::new(
@@ -322,6 +327,44 @@ impl Curve2 for Line2 {
     }
 }
 
+// ── CircularArc2 ──────────────────────────────────────────────────────────────
+
+/// A circular arc (or full circle) in UV parameter space.
+///
+/// Parameterized by angle `t` in radians:
+/// `eval(t) = center + Point2 { u: t.cos(), v: t.sin() } * radius`
+///
+/// A full circle has `t1 - t0 = 2π`. Used as the pcurve of circular edges on
+/// flat (planar) cap faces where the circle lies in the surface's UV domain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CircularArc2 {
+    pub center: Point2,
+    pub radius: f64,
+    pub t0: f64,
+    pub t1: f64,
+}
+
+impl CircularArc2 {
+    /// Construct a circular arc in UV space.
+    pub fn new(center: Point2, radius: f64, t0: f64, t1: f64) -> Self {
+        Self { center, radius, t0, t1 }
+    }
+}
+
+impl Curve2 for CircularArc2 {
+    fn eval(&self, t: f64) -> Point2 {
+        self.center + Point2::new(t.cos(), t.sin()) * self.radius
+    }
+
+    fn eval_dt(&self, t: f64) -> Point2 {
+        Point2::new(-t.sin(), t.cos()) * self.radius
+    }
+
+    fn is_degenerate(&self) -> bool {
+        self.radius == 0.0
+    }
+}
+
 // ── Stub type for future Curve2Kind variant ───────────────────────────────────
 
 /// A rational B-spline curve in UV space. Fields TBD — stub for `Curve2Kind`.
@@ -332,6 +375,7 @@ pub struct NurbsCurve2;
 /// The concrete stored pcurve type used in the B-rep arena.
 pub enum Curve2Kind {
     Line2(Line2),
+    CircularArc2(CircularArc2),
     Nurbs(NurbsCurve2),
 }
 
@@ -339,6 +383,7 @@ impl Curve2 for Curve2Kind {
     fn eval(&self, t: f64) -> Point2 {
         match self {
             Curve2Kind::Line2(l) => l.eval(t),
+            Curve2Kind::CircularArc2(a) => a.eval(t),
             Curve2Kind::Nurbs(_) => todo!("NurbsCurve2::eval"),
         }
     }
@@ -346,6 +391,7 @@ impl Curve2 for Curve2Kind {
     fn eval_dt(&self, t: f64) -> Point2 {
         match self {
             Curve2Kind::Line2(l) => l.eval_dt(t),
+            Curve2Kind::CircularArc2(a) => a.eval_dt(t),
             Curve2Kind::Nurbs(_) => todo!("NurbsCurve2::eval_dt"),
         }
     }
@@ -353,6 +399,7 @@ impl Curve2 for Curve2Kind {
     fn is_degenerate(&self) -> bool {
         match self {
             Curve2Kind::Line2(l) => l.is_degenerate(),
+            Curve2Kind::CircularArc2(a) => a.is_degenerate(),
             Curve2Kind::Nurbs(_) => todo!("NurbsCurve2::is_degenerate"),
         }
     }
@@ -908,6 +955,62 @@ mod test {
     fn curve2kind_line2_is_degenerate() {
         let nd = Curve2Kind::Line2(Line2::new(uv(0.0, 0.0), uv(1.0, 0.0)));
         let dg = Curve2Kind::Line2(Line2::new(uv(1.0, 1.0), uv(1.0, 1.0)));
+        assert!(!nd.is_degenerate());
+        assert!(dg.is_degenerate());
+    }
+
+    // ── CircularArc2 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn circular_arc2_eval_at_zero() {
+        let a = CircularArc2::new(uv(1.0, 2.0), 3.0, 0.0, 2.0 * std::f64::consts::PI);
+        let got = a.eval(0.0);
+        assert!((got.u - 4.0).abs() < 1e-12);
+        assert!((got.v - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn circular_arc2_eval_at_half_pi() {
+        let a = CircularArc2::new(uv(0.0, 0.0), 1.0, 0.0, 2.0 * std::f64::consts::PI);
+        let got = a.eval(std::f64::consts::FRAC_PI_2);
+        assert!((got.u - 0.0).abs() < 1e-12);
+        assert!((got.v - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn circular_arc2_eval_dt_perpendicular() {
+        // tangent at t=0 should be (0, r)
+        let a = CircularArc2::new(uv(0.0, 0.0), 2.0, 0.0, 2.0 * std::f64::consts::PI);
+        let dt = a.eval_dt(0.0);
+        assert!((dt.u - 0.0).abs() < 1e-12);
+        assert!((dt.v - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn circular_arc2_is_degenerate_false() {
+        assert!(!CircularArc2::new(uv(0.0, 0.0), 1.0, 0.0, 2.0 * std::f64::consts::PI).is_degenerate());
+    }
+
+    #[test]
+    fn circular_arc2_is_degenerate_true() {
+        assert!(CircularArc2::new(uv(1.0, 1.0), 0.0, 0.0, 2.0 * std::f64::consts::PI).is_degenerate());
+    }
+
+    // ── Curve2Kind CircularArc2 delegation ────────────────────────────────────
+
+    #[test]
+    fn curve2kind_arc2_eval() {
+        let a = CircularArc2::new(uv(0.0, 0.0), 1.0, 0.0, 2.0 * std::f64::consts::PI);
+        let ck = Curve2Kind::CircularArc2(a);
+        let got = ck.eval(0.0);
+        assert!((got.u - 1.0).abs() < 1e-12);
+        assert!((got.v - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn curve2kind_arc2_is_degenerate() {
+        let nd = Curve2Kind::CircularArc2(CircularArc2::new(uv(0.0, 0.0), 1.0, 0.0, 2.0 * std::f64::consts::PI));
+        let dg = Curve2Kind::CircularArc2(CircularArc2::new(uv(0.0, 0.0), 0.0, 0.0, 2.0 * std::f64::consts::PI));
         assert!(!nd.is_degenerate());
         assert!(dg.is_degenerate());
     }
