@@ -343,9 +343,30 @@ Deliverable for Phase 3:
 ### Phase 4 — Meshing from B-rep (first real output)
 
 #### Step 1 — TriMesh type + meshing scaffold
-- [_] Define `TriMesh { vertices: Vec<[f32;3]>, normals: Vec<[f32;3]>, triangles: Vec<[u32;3]> }`
-- [_] Define `MeshOptions { resolution: u32 }` (segments per arc; curvature-adaptive later)
-- [_] `mesh_solid(ctx, sid, opts) -> TriMesh` — calls `mesh_face` per face, concatenates
+
+**TriMesh representation decisions (2026-04-11):**
+- Shared vertex positions (`vertices[NV]`) + index triangles (`triangles[NT]`) — vertex index
+  equality means shared position, enabling future connectivity/watertightness queries
+- Per-triangle-vertex normals (`tri_normals[NT×3]`): sharp edges get different normals at
+  the same vertex without duplicating positions; smooth surfaces interpolate naturally
+- Per-triangle-vertex UV coords (`tri_uvs[NT×3]`): always populated (values are free during
+  tessellation since we sample from UV grid points anyway); enables future texture mapping
+  - Known limitation: seam vertices (u=0/2π on cylinder/sphere/cone) carry a single UV value;
+    proper texture mapping at seams requires seam vertex duplication — deferred until needed
+- Invariants: `tri_normals.len() == triangles.len() * 3`; same for `tri_uvs`
+
+```rust
+pub struct TriMesh {
+    pub vertices:    Vec<[f32; 3]>,   // NV positions; shared across triangles
+    pub triangles:   Vec<[u32; 3]>,   // NT index triples into vertices
+    pub tri_normals: Vec<[f32; 3]>,   // NT×3; tri t corner k → tri_normals[t*3+k]
+    pub tri_uvs:     Vec<[f32; 2]>,   // NT×3; surface UV params at each triangle vertex
+}
+pub struct MeshOptions { pub resolution: u32 }   // segments per full circle; default 32
+```
+
+- [_] Implement `TriMesh`, `MeshOptions` (with `Default`), `mesh_solid(ctx, sid, opts) -> TriMesh`
+      — `mesh_solid` walks shell faces, calls internal `mesh_face` per face, concatenates
 
 #### Step 2 — Per-surface tessellation (one surface type at a time)
 UV domains for our four surface types — all simple, no general polygon trimming needed yet:
