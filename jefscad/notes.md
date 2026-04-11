@@ -371,7 +371,9 @@ pub struct MeshOptions { pub resolution: u32 }   // segments per full circle; de
 
 #### Step 2 — Per-surface tessellation (one surface type at a time)
 UV domains for our four surface types — all simple, no general polygon trimming needed yet:
-- [_] `Plane` (cuboid faces + caps): triangulate UV polygon directly
+- [x] `Plane` (cuboid faces + caps): fan triangulation from boundary[0]; analytic normal
+      adjusted for FaceSense; sample_loop_uvs handles Line2 (start pt) + CircularArc2
+      (resolution samples); 293 tests
 - [_] `CylindricalSurface`: uniform UV grid `[0,2π] × [0,h]`; handle seam (u=0 == u=2π)
 - [_] `ConicalSurface`: uniform UV grid `[0,2π] × [0,v_max]`; apex at v=0 collapses to point
 - [_] `SphericalSurface`: uniform UV grid `[0,2π] × [−π/2,π/2]`; poles collapse to points

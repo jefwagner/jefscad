@@ -1,6 +1,7 @@
 //! Tessellation: converts B-rep solids into triangle meshes.
 
-use crate::brep_kernel::{FaceId, SolidId, SolidModelingContext};
+use crate::brep_kernel::{FaceId, FaceSense, LoopId, Orientation, SolidId, SolidModelingContext};
+use crate::geom::{Curve2, Curve2Kind, Plane, Point3, Surface, SurfaceKind};
 
 // ── TriMesh ───────────────────────────────────────────────────────────────────
 
@@ -82,13 +83,122 @@ pub fn mesh_solid(ctx: &SolidModelingContext, sid: SolidId, opts: &MeshOptions) 
     out
 }
 
-// ── mesh_face (stub — filled in during Step 2 per surface type) ───────────────
+// ── mesh_face ─────────────────────────────────────────────────────────────────
 
 /// Tessellate a single face, returning a local [`TriMesh`] with indices starting
 /// at 0.  [`mesh_solid`] adjusts the indices to the global vertex offset.
-fn mesh_face(_ctx: &SolidModelingContext, _face_id: FaceId, _opts: &MeshOptions) -> TriMesh {
-    // Stub: returns an empty mesh until per-surface tessellation is implemented.
-    TriMesh::default()
+fn mesh_face(ctx: &SolidModelingContext, face_id: FaceId, opts: &MeshOptions) -> TriMesh {
+    let face = ctx.get_face(face_id);
+    let surf_id = face.surface;
+    match ctx.get_surface(surf_id) {
+        SurfaceKind::Plane(plane) => mesh_plane_face(ctx, face_id, *plane, opts),
+        _ => TriMesh::default(), // other surface types: stub until Step 2 continues
+    }
+}
+
+// ── Plane tessellation ────────────────────────────────────────────────────────
+
+/// Tessellate a face whose surface is a [`Plane`].
+///
+/// Samples the outer loop's coedge pcurves to get UV boundary points, then
+/// triangulates with a fan from `boundary[0]` (correct for all convex polygons —
+/// rectangles and circles are both convex).
+///
+/// Normals are taken from [`Plane::eval_n`] and negated for [`FaceSense::AntiAligned`]
+/// faces.  The same constant normal is stored at every triangle corner (flat shading).
+fn mesh_plane_face(
+    ctx: &SolidModelingContext,
+    face_id: FaceId,
+    plane: Plane,
+    opts: &MeshOptions,
+) -> TriMesh {
+    let face = ctx.get_face(face_id);
+    let sense = face.sense;
+    let loop_id = face.outer;
+
+    // Sample boundary in UV space
+    let uvs = sample_loop_uvs(ctx, loop_id, opts);
+    let n = uvs.len();
+    if n < 3 {
+        return TriMesh::default();
+    }
+
+    // Outward-facing normal (constant over the plane)
+    let raw_n = plane.eval_n(0.0, 0.0).unwrap();
+    let out_n = if sense == FaceSense::AntiAligned {
+        Point3::new(-raw_n.x, -raw_n.y, -raw_n.z)
+    } else {
+        raw_n
+    };
+    let normal = [out_n.x as f32, out_n.y as f32, out_n.z as f32];
+
+    // 3-D vertex positions from surface eval
+    let vertices: Vec<[f32; 3]> = uvs.iter().map(|&[u, v]| {
+        let p = plane.eval(u, v);
+        [p.x as f32, p.y as f32, p.z as f32]
+    }).collect();
+
+    // Fan triangulation from vertex 0: triangles (0, i, i+1) for i in 1..n-1
+    let mut triangles  = Vec::with_capacity(n - 2);
+    let mut tri_normals = Vec::with_capacity((n - 2) * 3);
+    let mut tri_uvs    = Vec::with_capacity((n - 2) * 3);
+
+    for i in 1..=(n - 2) {
+        triangles.push([0u32, i as u32, (i + 1) as u32]);
+        for &corner in &[0, i, i + 1] {
+            tri_normals.push(normal);
+            tri_uvs.push([uvs[corner][0] as f32, uvs[corner][1] as f32]);
+        }
+    }
+
+    TriMesh { vertices, triangles, tri_normals, tri_uvs }
+}
+
+// ── sample_loop_uvs ───────────────────────────────────────────────────────────
+
+/// Walk the coedges of `loop_id` and return UV boundary sample points.
+///
+/// - `Line2` pcurves contribute one point: the coedge start (endpoint = next coedge start).
+/// - `CircularArc2` pcurves contribute `resolution` evenly-spaced points from
+///   `t_start` to `t_end` (exclusive of the endpoint, which is the next coedge start).
+fn sample_loop_uvs(
+    ctx: &SolidModelingContext,
+    loop_id: LoopId,
+    opts: &MeshOptions,
+) -> Vec<[f64; 2]> {
+    let coedge_ids = ctx.get_loop(loop_id).coedges.clone();
+    let mut uvs = Vec::new();
+
+    for ce_id in coedge_ids {
+        let ce   = ctx.get_coedge(ce_id);
+        let edge = ctx.get_edge(ce.edge);
+        let (t_start, t_end) = match ce.orientation {
+            Orientation::Forward => (edge.t0, edge.t1),
+            Orientation::Reverse => (edge.t1, edge.t0),
+        };
+        let pcurve = ctx.get_curve2(ce.pcurve);
+        match pcurve {
+            Curve2Kind::Line2(_) => {
+                // Straight edge: only the start vertex contributes
+                let p = pcurve.eval(t_start);
+                uvs.push([p.u, p.v]);
+            }
+            Curve2Kind::CircularArc2(_) => {
+                // Curved edge: sample `resolution` points, endpoint excluded
+                let n = opts.resolution as usize;
+                let dt = (t_end - t_start) / n as f64;
+                for k in 0..n {
+                    let p = pcurve.eval(t_start + k as f64 * dt);
+                    uvs.push([p.u, p.v]);
+                }
+            }
+            Curve2Kind::Nurbs(_) => {
+                todo!("UV sampling for NurbsCurve2 not yet implemented")
+            }
+        }
+    }
+
+    uvs
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -105,6 +215,12 @@ mod test {
         mesh_solid(&ctx, sid, &MeshOptions::default())
     }
 
+    fn mesh_prim_res(node: &CsgNode, resolution: u32) -> TriMesh {
+        let mut ctx = SolidModelingContext::new();
+        let sid = compile_csg_node(&mut ctx, node);
+        mesh_solid(&ctx, sid, &MeshOptions { resolution })
+    }
+
     fn check_invariants(mesh: &TriMesh) {
         let nt = mesh.triangles.len();
         assert_eq!(mesh.tri_normals.len(), nt * 3,
@@ -119,6 +235,8 @@ mod test {
             }
         }
     }
+
+    // ── Scaffold invariants (regression) ─────────────────────────────────────
 
     #[test]
     fn mesh_options_default_resolution() {
@@ -143,5 +261,59 @@ mod test {
     #[test]
     fn trimesh_invariants_sphere() {
         check_invariants(&mesh_prim(&CsgNode::sphere(1.5)));
+    }
+
+    // ── Plane tessellation: cuboid ────────────────────────────────────────────
+
+    #[test]
+    fn mesh_solid_cuboid_is_nonempty() {
+        let mesh = mesh_prim(&CsgNode::cuboid(2.0, 3.0, 4.0));
+        assert!(mesh.triangles.len() > 0);
+    }
+
+    #[test]
+    fn mesh_solid_cuboid_triangle_count() {
+        // 6 rectangular faces × (4 boundary pts → fan → 2 triangles) = 12
+        let mesh = mesh_prim(&CsgNode::cuboid(2.0, 3.0, 4.0));
+        assert_eq!(mesh.triangles.len(), 12);
+    }
+
+    #[test]
+    fn mesh_solid_cuboid_vertex_count() {
+        // 6 faces × 4 vertices each (no sharing across faces) = 24
+        let mesh = mesh_prim(&CsgNode::cuboid(2.0, 3.0, 4.0));
+        assert_eq!(mesh.vertices.len(), 24);
+    }
+
+    #[test]
+    fn mesh_solid_cuboid_normals_are_unit() {
+        let mesh = mesh_prim(&CsgNode::cuboid(2.0, 3.0, 4.0));
+        for n in &mesh.tri_normals {
+            let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-5, "normal {n:?} has length {len}");
+        }
+    }
+
+    #[test]
+    fn mesh_solid_cuboid_normals_axis_aligned() {
+        // Each face of an axis-aligned cuboid must have a normal along ±x, ±y, or ±z.
+        let mesh = mesh_prim(&CsgNode::cuboid(2.0, 3.0, 4.0));
+        for n in &mesh.tri_normals {
+            let [x, y, z] = *n;
+            let is_axis = (x.abs() > 0.9 && y.abs() < 0.1 && z.abs() < 0.1)
+                       || (y.abs() > 0.9 && x.abs() < 0.1 && z.abs() < 0.1)
+                       || (z.abs() > 0.9 && x.abs() < 0.1 && y.abs() < 0.1);
+            assert!(is_axis, "normal {n:?} is not axis-aligned");
+        }
+    }
+
+    // ── Plane tessellation: cylinder caps ─────────────────────────────────────
+
+    #[test]
+    fn mesh_solid_cylinder_plane_caps_triangle_count() {
+        // resolution=32 → 32 boundary pts per cap → fan → 30 triangles per cap
+        // lateral face (CylindricalSurface) still returns empty stub
+        let mesh = mesh_prim_res(&CsgNode::cylinder(1.0, 2.0), 32);
+        assert_eq!(mesh.triangles.len(), 2 * (32 - 2));
     }
 }
