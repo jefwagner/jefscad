@@ -374,7 +374,8 @@ UV domains for our four surface types — all simple, no general polygon trimmin
 - [x] `Plane` (cuboid faces + caps): fan triangulation from boundary[0]; analytic normal
       adjusted for FaceSense; sample_loop_uvs handles Line2 (start pt) + CircularArc2
       (resolution samples); 293 tests
-- [_] `CylindricalSurface`: uniform UV grid `[0,2π] × [0,h]`; handle seam (u=0 == u=2π)
+- [x] `CylindricalSurface`: (resolution+1)×2 UV grid; v range from loop boundary samples;
+      radial analytic normals; seam at u=0/2π has duplicate positions, separate UVs; 296 tests
 - [_] `ConicalSurface`: uniform UV grid `[0,2π] × [0,v_max]`; apex at v=0 collapses to point
 - [_] `SphericalSurface`: uniform UV grid `[0,2π] × [−π/2,π/2]`; poles collapse to points
 - [_] Watertightness: post-merge coincident vertices by position after per-face meshing

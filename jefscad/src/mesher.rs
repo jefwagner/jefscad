@@ -1,7 +1,7 @@
 //! Tessellation: converts B-rep solids into triangle meshes.
 
 use crate::brep_kernel::{FaceId, FaceSense, LoopId, Orientation, SolidId, SolidModelingContext};
-use crate::geom::{Curve2, Curve2Kind, Plane, Point3, Surface, SurfaceKind};
+use crate::geom::{Curve2, Curve2Kind, CylindricalSurface, Plane, Point3, Surface, SurfaceKind};
 
 // ── TriMesh ───────────────────────────────────────────────────────────────────
 
@@ -91,7 +91,8 @@ fn mesh_face(ctx: &SolidModelingContext, face_id: FaceId, opts: &MeshOptions) ->
     let face = ctx.get_face(face_id);
     let surf_id = face.surface;
     match ctx.get_surface(surf_id) {
-        SurfaceKind::Plane(plane) => mesh_plane_face(ctx, face_id, *plane, opts),
+        SurfaceKind::Plane(plane)    => mesh_plane_face(ctx, face_id, *plane, opts),
+        SurfaceKind::Cylinder(cyl)   => mesh_cylindrical_face(ctx, face_id, *cyl, opts),
         _ => TriMesh::default(), // other surface types: stub until Step 2 continues
     }
 }
@@ -148,6 +149,81 @@ fn mesh_plane_face(
         for &corner in &[0, i, i + 1] {
             tri_normals.push(normal);
             tri_uvs.push([uvs[corner][0] as f32, uvs[corner][1] as f32]);
+        }
+    }
+
+    TriMesh { vertices, triangles, tri_normals, tri_uvs }
+}
+
+// ── CylindricalSurface tessellation ──────────────────────────────────────────
+
+/// Tessellate the lateral face of a [`CylindricalSurface`].
+///
+/// Builds a `(resolution+1) × 2` UV grid (u sweeps 0→2π in `resolution` steps,
+/// two v rows at v_min and v_max derived from the face loop).  Each column strip
+/// becomes two triangles.  Normals are the analytic radial normal at each vertex.
+///
+/// The first and last columns share the same 3-D positions (the seam) but carry
+/// different UV values (u=0 vs u=2π) — consistent with the documented seam
+/// limitation.
+fn mesh_cylindrical_face(
+    ctx: &SolidModelingContext,
+    face_id: FaceId,
+    cyl: CylindricalSurface,
+    opts: &MeshOptions,
+) -> TriMesh {
+    use std::f64::consts::TAU;
+
+    // Derive v range from the boundary UV samples.
+    let loop_id = ctx.get_face(face_id).outer;
+    let boundary = sample_loop_uvs(ctx, loop_id, opts);
+    let v_min = boundary.iter().map(|uv| uv[1]).fold(f64::INFINITY,  f64::min);
+    let v_max = boundary.iter().map(|uv| uv[1]).fold(f64::NEG_INFINITY, f64::max);
+
+    let res = opts.resolution as usize;
+    let nu  = res + 1;      // columns: u = 0 … 2π (inclusive)
+    let nv  = 2usize;       // rows:    v_min, v_max
+    let v_vals = [v_min, v_max];
+
+    // Build vertices, normals, UVs
+    let mut vertices    = Vec::with_capacity(nu * nv);
+    let mut vert_norms  = Vec::with_capacity(nu * nv); // one normal per vertex (reused per corner)
+    let mut vert_uvs    = Vec::with_capacity(nu * nv);
+
+    for vi in 0..nv {
+        let v = v_vals[vi];
+        for ui in 0..nu {
+            let u = ui as f64 * TAU / res as f64;
+            let p = cyl.eval(u, v);
+            vertices.push([p.x as f32, p.y as f32, p.z as f32]);
+            let n = cyl.eval_n(u, v).expect("CylindricalSurface normal is always defined");
+            vert_norms.push([n.x as f32, n.y as f32, n.z as f32]);
+            vert_uvs.push([u as f32, v as f32]);
+        }
+    }
+
+    // Triangulate: res strips, each split into 2 triangles
+    //   BL = vi=0, ui=col     BR = vi=0, ui=col+1
+    //   TL = vi=1, ui=col     TR = vi=1, ui=col+1
+    //   Triangles: (BL, BR, TR) and (BL, TR, TL)  — outward winding verified
+    let mut triangles   = Vec::with_capacity(res * 2);
+    let mut tri_normals = Vec::with_capacity(res * 2 * 3);
+    let mut tri_uvs     = Vec::with_capacity(res * 2 * 3);
+
+    let idx = |vi: usize, ui: usize| (vi * nu + ui) as u32;
+
+    for col in 0..res {
+        let bl = idx(0, col);
+        let br = idx(0, col + 1);
+        let tl = idx(1, col);
+        let tr = idx(1, col + 1);
+
+        for &tri in &[[bl, br, tr], [bl, tr, tl]] {
+            triangles.push(tri);
+            for &c in &tri {
+                tri_normals.push(vert_norms[c as usize]);
+                tri_uvs.push(vert_uvs[c as usize]);
+            }
         }
     }
 
@@ -307,13 +383,45 @@ mod test {
         }
     }
 
-    // ── Plane tessellation: cylinder caps ─────────────────────────────────────
+    // ── CylindricalSurface tessellation ───────────────────────────────────────
 
     #[test]
-    fn mesh_solid_cylinder_plane_caps_triangle_count() {
-        // resolution=32 → 32 boundary pts per cap → fan → 30 triangles per cap
-        // lateral face (CylindricalSurface) still returns empty stub
+    fn mesh_solid_cylinder_triangle_count() {
+        // lateral:  resolution × 2 = 32 × 2 = 64
+        // 2 caps:   2 × (resolution − 2) = 2 × 30 = 60
+        // total: 124
         let mesh = mesh_prim_res(&CsgNode::cylinder(1.0, 2.0), 32);
-        assert_eq!(mesh.triangles.len(), 2 * (32 - 2));
+        assert_eq!(mesh.triangles.len(), 32 * 2 + 2 * (32 - 2));
+    }
+
+    #[test]
+    fn mesh_solid_cylinder_vertex_count() {
+        // lateral:  (resolution + 1) × 2 = 33 × 2 = 66
+        // 2 caps:   2 × resolution = 2 × 32 = 64
+        // total: 130
+        let mesh = mesh_prim_res(&CsgNode::cylinder(1.0, 2.0), 32);
+        assert_eq!(mesh.vertices.len(), (32 + 1) * 2 + 2 * 32);
+    }
+
+    #[test]
+    fn mesh_solid_cylinder_normals_are_unit() {
+        let mesh = mesh_prim(&CsgNode::cylinder(1.0, 2.0));
+        for n in &mesh.tri_normals {
+            let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-5, "normal {n:?} has length {len}");
+        }
+    }
+
+    #[test]
+    fn mesh_solid_cylinder_lateral_normals_radial() {
+        // For an axis-aligned cylinder (axis = +z), lateral normals are radial:
+        // their z-component must be ≈ 0.
+        let mesh = mesh_prim(&CsgNode::cylinder(1.0, 2.0));
+        let radial_count = mesh.tri_normals.iter()
+            .filter(|n| n[2].abs() < 0.01)
+            .count();
+        // lateral face has resolution×2×3 = 32×2×3 = 192 normal entries
+        assert!(radial_count >= 32 * 2 * 3,
+            "expected at least {} radial normals, got {}", 32 * 2 * 3, radial_count);
     }
 }
