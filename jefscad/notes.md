@@ -329,34 +329,45 @@ Goal: “primitive -> B-rep -> mesh” pipeline working.
         - Cylindrical/Conical: isotropic check; transform origin/apex/axis/ref_dir; lateral pcurve v-coords *= s via topology traversal; half_angle scale-invariant for cone
         - SphericalSurface: isotropic check; transform center/ref_dir/axis; radius *= s; pcurves unchanged (u,v are angles)
         - Non-isotropic on curved primitives: todo!() until NURBS fallback implemented
-- [ ] Apply `flat_transform` from the CSG node during compilation (see brep_notes.md for
-      the transform-handling strategy):
-  - `Cuboid`: any affine transform produces planar faces — always absorb directly into
-    `Plane` parameters. No check needed.
-  - `Sphere`: check if linear part M satisfies `M^T · M = s²·I` (uniform scale ×
-    rotation). If yes, absorb into `SphericalSurface` (new center, new radius). If no,
-    fall back to `NurbsSurf`.
-  - `Cylinder`, `Cone`: check if M restricted to the plane perpendicular to the axis is
-    isotropic (two equal eigenvalues in the projected 2×2 block). If yes, absorb into
-    `CylindricalSurface`/`ConicalSurface`. If no, fall back to `NurbsSurf`.
-  - Edges on NURBS-fallback surfaces: circular arc edges become `NurbsCurve3` (degree-2
-    rational NURBS represents the ellipse exactly; apply the full transform to the
-    control points).
+- [x] `compile_primitive` absorbs `flat_transform` (isotropic check; todo!() for NURBS fallback)
+- [_] `compile_csg_node(ctx, node) -> SolidId`
+  - Match on `CsgBaseNode::Prim` → call `compile_primitive` with node's `flat_transform`,
+    `prov_id`, `geom_id`
+  - Boolean ops (`Op`) → `todo!()` for now
 
 Deliverable for Phase 3:
-- `compile_primitive_to_brep(prim)` works and produces a valid trimmed-surface B-rep.
+- `compile_csg_node` works for all four primitives with arbitrary isotropic transforms.
 
 ---
 
 ### Phase 4 — Meshing from B-rep (first real output)
-- [ ] Tessellate trimmed parametric faces
-  - chordal deviation / curvature-based refinement knobs
-  - consistent sampling along shared edges (watertightness)
-- [ ] Generate triangle mesh for preview/export
-- [ ] Export to STL/OBJ (later glTF for preview)
+
+#### Step 1 — TriMesh type + meshing scaffold
+- [_] Define `TriMesh { vertices: Vec<[f32;3]>, normals: Vec<[f32;3]>, triangles: Vec<[u32;3]> }`
+- [_] Define `MeshOptions { resolution: u32 }` (segments per arc; curvature-adaptive later)
+- [_] `mesh_solid(ctx, sid, opts) -> TriMesh` — calls `mesh_face` per face, concatenates
+
+#### Step 2 — Per-surface tessellation (one surface type at a time)
+UV domains for our four surface types — all simple, no general polygon trimming needed yet:
+- [_] `Plane` (cuboid faces + caps): triangulate UV polygon directly
+- [_] `CylindricalSurface`: uniform UV grid `[0,2π] × [0,h]`; handle seam (u=0 == u=2π)
+- [_] `ConicalSurface`: uniform UV grid `[0,2π] × [0,v_max]`; apex at v=0 collapses to point
+- [_] `SphericalSurface`: uniform UV grid `[0,2π] × [−π/2,π/2]`; poles collapse to points
+- [_] Watertightness: post-merge coincident vertices by position after per-face meshing
+
+#### Step 3 — File export
+- [_] Binary STL (`write_stl(mesh, path)`) — flat triangle list, face normals; no vertex sharing needed
+- [_] OBJ (`write_obj(mesh, path)`) — shared vertices + normals; Blender-friendly
+- [_] glTF — deferred until STL/OBJ are working
+
+#### Step 4 — Python binding
+- [_] `PyMesh` class wrapping `TriMesh`
+- [_] `PyNode::mesh(resolution=32) -> PyMesh`
+  - creates `SolidModelingContext`, calls `compile_csg_node`, then `mesh_solid`
+- [_] `PyMesh::save_stl(path)`, `PyMesh::save_obj(path)`
 
 Deliverable for Phase 4:
-- Full pipeline for primitives: Python AST -> B-rep -> mesh -> file.
+- `sphere(2.5).translate(0,0,1).mesh().save_stl("out.stl")` works end-to-end.
 
 ---
 
