@@ -678,23 +678,212 @@ pub fn build_sphere(
 
 // ── compile_primitive ─────────────────────────────────────────────────────────
 
-/// Dispatch a [`CsgPrimitive`] to the appropriate `build_*` function.
+/// Dispatch a [`CsgPrimitive`] to the appropriate `build_*` function and absorb
+/// the affine `transform` into the resulting B-rep geometry.
 ///
-/// `prov_id` and `geom_id` are forwarded unchanged to the builder and stored
-/// in every face's [`ProvenanceData`].
+/// `transform` is a row-major column-vector 4×4 affine matrix (the same layout
+/// as `CsgNode::flat_transform`).  The identity matrix leaves the B-rep unchanged.
+///
+/// **Absorption rules:**
+/// - Vertices: always transformed as points (homogeneous w = 1).
+/// - `Line3` edges: p0 and p1 transformed as points; parameter domain unchanged.
+/// - `CircularArc3` edges: requires the transform to be isotropic (uniform scale ×
+///   rotation). center transformed as a point; ref_dir / normal transformed as vectors
+///   and re-normalised; radius scaled by `s`.
+/// - `Plane` surfaces: p0 as point, u_dir / v_dir as vectors (scaling absorbed into
+///   the direction vectors — pcurves on plane faces need no update).
+/// - `CylindricalSurface` / `ConicalSurface`: isotropic required. origin / apex as
+///   points; axis / ref_dir as vectors (re-normalised); radius scaled by `s`. Pcurves
+///   on the lateral face have their v-coordinates (world-space axial or slant distance)
+///   scaled by `s` via topology traversal.
+/// - `SphericalSurface`: isotropic required. center as point; ref_dir / axis as
+///   vectors (re-normalised); radius scaled by `s`. Pcurves unchanged (angles).
+///
+/// Non-isotropic transforms on curved surfaces will panic with `todo!()` until the
+/// NURBS fallback is implemented.
+///
+/// `prov_id` and `geom_id` are forwarded unchanged to the builder and stored in every
+/// face's [`ProvenanceData`].
 pub fn compile_primitive(
     ctx: &mut SolidModelingContext,
     prim: &crate::csg_lang::CsgPrimitive,
+    transform: &[f64; 16],
     prov_id: u64,
     geom_id: u64,
 ) -> SolidId {
     use crate::csg_lang::CsgPrimitive;
-    match prim {
+
+    // Snapshot arena lengths so we know which entries belong to this build.
+    let v_start  = ctx.vertices.len();
+    let c3_start = ctx.curves3.len();
+    let c2_start = ctx.curves2.len();
+    let s_start  = ctx.surfaces.len();
+
+    let solid_id = match prim {
         CsgPrimitive::Cuboid { dx, dy, dz } => build_cuboid(ctx, *dx, *dy, *dz, prov_id, geom_id),
         CsgPrimitive::Cylinder { r, h }     => build_cylinder(ctx, *r, *h, prov_id, geom_id),
         CsgPrimitive::Cone { r, h }         => build_cone(ctx, *r, *h, prov_id, geom_id),
         CsgPrimitive::Sphere { r }          => build_sphere(ctx, *r, prov_id, geom_id),
+    };
+
+    // Skip the walk when the transform is the identity.
+    if is_identity(transform) {
+        return solid_id;
     }
+
+    // ── Extract linear part and translation ───────────────────────────────────
+    // Row-major layout: row i, col j → index i*4 + j.
+    // Linear part M (3×3) is the top-left block; translation d is column 3, rows 0-2.
+    let m = |r: usize, c: usize| transform[r * 4 + c];
+    let d = Point3::new(m(0, 3), m(1, 3), m(2, 3));
+
+    // Apply M to a vector (w=0): only the linear part.
+    let apply_vec = |v: Point3| Point3::new(
+        m(0,0)*v.x + m(0,1)*v.y + m(0,2)*v.z,
+        m(1,0)*v.x + m(1,1)*v.y + m(1,2)*v.z,
+        m(2,0)*v.x + m(2,1)*v.y + m(2,2)*v.z,
+    );
+    // Apply the full 4×4 to a point (w=1): linear part + translation.
+    let apply_pt = |p: Point3| apply_vec(p) + d;
+
+    // Isotropic check: Mᵀ·M = s²·I.  Returns scale factor s, or panics.
+    let isotropic_scale = || -> f64 {
+        // Compute the three diagonal entries of Mᵀ·M and the three off-diagonal entries.
+        let btb = |r: usize, c: usize| -> f64 {
+            (0..3).map(|k| m(k, r) * m(k, c)).sum()
+        };
+        let s2 = btb(0, 0);
+        let eps = 1e-9 * s2.abs().max(1.0);
+        assert!(
+            (btb(1, 1) - s2).abs() < eps && (btb(2, 2) - s2).abs() < eps
+            && btb(0, 1).abs() < eps && btb(0, 2).abs() < eps && btb(1, 2).abs() < eps,
+            "non-isotropic transform on curved primitive: NURBS fallback not yet implemented"
+        );
+        s2.sqrt()
+    };
+
+    // ── Transform vertices ────────────────────────────────────────────────────
+    for v in &mut ctx.vertices[v_start..] {
+        v.point = apply_pt(v.point);
+    }
+
+    // ── Transform Curve3 entities ─────────────────────────────────────────────
+    for c3 in &mut ctx.curves3[c3_start..] {
+        match c3 {
+            Curve3Kind::Line3(l) => {
+                l.p0 = apply_pt(l.p0);
+                l.p1 = apply_pt(l.p1);
+            }
+            Curve3Kind::CircularArc3(a) => {
+                let s = isotropic_scale();
+                a.center  = apply_pt(a.center);
+                a.ref_dir = apply_vec(a.ref_dir).normalize();
+                a.normal  = apply_vec(a.normal).normalize();
+                a.radius *= s;
+            }
+            Curve3Kind::Nurbs(_) | Curve3Kind::Ssi(_) => {
+                todo!("transform absorption for NurbsCurve3 / SsiCurve3 not yet implemented")
+            }
+        }
+    }
+
+    // ── Transform Surface entities ────────────────────────────────────────────
+    // For Cylindrical and Conical surfaces, we also need to scale the v-coordinates
+    // of pcurves on that face (v is a world-space distance in those parameterisations).
+    // We do the pcurve update after updating the surface so we can retrieve s once.
+    for surf_idx in s_start..ctx.surfaces.len() {
+        match ctx.surfaces[surf_idx] {
+            SurfaceKind::Plane(ref mut pl) => {
+                pl.p0    = apply_pt(pl.p0);
+                pl.u_dir = apply_vec(pl.u_dir);
+                pl.v_dir = apply_vec(pl.v_dir);
+            }
+            SurfaceKind::Cylinder(ref mut cy) => {
+                let s = isotropic_scale();
+                cy.origin  = apply_pt(cy.origin);
+                cy.axis    = apply_vec(cy.axis).normalize();
+                cy.ref_dir = apply_vec(cy.ref_dir).normalize();
+                cy.radius *= s;
+                // Scale v-coordinates of lateral-face pcurves.
+                scale_lateral_pcurves(ctx, surf_idx, s, c2_start);
+            }
+            SurfaceKind::Cone(ref mut co) => {
+                let s = isotropic_scale();
+                co.apex    = apply_pt(co.apex);
+                co.axis    = apply_vec(co.axis).normalize();
+                co.ref_dir = apply_vec(co.ref_dir).normalize();
+                // half_angle is scale-invariant (r/h ratio unchanged).
+                scale_lateral_pcurves(ctx, surf_idx, s, c2_start);
+            }
+            SurfaceKind::Sphere(ref mut sp) => {
+                let s = isotropic_scale();
+                sp.center  = apply_pt(sp.center);
+                sp.ref_dir = apply_vec(sp.ref_dir).normalize();
+                sp.axis    = apply_vec(sp.axis).normalize();
+                sp.radius *= s;
+                // SphericalSurface u,v are angles — pcurves unchanged.
+            }
+            SurfaceKind::Nurbs(_) => {
+                todo!("transform absorption for NurbsSurf not yet implemented")
+            }
+        }
+    }
+
+    solid_id
+}
+
+/// Scale the v-coordinate of every pcurve on the face backed by `surf_idx` by `s`.
+///
+/// Used for `CylindricalSurface` and `ConicalSurface` where `v` is a world-space
+/// distance (axial or slant) and must scale with the isotropic factor.
+/// Pcurves outside the freshly-built range `[c2_start, …)` are not touched.
+fn scale_lateral_pcurves(
+    ctx: &mut SolidModelingContext,
+    surf_idx: usize,
+    s: f64,
+    c2_start: usize,
+) {
+    use crate::brep_kernel::{SurfaceId, CoEdgeId};
+    // Find the face that owns this surface.
+    let surf_id = SurfaceId(surf_idx);
+    let face_id = match ctx.faces.iter().position(|f| f.surface == surf_id) {
+        Some(i) => crate::brep_kernel::FaceId(i),
+        None    => return,
+    };
+    // Collect all CoEdge IDs in the face's outer loop.
+    let loop_id = ctx.get_face(face_id).outer;
+    let coedge_ids: Vec<CoEdgeId> = ctx.get_loop(loop_id).coedges.clone();
+    // Scale v-coords of each pcurve that lives in the freshly-built range.
+    for ce_id in coedge_ids {
+        let pc_id = ctx.get_coedge(ce_id).pcurve;
+        if pc_id.0 < c2_start {
+            continue;
+        }
+        match &mut ctx.curves2[pc_id.0] {
+            Curve2Kind::Line2(l) => {
+                l.p0.v *= s;
+                l.p1.v *= s;
+            }
+            Curve2Kind::CircularArc2(a) => {
+                a.center.v *= s;
+            }
+            Curve2Kind::Nurbs(_) => {
+                todo!("pcurve v-scaling for NurbsCurve2 not yet implemented")
+            }
+        }
+    }
+}
+
+/// Returns `true` if `transform` is the 4×4 identity matrix (within 1e-12).
+fn is_identity(transform: &[f64; 16]) -> bool {
+    #[rustfmt::skip]
+    const ID: [f64; 16] = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    transform.iter().zip(ID.iter()).all(|(a, b)| (a - b).abs() < 1e-12)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1393,12 +1582,36 @@ mod test {
     // ── compile_primitive ─────────────────────────────────────────────────────
 
     use crate::csg_lang::CsgPrimitive;
+    use crate::geom::SurfaceKind;
 
+    #[rustfmt::skip]
+    const ID: [f64; 16] = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ];
+
+    fn approx(a: f64, b: f64) -> bool { (a - b).abs() < 1e-10 }
+    fn pt_approx(p: Point3, x: f64, y: f64, z: f64) -> bool {
+        approx(p.x, x) && approx(p.y, y) && approx(p.z, z)
+    }
+
+    /// Compile with identity transform, forwarding prov/geom ids.
     fn compile(prim: CsgPrimitive) -> (SolidModelingContext, SolidId) {
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_primitive(&mut ctx, &prim, 7, 42);
+        let sid = compile_primitive(&mut ctx, &prim, &ID, 7, 42);
         (ctx, sid)
     }
+
+    /// Compile with an explicit transform; prov/geom ids are zeroed.
+    fn compile_with(prim: CsgPrimitive, transform: [f64; 16]) -> (SolidModelingContext, SolidId) {
+        let mut ctx = SolidModelingContext::new();
+        let sid = compile_primitive(&mut ctx, &prim, &transform, 0, 0);
+        (ctx, sid)
+    }
+
+    // ── Dispatch / entity counts (regression) ─────────────────────────────────
 
     #[test]
     fn compile_cuboid_entity_counts() {
@@ -1443,5 +1656,219 @@ mod test {
             assert_eq!(face.prov.sources[0].prov_id, 7);
             assert_eq!(face.prov.sources[0].geom_id, 42);
         }
+    }
+
+    // ── Translation ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn compile_cuboid_translation() {
+        #[rustfmt::skip]
+        let t = [
+            1.0, 0.0, 0.0, 1.0,
+            0.0, 1.0, 0.0, 2.0,
+            0.0, 0.0, 1.0, 3.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let (ctx, _) = compile_with(CsgPrimitive::Cuboid { dx: 2.0, dy: 3.0, dz: 4.0 }, t);
+        let pts: Vec<Point3> = ctx.vertices.iter().map(|v| v.point).collect();
+        // (0,0,0) → (1,2,3);  (2,3,4) → (3,5,7)
+        assert!(pts.iter().any(|p| pt_approx(*p, 1.0, 2.0, 3.0)));
+        assert!(pts.iter().any(|p| pt_approx(*p, 3.0, 5.0, 7.0)));
+    }
+
+    #[test]
+    fn compile_sphere_translation() {
+        #[rustfmt::skip]
+        let t = [
+            1.0, 0.0, 0.0, 5.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let (ctx, _) = compile_with(CsgPrimitive::Sphere { r: 1.0 }, t);
+        let SurfaceKind::Sphere(s) = ctx.surfaces[0] else { panic!("expected Sphere") };
+        assert!(pt_approx(s.center, 5.0, 0.0, 0.0), "center should be (5,0,0)");
+        assert!(approx(s.radius, 1.0), "radius should be unchanged");
+    }
+
+    #[test]
+    fn compile_cylinder_translation() {
+        #[rustfmt::skip]
+        let t = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 5.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let (ctx, _) = compile_with(CsgPrimitive::Cylinder { r: 1.0, h: 2.0 }, t);
+        let pts: Vec<Point3> = ctx.vertices.iter().map(|v| v.point).collect();
+        // (1,0,0) → (1,0,5);  (1,0,2) → (1,0,7)
+        assert!(pts.iter().any(|p| pt_approx(*p, 1.0, 0.0, 5.0)));
+        assert!(pts.iter().any(|p| pt_approx(*p, 1.0, 0.0, 7.0)));
+        // Cylinder origin shifted
+        let SurfaceKind::Cylinder(c) = ctx.surfaces[0] else { panic!("expected Cylinder") };
+        assert!(pt_approx(c.origin, 0.0, 0.0, 5.0), "origin should be (0,0,5)");
+    }
+
+    // ── Uniform scale ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn compile_cuboid_uniform_scale() {
+        #[rustfmt::skip]
+        let t = [
+            2.0, 0.0, 0.0, 0.0,
+            0.0, 2.0, 0.0, 0.0,
+            0.0, 0.0, 2.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let (ctx, _) = compile_with(CsgPrimitive::Cuboid { dx: 2.0, dy: 3.0, dz: 4.0 }, t);
+        let pts: Vec<Point3> = ctx.vertices.iter().map(|v| v.point).collect();
+        // (0,0,0) unchanged; (2,3,4) → (4,6,8)
+        assert!(pts.iter().any(|p| pt_approx(*p, 0.0, 0.0, 0.0)));
+        assert!(pts.iter().any(|p| pt_approx(*p, 4.0, 6.0, 8.0)));
+    }
+
+    #[test]
+    fn compile_sphere_uniform_scale() {
+        #[rustfmt::skip]
+        let t = [
+            2.0, 0.0, 0.0, 0.0,
+            0.0, 2.0, 0.0, 0.0,
+            0.0, 0.0, 2.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let (ctx, _) = compile_with(CsgPrimitive::Sphere { r: 1.5 }, t);
+        let SurfaceKind::Sphere(s) = ctx.surfaces[0] else { panic!("expected Sphere") };
+        assert!(pt_approx(s.center, 0.0, 0.0, 0.0), "center should stay at origin");
+        assert!(approx(s.radius, 3.0), "radius should be 2 * 1.5 = 3.0");
+    }
+
+    #[test]
+    fn compile_cylinder_uniform_scale_geometry() {
+        #[rustfmt::skip]
+        let t = [
+            2.0, 0.0, 0.0, 0.0,
+            0.0, 2.0, 0.0, 0.0,
+            0.0, 0.0, 2.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let (ctx, _) = compile_with(CsgPrimitive::Cylinder { r: 1.5, h: 3.0 }, t);
+        let pts: Vec<Point3> = ctx.vertices.iter().map(|v| v.point).collect();
+        // (1.5,0,0) → (3,0,0);  (1.5,0,3) → (3,0,6)
+        assert!(pts.iter().any(|p| pt_approx(*p, 3.0, 0.0, 0.0)));
+        assert!(pts.iter().any(|p| pt_approx(*p, 3.0, 0.0, 6.0)));
+        let SurfaceKind::Cylinder(c) = ctx.surfaces[0] else { panic!("expected Cylinder") };
+        assert!(approx(c.radius, 3.0), "radius should be 2 * 1.5 = 3.0");
+        assert!(pt_approx(c.axis, 0.0, 0.0, 1.0), "axis should remain (0,0,1)");
+    }
+
+    #[test]
+    fn compile_cylinder_uniform_scale_pcurves() {
+        // Lateral-face pcurves that carry a v-coordinate (axial distance) must scale.
+        // Plane-face pcurves (CircularArc2 on caps) must NOT change.
+        #[rustfmt::skip]
+        let t = [
+            2.0, 0.0, 0.0, 0.0,
+            0.0, 2.0, 0.0, 0.0,
+            0.0, 0.0, 2.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let (ctx, _) = compile_with(CsgPrimitive::Cylinder { r: 1.5, h: 3.0 }, t);
+        // Curve2 push order in build_cylinder (lateral face first):
+        //   [0] pc_base_lat  Line2(p0=(0,0), p1=(1,0))     v=0 — unchanged
+        //   [1] pc_seam_rgt  Line2(p0=(TAU,0), p1=(TAU,h)) v endpoint → 2h
+        //   [2] pc_top_lat   Line2(p0=(0,h), p1=(1,h))     v → 2h
+        //   [3] pc_seam_lft  Line2(p0=(0,0), p1=(0,h))     v endpoint → 2h
+        //   [4] pc_base_cap  CircularArc2 r=1.5 on Plane    — unchanged
+        //   [5] pc_top_cap   CircularArc2 r=1.5 on Plane    — unchanged
+        let scaled_h = 6.0_f64; // 2 * h
+        let Curve2Kind::Line2(seam_rgt) = ctx.curves2[1] else { panic!() };
+        assert!(approx(seam_rgt.p1.v, scaled_h), "seam_rgt p1.v expected {scaled_h}");
+        let Curve2Kind::Line2(top_lat) = ctx.curves2[2] else { panic!() };
+        assert!(approx(top_lat.p0.v, scaled_h), "top_lat p0.v expected {scaled_h}");
+        assert!(approx(top_lat.p1.v, scaled_h), "top_lat p1.v expected {scaled_h}");
+        let Curve2Kind::Line2(seam_lft) = ctx.curves2[3] else { panic!() };
+        assert!(approx(seam_lft.p1.v, scaled_h), "seam_lft p1.v expected {scaled_h}");
+        // Plane-face pcurves: CircularArc2 radius should NOT change
+        let Curve2Kind::CircularArc2(base_cap) = ctx.curves2[4] else { panic!() };
+        assert!(approx(base_cap.radius, 1.5), "cap CircularArc2 radius should be unchanged");
+    }
+
+    // ── Rotation ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn compile_cylinder_rotation_z() {
+        // 90° rotation around Z: (1,0,0) → (0,1,0)
+        use std::f64::consts::FRAC_PI_2;
+        let (co, si) = (FRAC_PI_2.cos(), FRAC_PI_2.sin());
+        #[rustfmt::skip]
+        let t = [
+            co, -si, 0.0, 0.0,
+            si,  co, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let (ctx, _) = compile_with(CsgPrimitive::Cylinder { r: 1.0, h: 2.0 }, t);
+        let pts: Vec<Point3> = ctx.vertices.iter().map(|v| v.point).collect();
+        // (1,0,0) → (0,1,0);  (1,0,2) → (0,1,2)
+        assert!(pts.iter().any(|p| pt_approx(*p, 0.0, 1.0, 0.0)));
+        assert!(pts.iter().any(|p| pt_approx(*p, 0.0, 1.0, 2.0)));
+        let SurfaceKind::Cylinder(c) = ctx.surfaces[0] else { panic!("expected Cylinder") };
+        assert!(pt_approx(c.axis,    0.0, 0.0, 1.0), "axis should remain (0,0,1)");
+        assert!(pt_approx(c.ref_dir, 0.0, 1.0, 0.0), "ref_dir should rotate to (0,1,0)");
+        assert!(approx(c.radius, 1.0), "radius should be unchanged");
+    }
+
+    // ── Cone ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn compile_cone_uniform_scale_geometry() {
+        #[rustfmt::skip]
+        let t = [
+            3.0, 0.0, 0.0, 0.0,
+            0.0, 3.0, 0.0, 0.0,
+            0.0, 0.0, 3.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let (ctx, _) = compile_with(CsgPrimitive::Cone { r: 1.0, h: 2.0 }, t);
+        let pts: Vec<Point3> = ctx.vertices.iter().map(|v| v.point).collect();
+        // base-seam vertex (1,0,0) → (3,0,0); apex (0,0,2) → (0,0,6)
+        assert!(pts.iter().any(|p| pt_approx(*p, 3.0, 0.0, 0.0)));
+        assert!(pts.iter().any(|p| pt_approx(*p, 0.0, 0.0, 6.0)));
+        let SurfaceKind::Cone(cone) = ctx.surfaces[0] else { panic!("expected Cone") };
+        // half_angle = atan(r/h) is scale-invariant (ratio stays the same)
+        let expected_ha = (1.0_f64 / 2.0_f64).atan();
+        assert!(approx(cone.half_angle, expected_ha), "half_angle should be unchanged");
+    }
+
+    #[test]
+    fn compile_cone_uniform_scale_pcurves() {
+        // Lateral pcurves whose v-coordinate is a slant distance must scale.
+        #[rustfmt::skip]
+        let t = [
+            3.0, 0.0, 0.0, 0.0,
+            0.0, 3.0, 0.0, 0.0,
+            0.0, 0.0, 3.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let (ctx, _) = compile_with(CsgPrimitive::Cone { r: 1.0, h: 2.0 }, t);
+        // Curve2 push order in build_cone (lateral face first):
+        //   [0] pc_apex      Line2 v=0 everywhere — unchanged
+        //   [1] pc_seam_rgt  Line2(p0=(TAU,0), p1=(TAU,v_max))   → v_max * 3
+        //   [2] pc_base_lat  Line2(p0=(TAU,v_max), p1=(TAU-1,v_max)) → v_max * 3
+        //   [3] pc_seam_lft  Line2(p0=(0,0), p1=(0,v_max))       → v_max * 3
+        //   [4] pc_base_cap  CircularArc2 on Plane                — unchanged
+        let v_max_orig = (1.0_f64 * 1.0 + 2.0 * 2.0_f64).sqrt(); // sqrt(r² + h²)
+        let v_max_scaled = 3.0 * v_max_orig;
+        let Curve2Kind::Line2(seam_rgt) = ctx.curves2[1] else { panic!() };
+        assert!(approx(seam_rgt.p1.v, v_max_scaled), "seam_rgt p1.v expected {v_max_scaled}");
+        let Curve2Kind::Line2(base_lat) = ctx.curves2[2] else { panic!() };
+        assert!(approx(base_lat.p0.v, v_max_scaled), "base_lat p0.v expected {v_max_scaled}");
+        assert!(approx(base_lat.p1.v, v_max_scaled), "base_lat p1.v expected {v_max_scaled}");
+        let Curve2Kind::Line2(seam_lft) = ctx.curves2[3] else { panic!() };
+        assert!(approx(seam_lft.p1.v, v_max_scaled), "seam_lft p1.v expected {v_max_scaled}");
+        // Plane-face pcurve unchanged
+        let Curve2Kind::CircularArc2(base_cap) = ctx.curves2[4] else { panic!() };
+        assert!(approx(base_cap.radius, 1.0), "cap CircularArc2 radius should be unchanged");
     }
 }

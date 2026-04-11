@@ -320,7 +320,15 @@ Goal: “primitive -> B-rep -> mesh” pipeline working.
   - [x] `build_sphere` — 2V, 3E (2 degenerate pole edges), 4CE, 1 face; UV Mercator diagram in source
   - [x] `CircularArc2` added to `Curve2Kind` (needed for cap pcurves)
   - [x] `Point3::dot` added to `geom.rs`
-  - [x] `compile_primitive` — dispatcher matching `CsgPrimitive` → `build_*`; 265 tests
+  - [x] `compile_primitive` — dispatcher + transform absorption; 275 tests
+        - build-then-transform strategy: snapshot arena index ranges, walk freshly-added slices
+        - Vertices: apply full 4×4 as points
+        - Line3: transform p0/p1 as points; t_min/t_max unchanged
+        - CircularArc3: isotropic check; transform center, rotate ref_dir/normal, radius *= s
+        - Plane: transform p0/u_dir/v_dir; pcurves unchanged (scaling absorbed into direction vecs)
+        - Cylindrical/Conical: isotropic check; transform origin/apex/axis/ref_dir; lateral pcurve v-coords *= s via topology traversal; half_angle scale-invariant for cone
+        - SphericalSurface: isotropic check; transform center/ref_dir/axis; radius *= s; pcurves unchanged (u,v are angles)
+        - Non-isotropic on curved primitives: todo!() until NURBS fallback implemented
 - [ ] Apply `flat_transform` from the CSG node during compilation (see brep_notes.md for
       the transform-handling strategy):
   - `Cuboid`: any affine transform produces planar faces — always absorb directly into
