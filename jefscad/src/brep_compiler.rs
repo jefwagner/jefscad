@@ -676,6 +676,27 @@ pub fn build_sphere(
     solid_id
 }
 
+// ── compile_primitive ─────────────────────────────────────────────────────────
+
+/// Dispatch a [`CsgPrimitive`] to the appropriate `build_*` function.
+///
+/// `prov_id` and `geom_id` are forwarded unchanged to the builder and stored
+/// in every face's [`ProvenanceData`].
+pub fn compile_primitive(
+    ctx: &mut SolidModelingContext,
+    prim: &crate::csg_lang::CsgPrimitive,
+    prov_id: u64,
+    geom_id: u64,
+) -> SolidId {
+    use crate::csg_lang::CsgPrimitive;
+    match prim {
+        CsgPrimitive::Cuboid { dx, dy, dz } => build_cuboid(ctx, *dx, *dy, *dz, prov_id, geom_id),
+        CsgPrimitive::Cylinder { r, h }     => build_cylinder(ctx, *r, *h, prov_id, geom_id),
+        CsgPrimitive::Cone { r, h }         => build_cone(ctx, *r, *h, prov_id, geom_id),
+        CsgPrimitive::Sphere { r }          => build_sphere(ctx, *r, prov_id, geom_id),
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1367,5 +1388,60 @@ mod test {
         assert_eq!(face.prov.sources[0].prov_id, 3);
         assert_eq!(face.prov.sources[0].geom_id, 9);
         assert_eq!(face.prov.last_op, None);
+    }
+
+    // ── compile_primitive ─────────────────────────────────────────────────────
+
+    use crate::csg_lang::CsgPrimitive;
+
+    fn compile(prim: CsgPrimitive) -> (SolidModelingContext, SolidId) {
+        let mut ctx = SolidModelingContext::new();
+        let sid = compile_primitive(&mut ctx, &prim, 7, 42);
+        (ctx, sid)
+    }
+
+    #[test]
+    fn compile_cuboid_entity_counts() {
+        let (ctx, _) = compile(CsgPrimitive::Cuboid { dx: 2.0, dy: 3.0, dz: 4.0 });
+        assert_eq!(ctx.vertices.len(), 8);
+        assert_eq!(ctx.edges.len(), 12);
+        assert_eq!(ctx.coedges.len(), 24);
+        assert_eq!(ctx.faces.len(), 6);
+    }
+
+    #[test]
+    fn compile_cylinder_entity_counts() {
+        let (ctx, _) = compile(CsgPrimitive::Cylinder { r: 1.0, h: 2.0 });
+        assert_eq!(ctx.vertices.len(), 2);
+        assert_eq!(ctx.edges.len(), 3);
+        assert_eq!(ctx.coedges.len(), 6);
+        assert_eq!(ctx.faces.len(), 3);
+    }
+
+    #[test]
+    fn compile_cone_entity_counts() {
+        let (ctx, _) = compile(CsgPrimitive::Cone { r: 1.0, h: 2.0 });
+        assert_eq!(ctx.vertices.len(), 2);
+        assert_eq!(ctx.edges.len(), 3);
+        assert_eq!(ctx.coedges.len(), 5);
+        assert_eq!(ctx.faces.len(), 2);
+    }
+
+    #[test]
+    fn compile_sphere_entity_counts() {
+        let (ctx, _) = compile(CsgPrimitive::Sphere { r: 1.0 });
+        assert_eq!(ctx.vertices.len(), 2);
+        assert_eq!(ctx.edges.len(), 3);
+        assert_eq!(ctx.coedges.len(), 4);
+        assert_eq!(ctx.faces.len(), 1);
+    }
+
+    #[test]
+    fn compile_primitive_provenance_passthrough() {
+        let (ctx, _) = compile(CsgPrimitive::Cuboid { dx: 1.0, dy: 1.0, dz: 1.0 });
+        for face in &ctx.faces {
+            assert_eq!(face.prov.sources[0].prov_id, 7);
+            assert_eq!(face.prov.sources[0].geom_id, 42);
+        }
     }
 }
