@@ -886,6 +886,29 @@ fn is_identity(transform: &[f64; 16]) -> bool {
     transform.iter().zip(ID.iter()).all(|(a, b)| (a - b).abs() < 1e-12)
 }
 
+// ── compile_csg_node ──────────────────────────────────────────────────────────
+
+/// Compile a [`CsgNode`] into a B-rep solid, absorbing the node's `flat_transform`
+/// into the resulting geometry.
+///
+/// For primitive leaf nodes the call is forwarded to [`compile_primitive`] with the
+/// node's `flat_transform`, `prov_id`, and `geom_id`.  Boolean operation nodes
+/// (`Op`) are not yet supported and will panic with `todo!()`.
+pub fn compile_csg_node(
+    ctx: &mut SolidModelingContext,
+    node: &crate::csg_lang::CsgNode,
+) -> SolidId {
+    use crate::csg_lang::CsgBaseNode;
+    match &node.base {
+        CsgBaseNode::Prim(prim) => {
+            compile_primitive(ctx, prim, &node.flat_transform, node.prov_id, node.geom_id)
+        }
+        CsgBaseNode::Op(_) => {
+            todo!("boolean CSG operations not yet supported in compile_csg_node")
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1870,5 +1893,79 @@ mod test {
         // Plane-face pcurve unchanged
         let Curve2Kind::CircularArc2(base_cap) = ctx.curves2[4] else { panic!() };
         assert!(approx(base_cap.radius, 1.0), "cap CircularArc2 radius should be unchanged");
+    }
+
+    // ── compile_csg_node ──────────────────────────────────────────────────────
+
+    use crate::csg_lang::CsgNode;
+
+    fn compile_node(node: &CsgNode) -> (SolidModelingContext, SolidId) {
+        let mut ctx = SolidModelingContext::new();
+        let sid = compile_csg_node(&mut ctx, node);
+        (ctx, sid)
+    }
+
+    // ─── Dispatch: correct primitive is built ─────────────────────────────────
+
+    #[test]
+    fn csg_node_cuboid_entity_counts() {
+        let (ctx, _) = compile_node(&CsgNode::cuboid(2.0, 3.0, 4.0));
+        assert_eq!(ctx.vertices.len(), 8);
+        assert_eq!(ctx.faces.len(), 6);
+    }
+
+    #[test]
+    fn csg_node_cylinder_entity_counts() {
+        let (ctx, _) = compile_node(&CsgNode::cylinder(1.0, 2.0));
+        assert_eq!(ctx.vertices.len(), 2);
+        assert_eq!(ctx.faces.len(), 3);
+    }
+
+    #[test]
+    fn csg_node_cone_entity_counts() {
+        let (ctx, _) = compile_node(&CsgNode::cone(1.0, 2.0));
+        assert_eq!(ctx.vertices.len(), 2);
+        assert_eq!(ctx.faces.len(), 2);
+    }
+
+    #[test]
+    fn csg_node_sphere_entity_counts() {
+        let (ctx, _) = compile_node(&CsgNode::sphere(1.0));
+        assert_eq!(ctx.vertices.len(), 2);
+        assert_eq!(ctx.faces.len(), 1);
+    }
+
+    // ─── flat_transform is forwarded ──────────────────────────────────────────
+
+    #[test]
+    fn csg_node_translation_reaches_geometry() {
+        let node = CsgNode::cuboid(1.0, 1.0, 1.0).translate(3.0, 0.0, 0.0);
+        let (ctx, _) = compile_node(&node);
+        let pts: Vec<Point3> = ctx.vertices.iter().map(|v| v.point).collect();
+        // Corner (0,0,0) shifted to (3,0,0); opposite (1,1,1) shifted to (4,1,1)
+        assert!(pts.iter().any(|p| pt_approx(*p, 3.0, 0.0, 0.0)));
+        assert!(pts.iter().any(|p| pt_approx(*p, 4.0, 1.0, 1.0)));
+    }
+
+    #[test]
+    fn csg_node_scale_reaches_sphere_radius() {
+        let node = CsgNode::sphere(1.0).scale(2.0, 2.0, 2.0);
+        let (ctx, _) = compile_node(&node);
+        let SurfaceKind::Sphere(s) = ctx.surfaces[0] else { panic!("expected Sphere") };
+        assert!(approx(s.radius, 2.0), "radius should be scaled to 2.0");
+    }
+
+    // ─── prov_id and geom_id are forwarded ────────────────────────────────────
+
+    #[test]
+    fn csg_node_provenance_forwarded() {
+        let node = CsgNode::sphere(1.0);
+        let expected_prov = node.prov_id;
+        let expected_geom = node.geom_id;
+        let (ctx, _) = compile_node(&node);
+        for face in &ctx.faces {
+            assert_eq!(face.prov.sources[0].prov_id, expected_prov);
+            assert_eq!(face.prov.sources[0].geom_id, expected_geom);
+        }
     }
 }

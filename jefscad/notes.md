@@ -330,10 +330,10 @@ Goal: “primitive -> B-rep -> mesh” pipeline working.
         - SphericalSurface: isotropic check; transform center/ref_dir/axis; radius *= s; pcurves unchanged (u,v are angles)
         - Non-isotropic on curved primitives: todo!() until NURBS fallback implemented
 - [x] `compile_primitive` absorbs `flat_transform` (isotropic check; todo!() for NURBS fallback)
-- [_] `compile_csg_node(ctx, node) -> SolidId`
+- [x] `compile_csg_node(ctx, node) -> SolidId`
   - Match on `CsgBaseNode::Prim` → call `compile_primitive` with node's `flat_transform`,
     `prov_id`, `geom_id`
-  - Boolean ops (`Op`) → `todo!()` for now
+  - Boolean ops (`Op`) → `todo!()` for now; 282 tests
 
 Deliverable for Phase 3:
 - `compile_csg_node` works for all four primitives with arbitrary isotropic transforms.
