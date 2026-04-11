@@ -378,7 +378,17 @@ UV domains for our four surface types — all simple, no general polygon trimmin
       radial analytic normals; seam at u=0/2π has duplicate positions, separate UVs; 296 tests
 - [x] `ConicalSurface`: apex-fan: 1 apex + resolution base vertices; cross-product flat normals
       (avoids apex singularity); winding (apex, base_next, base_curr) for outward normal; 300 tests
-- [_] `SphericalSurface`: uniform UV grid `[0,2π] × [−π/2,π/2]`; poles collapse to points
+  - [REVISIT] Flat normals make the cone look faceted.  The lateral surface is smooth
+    everywhere except the apex (eval_n returns None at v=0).  Base-circle vertices can
+    use analytic normals from eval_n(u, v_max).  The apex is the hard case: no single
+    well-defined normal exists there — one option is to omit the apex vertex from the
+    normal buffer (use the triangle face normal for apex corners only) while using
+    smooth analytic normals at base corners; another is to duplicate the apex vertex
+    once per triangle so each copy can carry the face normal for its triangle.
+    Worth revisiting before export/rendering work begins.
+- [x] `SphericalSurface`: (n_lon+1)×(n_lat-1) grid + 2 pole vertices; n_lon=resolution,
+      n_lat=max(2, resolution/2); south/north fans + middle strips; analytic eval_n smooth
+      everywhere including poles (no special-casing); 304 tests
 - [_] Watertightness: post-merge coincident vertices by position after per-face meshing
 
 #### Step 3 — File export

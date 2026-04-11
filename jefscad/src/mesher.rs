@@ -1,7 +1,7 @@
 //! Tessellation: converts B-rep solids into triangle meshes.
 
 use crate::brep_kernel::{FaceId, FaceSense, LoopId, Orientation, SolidId, SolidModelingContext};
-use crate::geom::{ConicalSurface, Curve2, Curve2Kind, CylindricalSurface, Plane, Point3, Surface, SurfaceKind};
+use crate::geom::{ConicalSurface, Curve2, Curve2Kind, CylindricalSurface, Plane, Point3, SphericalSurface, Surface, SurfaceKind};
 
 // ── TriMesh ───────────────────────────────────────────────────────────────────
 
@@ -94,6 +94,7 @@ fn mesh_face(ctx: &SolidModelingContext, face_id: FaceId, opts: &MeshOptions) ->
         SurfaceKind::Plane(plane)    => mesh_plane_face(ctx, face_id, *plane, opts),
         SurfaceKind::Cylinder(cyl)   => mesh_cylindrical_face(ctx, face_id, *cyl, opts),
         SurfaceKind::Cone(cone)      => mesh_conical_face(ctx, face_id, *cone, opts),
+        SurfaceKind::Sphere(sph)     => mesh_spherical_face(ctx, face_id, *sph, opts),
         _ => TriMesh::default(), // other surface types: stub until Step 2 continues
     }
 }
@@ -329,6 +330,122 @@ fn mesh_conical_face(
     TriMesh { vertices, triangles, tri_normals, tri_uvs }
 }
 
+// ── SphericalSurface tessellation ────────────────────────────────────────────
+
+/// Tessellate a [`SphericalSurface`] face.
+///
+/// Builds a `(n_lon+1) × (n_lat+1)` latitude/longitude UV grid where
+/// `n_lon = resolution` and `n_lat = max(2, resolution/2)`.  The two pole rows
+/// collapse to single vertices; all interior rings have `n_lon+1` vertices
+/// (including a seam-duplicate at `u = 2π`).
+///
+/// Triangulation:
+/// - **South fan**: `n_lon` triangles connecting the south pole to the first ring.
+/// - **Middle bands**: `n_lat-2` bands of `2·n_lon` triangles each (same strip
+///   winding as [`mesh_cylindrical_face`]).
+/// - **North fan**: `n_lon` triangles connecting the last ring to the north pole.
+///
+/// Normals are analytic via [`SphericalSurface::eval_n`], which is defined everywhere
+/// including the poles — smooth shading with no special-casing required.
+fn mesh_spherical_face(
+    ctx: &SolidModelingContext,
+    face_id: FaceId,
+    sph: SphericalSurface,
+    opts: &MeshOptions,
+) -> TriMesh {
+    use std::f64::consts::{FRAC_PI_2, TAU};
+
+    let sense = ctx.get_face(face_id).sense;
+
+    let n_lon = opts.resolution as usize;
+    let n_lat = (opts.resolution as usize / 2).max(2);
+
+    let v_step = std::f64::consts::PI / n_lat as f64;
+    let u_step = TAU / n_lon as f64;
+
+    // ── Vertices ──────────────────────────────────────────────────────────────
+    // Index 0         : south pole
+    // Index 1 + (i-1)*(n_lon+1) + j : ring i (1 ≤ i ≤ n_lat-1), column j (0 ≤ j ≤ n_lon)
+    // Index 1 + (n_lat-1)*(n_lon+1) : north pole
+    let n_verts = 2 + (n_lat - 1) * (n_lon + 1);
+    let mut vertices    = Vec::with_capacity(n_verts);
+    let mut vert_norms  = Vec::with_capacity(n_verts);
+    let mut vert_uvs    = Vec::with_capacity(n_verts);
+
+    let push_vert = |verts: &mut Vec<[f32; 3]>,
+                     norms: &mut Vec<[f32; 3]>,
+                     uvs:   &mut Vec<[f32; 2]>,
+                     u: f64, v: f64| {
+        let p = sph.eval(u, v);
+        verts.push([p.x as f32, p.y as f32, p.z as f32]);
+        let n = sph.eval_n(u, v).expect("SphericalSurface::eval_n is always Some");
+        let out_n = if sense == FaceSense::AntiAligned { [-n.x, -n.y, -n.z] } else { [n.x, n.y, n.z] };
+        norms.push([out_n[0] as f32, out_n[1] as f32, out_n[2] as f32]);
+        uvs.push([u as f32, v as f32]);
+    };
+
+    // South pole (u=0 is arbitrary; position and normal are u-independent)
+    push_vert(&mut vertices, &mut vert_norms, &mut vert_uvs, 0.0, -FRAC_PI_2);
+
+    // Interior rings
+    for i in 1..n_lat {
+        let v = -FRAC_PI_2 + i as f64 * v_step;
+        for j in 0..=n_lon {
+            let u = j as f64 * u_step;
+            push_vert(&mut vertices, &mut vert_norms, &mut vert_uvs, u, v);
+        }
+    }
+
+    // North pole
+    push_vert(&mut vertices, &mut vert_norms, &mut vert_uvs, 0.0, FRAC_PI_2);
+
+    // ── Index helpers ─────────────────────────────────────────────────────────
+    let south_pole = 0u32;
+    let north_pole = (1 + (n_lat - 1) * (n_lon + 1)) as u32;
+    // ring i (1-indexed), column j
+    let ring = |i: usize, j: usize| (1 + (i - 1) * (n_lon + 1) + j) as u32;
+
+    let n_tris = 2 * n_lon * (n_lat - 1);
+    let mut triangles   = Vec::with_capacity(n_tris);
+    let mut tri_normals = Vec::with_capacity(n_tris * 3);
+    let mut tri_uvs     = Vec::with_capacity(n_tris * 3);
+
+    let mut push_tri = |tri: [u32; 3]| {
+        triangles.push(tri);
+        for &c in &tri {
+            tri_normals.push(vert_norms[c as usize]);
+            tri_uvs.push(vert_uvs[c as usize]);
+        }
+    };
+
+    // ── South fan ─────────────────────────────────────────────────────────────
+    // Winding: (south_pole, ring1[j+1], ring1[j]) — CCW in UV ✓
+    for j in 0..n_lon {
+        push_tri([south_pole, ring(1, j + 1), ring(1, j)]);
+    }
+
+    // ── Middle bands ──────────────────────────────────────────────────────────
+    // Band between ring i and ring i+1 (for i in 1..n_lat-1)
+    for i in 1..n_lat - 1 {
+        for j in 0..n_lon {
+            let bl = ring(i,     j);
+            let br = ring(i,     j + 1);
+            let tl = ring(i + 1, j);
+            let tr = ring(i + 1, j + 1);
+            push_tri([bl, br, tr]);
+            push_tri([bl, tr, tl]);
+        }
+    }
+
+    // ── North fan ─────────────────────────────────────────────────────────────
+    // Winding: (north_pole, ring_last[j], ring_last[j+1]) — CCW in UV ✓
+    for j in 0..n_lon {
+        push_tri([north_pole, ring(n_lat - 1, j), ring(n_lat - 1, j + 1)]);
+    }
+
+    TriMesh { vertices, triangles, tri_normals, tri_uvs }
+}
+
 // ── sample_loop_uvs ───────────────────────────────────────────────────────────
 
 /// Walk the coedges of `loop_id` and return UV boundary sample points.
@@ -551,6 +668,43 @@ mod test {
             .count();
         assert!(not_axial >= 32 * 3,
             "expected at least {} non-axial normals, got {}", 32 * 3, not_axial);
+    }
+
+    // ── SphericalSurface tessellation ─────────────────────────────────────────
+
+    #[test]
+    fn mesh_solid_sphere_triangle_count() {
+        // n_lon=32, n_lat=16: 2 × 32 × 15 = 960
+        let mesh = mesh_prim_res(&CsgNode::sphere(1.0), 32);
+        assert_eq!(mesh.triangles.len(), 2 * 32 * 15);
+    }
+
+    #[test]
+    fn mesh_solid_sphere_vertex_count() {
+        // 2 poles + 15 rings × 33 columns = 2 + 495 = 497
+        let mesh = mesh_prim_res(&CsgNode::sphere(1.0), 32);
+        assert_eq!(mesh.vertices.len(), 2 + 15 * 33);
+    }
+
+    #[test]
+    fn mesh_solid_sphere_normals_are_unit() {
+        let mesh = mesh_prim(&CsgNode::sphere(1.0));
+        for n in &mesh.tri_normals {
+            let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-5, "normal {n:?} has length {len}");
+        }
+    }
+
+    #[test]
+    fn mesh_solid_sphere_normals_cover_sphere() {
+        // Analytic normals span all directions: verify near-pole and equatorial normals exist.
+        let mesh = mesh_prim(&CsgNode::sphere(1.0));
+        let near_north  = mesh.tri_normals.iter().filter(|n| n[2] >  0.9).count();
+        let near_south  = mesh.tri_normals.iter().filter(|n| n[2] < -0.9).count();
+        let near_equator = mesh.tri_normals.iter().filter(|n| n[2].abs() < 0.1).count();
+        assert!(near_north  > 0, "expected normals near north pole");
+        assert!(near_south  > 0, "expected normals near south pole");
+        assert!(near_equator > 0, "expected normals near equator");
     }
 
     #[test]
