@@ -365,8 +365,9 @@ pub struct TriMesh {
 pub struct MeshOptions { pub resolution: u32 }   // segments per full circle; default 32
 ```
 
-- [_] Implement `TriMesh`, `MeshOptions` (with `Default`), `mesh_solid(ctx, sid, opts) -> TriMesh`
+- [x] Implement `TriMesh`, `MeshOptions` (with `Default`), `mesh_solid(ctx, sid, opts) -> TriMesh`
       — `mesh_solid` walks shell faces, calls internal `mesh_face` per face, concatenates
+      — `mesh_face` stub returns empty `TriMesh`; 287 tests
 
 #### Step 2 — Per-surface tessellation (one surface type at a time)
 UV domains for our four surface types — all simple, no general polygon trimming needed yet:
