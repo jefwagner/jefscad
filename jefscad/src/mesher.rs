@@ -1,7 +1,7 @@
 //! Tessellation: converts B-rep solids into triangle meshes.
 
 use crate::brep_kernel::{FaceId, FaceSense, LoopId, Orientation, SolidId, SolidModelingContext};
-use crate::geom::{Curve2, Curve2Kind, CylindricalSurface, Plane, Point3, Surface, SurfaceKind};
+use crate::geom::{ConicalSurface, Curve2, Curve2Kind, CylindricalSurface, Plane, Point3, Surface, SurfaceKind};
 
 // ── TriMesh ───────────────────────────────────────────────────────────────────
 
@@ -93,6 +93,7 @@ fn mesh_face(ctx: &SolidModelingContext, face_id: FaceId, opts: &MeshOptions) ->
     match ctx.get_surface(surf_id) {
         SurfaceKind::Plane(plane)    => mesh_plane_face(ctx, face_id, *plane, opts),
         SurfaceKind::Cylinder(cyl)   => mesh_cylindrical_face(ctx, face_id, *cyl, opts),
+        SurfaceKind::Cone(cone)      => mesh_conical_face(ctx, face_id, *cone, opts),
         _ => TriMesh::default(), // other surface types: stub until Step 2 continues
     }
 }
@@ -225,6 +226,104 @@ fn mesh_cylindrical_face(
                 tri_uvs.push(vert_uvs[c as usize]);
             }
         }
+    }
+
+    TriMesh { vertices, triangles, tri_normals, tri_uvs }
+}
+
+// ── ConicalSurface tessellation ───────────────────────────────────────────────
+
+/// Tessellate the lateral face of a [`ConicalSurface`].
+///
+/// Uses an apex-fan: 1 apex vertex + `resolution` base-circle vertices forming
+/// `resolution` triangles.  Normals are computed via cross product (flat shading)
+/// to avoid the singularity where [`ConicalSurface::eval_n`] returns `None` at v=0.
+///
+/// Triangle winding: `(apex, base_next, base_curr)` produces an outward-facing
+/// cross product for [`FaceSense::Aligned`] faces.  The face sense is respected by
+/// negating normals for [`FaceSense::AntiAligned`].
+///
+/// UV at each corner: apex → `(u_j, 0)`, base_next → `(u_{j+1}, v_max)`,
+/// base_curr → `(u_j, v_max)`.  The last triangle uses `u = TAU` for base_next
+/// instead of `0` to avoid a UV discontinuity at the seam.
+fn mesh_conical_face(
+    ctx: &SolidModelingContext,
+    face_id: FaceId,
+    cone: ConicalSurface,
+    opts: &MeshOptions,
+) -> TriMesh {
+    use std::f64::consts::TAU;
+
+    let face = ctx.get_face(face_id);
+    let sense = face.sense;
+    let loop_id = face.outer;
+
+    // v_max = slant distance from apex to base circle
+    let boundary = sample_loop_uvs(ctx, loop_id, opts);
+    let v_max = boundary.iter().map(|uv| uv[1]).fold(f64::NEG_INFINITY, f64::max);
+
+    let res = opts.resolution as usize;
+
+    // Vertices: index 0 = apex, indices 1..=res = base circle
+    let apex_pos = cone.eval(0.0, 0.0);
+    let mut vertices = Vec::with_capacity(res + 1);
+    vertices.push([apex_pos.x as f32, apex_pos.y as f32, apex_pos.z as f32]);
+
+    let mut base_u = Vec::with_capacity(res);
+    for j in 0..res {
+        let u = j as f64 * TAU / res as f64;
+        let p = cone.eval(u, v_max);
+        vertices.push([p.x as f32, p.y as f32, p.z as f32]);
+        base_u.push(u);
+    }
+
+    // Fan triangulation from apex
+    let mut triangles   = Vec::with_capacity(res);
+    let mut tri_normals = Vec::with_capacity(res * 3);
+    let mut tri_uvs     = Vec::with_capacity(res * 3);
+
+    for j in 0..res {
+        let curr_idx = (j + 1) as u32;
+        let next_idx = ((j + 1) % res + 1) as u32;
+
+        let u_curr = base_u[j];
+        let u_next = if j + 1 < res { base_u[j + 1] } else { TAU };
+
+        // Outward normal via cross product: (base_next - apex) × (base_curr - apex)
+        let bv_next = vertices[next_idx as usize];
+        let bv_curr = vertices[curr_idx as usize];
+        let v1 = Point3::new(
+            bv_next[0] as f64 - apex_pos.x,
+            bv_next[1] as f64 - apex_pos.y,
+            bv_next[2] as f64 - apex_pos.z,
+        );
+        let v2 = Point3::new(
+            bv_curr[0] as f64 - apex_pos.x,
+            bv_curr[1] as f64 - apex_pos.y,
+            bv_curr[2] as f64 - apex_pos.z,
+        );
+        let raw_n = v1.cross(v2);
+        let len = (raw_n.x*raw_n.x + raw_n.y*raw_n.y + raw_n.z*raw_n.z).sqrt();
+        let n = if len > 1e-15 {
+            [raw_n.x/len, raw_n.y/len, raw_n.z/len]
+        } else {
+            [0.0, 0.0, 1.0] // degenerate fallback
+        };
+        let out_n: [f32; 3] = if sense == FaceSense::AntiAligned {
+            [-n[0] as f32, -n[1] as f32, -n[2] as f32]
+        } else {
+            [n[0] as f32, n[1] as f32, n[2] as f32]
+        };
+
+        // Triangle: (apex, base_next, base_curr)
+        triangles.push([0u32, next_idx, curr_idx]);
+        // apex corner UV (use u_curr so UV matches the adjacent base edge)
+        tri_uvs.push([u_curr as f32, 0.0f32]);
+        tri_uvs.push([u_next as f32, v_max as f32]);
+        tri_uvs.push([u_curr as f32, v_max as f32]);
+        tri_normals.push(out_n);
+        tri_normals.push(out_n);
+        tri_normals.push(out_n);
     }
 
     TriMesh { vertices, triangles, tri_normals, tri_uvs }
@@ -410,6 +509,48 @@ mod test {
             let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
             assert!((len - 1.0).abs() < 1e-5, "normal {n:?} has length {len}");
         }
+    }
+
+    // ── ConicalSurface tessellation ───────────────────────────────────────────
+
+    #[test]
+    fn mesh_solid_cone_triangle_count() {
+        // lateral:  resolution = 32 triangles
+        // base cap: resolution − 2 = 30 triangles (fan)
+        // total: 62
+        let mesh = mesh_prim_res(&CsgNode::cone(1.0, 2.0), 32);
+        assert_eq!(mesh.triangles.len(), 32 + (32 - 2));
+    }
+
+    #[test]
+    fn mesh_solid_cone_vertex_count() {
+        // lateral:  1 apex + resolution base = 33
+        // base cap: resolution = 32
+        // total: 65
+        let mesh = mesh_prim_res(&CsgNode::cone(1.0, 2.0), 32);
+        assert_eq!(mesh.vertices.len(), (32 + 1) + 32);
+    }
+
+    #[test]
+    fn mesh_solid_cone_normals_are_unit() {
+        let mesh = mesh_prim(&CsgNode::cone(1.0, 2.0));
+        for n in &mesh.tri_normals {
+            let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
+            assert!((len - 1.0).abs() < 1e-5, "normal {n:?} has length {len}");
+        }
+    }
+
+    #[test]
+    fn mesh_solid_cone_lateral_normals_not_axial() {
+        // Lateral normals should have a radial component; |z| should be well below 1.
+        // For cone(r=1, h=2): ha = atan(0.5) ≈ 26.6°; face normal z-component ≈ sin(ha) ≈ 0.45.
+        let mesh = mesh_prim(&CsgNode::cone(1.0, 2.0));
+        // lateral face has `resolution` triangles × 3 corners = 96 normal entries
+        let not_axial = mesh.tri_normals.iter()
+            .filter(|n| n[2].abs() < 0.99)
+            .count();
+        assert!(not_axial >= 32 * 3,
+            "expected at least {} non-axial normals, got {}", 32 * 3, not_axial);
     }
 
     #[test]

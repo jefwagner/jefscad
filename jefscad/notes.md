@@ -376,7 +376,8 @@ UV domains for our four surface types — all simple, no general polygon trimmin
       (resolution samples); 293 tests
 - [x] `CylindricalSurface`: (resolution+1)×2 UV grid; v range from loop boundary samples;
       radial analytic normals; seam at u=0/2π has duplicate positions, separate UVs; 296 tests
-- [_] `ConicalSurface`: uniform UV grid `[0,2π] × [0,v_max]`; apex at v=0 collapses to point
+- [x] `ConicalSurface`: apex-fan: 1 apex + resolution base vertices; cross-product flat normals
+      (avoids apex singularity); winding (apex, base_next, base_curr) for outward normal; 300 tests
 - [_] `SphericalSurface`: uniform UV grid `[0,2π] × [−π/2,π/2]`; poles collapse to points
 - [_] Watertightness: post-merge coincident vertices by position after per-face meshing
 
