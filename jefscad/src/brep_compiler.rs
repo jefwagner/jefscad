@@ -1196,6 +1196,12 @@ pub fn compile_primitive(
         CsgPrimitive::Cylinder { r, h }     => build_cylinder(ctx, *r, *h, prov_id, geom_id),
         CsgPrimitive::Cone { r, h }         => build_cone(ctx, *r, *h, prov_id, geom_id),
         CsgPrimitive::Sphere { r }          => build_sphere(ctx, *r, prov_id, geom_id),
+        CsgPrimitive::Extrude { path, height } =>
+            build_extrusion(ctx, path, *height, prov_id, geom_id)
+                .expect("CsgNode::extrude path failed build_extrusion validation"),
+        CsgPrimitive::Revolve { path } =>
+            build_revolution(ctx, path, prov_id, geom_id)
+                .expect("CsgNode::revolve path failed build_revolution validation"),
     };
 
     // Skip the walk when the transform is the identity.

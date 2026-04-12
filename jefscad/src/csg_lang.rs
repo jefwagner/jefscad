@@ -5,6 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use crate::geom::{Curve2Kind, Path2D};
 
 // ---------------------------------------------------------------------------
 // Float formatting helper
@@ -76,7 +77,10 @@ pub(crate) enum CsgPrimitive {
     Cylinder { r: Num, h: Num },
     Sphere { r: Num },
     Cone { r: Num, h: Num },
-    // Much later: Extrusion, SolidOfRot
+    /// Linear extrusion of a closed `Path2D` profile along +Z by `height`.
+    Extrude { path: Path2D, height: Num },
+    /// 360° revolution of a `Path2D` profile around the Z-axis.
+    Revolve { path: Path2D },
 }
 
 /// Operations to combine or select CsgNodes
@@ -147,6 +151,10 @@ fn prim_header(p: &CsgPrimitive) -> String {
             format!("cylinder(r={}, h={})", fmt_f64(*r), fmt_f64(*h)),
         CsgPrimitive::Cone { r, h } =>
             format!("cone(r={}, h={})", fmt_f64(*r), fmt_f64(*h)),
+        CsgPrimitive::Extrude { path, height } =>
+            format!("extrude(segs={}, h={})", path.segments.len(), fmt_f64(*height)),
+        CsgPrimitive::Revolve { path } =>
+            format!("revolve(segs={})", path.segments.len()),
     }
 }
 
@@ -565,6 +573,48 @@ fn hash_primitive(h: &mut impl std::hash::Hasher, prim: &CsgPrimitive) {
             h.write_u64(r.to_bits());
             h.write_u64(height.to_bits());
         }
+        CsgPrimitive::Extrude { path, height } => {
+            h.write_u8(4);
+            hash_path2d(h, path);
+            h.write_u64(height.to_bits());
+        }
+        CsgPrimitive::Revolve { path } => {
+            h.write_u8(5);
+            hash_path2d(h, path);
+        }
+    }
+}
+
+fn hash_path2d(h: &mut impl std::hash::Hasher, path: &Path2D) {
+    use std::hash::Hasher;
+    h.write_u64(path.start.u.to_bits());
+    h.write_u64(path.start.v.to_bits());
+    h.write_u8(path.closed as u8);
+    h.write_usize(path.segments.len());
+    for seg in &path.segments {
+        match seg {
+            Curve2Kind::Line2(l) => {
+                h.write_u8(0);
+                h.write_u64(l.p0.u.to_bits()); h.write_u64(l.p0.v.to_bits());
+                h.write_u64(l.p1.u.to_bits()); h.write_u64(l.p1.v.to_bits());
+            }
+            Curve2Kind::CircularArc2(a) => {
+                h.write_u8(1);
+                h.write_u64(a.center.u.to_bits()); h.write_u64(a.center.v.to_bits());
+                h.write_u64(a.radius.to_bits());
+                h.write_u64(a.t0.to_bits());      h.write_u64(a.t1.to_bits());
+            }
+            Curve2Kind::Polyline2(pl) => {
+                h.write_u8(2);
+                h.write_usize(pl.points.len());
+                for pt in &pl.points {
+                    h.write_u64(pt.u.to_bits()); h.write_u64(pt.v.to_bits());
+                }
+            }
+            Curve2Kind::Nurbs(_) => {
+                h.write_u8(3); // discriminant only; NURBS hashing deferred
+            }
+        }
     }
 }
 
@@ -663,6 +713,22 @@ impl CsgNode {
     /// The base circle lies in the z = 0 plane centered at the origin; the apex is at z = h.
     pub fn cone(r: f64, h: f64) -> NodeRef {
         Self::new_primitive(CsgPrimitive::Cone { r, h })
+    }
+
+    /// Linear extrusion of a closed [`Path2D`] profile by `height` along +Z.
+    ///
+    /// The profile is assumed to lie in the X-Y plane (z = 0).
+    /// Panics at compile time if `path` fails [`build_extrusion`] validation.
+    pub fn extrude(path: Path2D, height: f64) -> NodeRef {
+        Self::new_primitive(CsgPrimitive::Extrude { path, height })
+    }
+
+    /// 360° revolution of a [`Path2D`] profile around the Z-axis.
+    ///
+    /// The profile is in the X-Z half-plane (u = radial distance, v = height).
+    /// Panics at compile time if `path` fails [`build_revolution`] validation.
+    pub fn revolve(path: Path2D) -> NodeRef {
+        Self::new_primitive(CsgPrimitive::Revolve { path })
     }
 
     // --- operator constructors ----------------------------------------------
