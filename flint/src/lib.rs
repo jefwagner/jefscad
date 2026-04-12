@@ -17,6 +17,7 @@ mod cmp;
 mod arith;
 // Module for linear algebra on FlintArray<T,4> and FlintArray<T,16>
 mod linalg;
+pub use linalg::IDENTITY_4X4;
 // Module for standard math functions on all flint types
 mod math;
 
@@ -59,11 +60,16 @@ pub struct FlintMut<'a, T> {
 }
 
 /// An owned array of rounded floating point intervals
+///
+/// # Invariant
+/// Callers constructing `FlintArray` directly via struct literal are responsible
+/// for maintaining `lb[i] <= ub[i]` for all `i`.  Methods on this type always
+/// produce well-formed intervals.
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct FlintArray<T, const N: usize> {
-    lb: [T; N],
-    ub: [T; N],
+    pub lb: [T; N],
+    pub ub: [T; N],
 }
 
 /// An owned dynamically sized vector of floating point intervals

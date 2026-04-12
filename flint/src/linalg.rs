@@ -4,6 +4,33 @@ use crate::next_up_down::NextUpDown;
 use crate::{Flint, FlintArray, FlintSoA, FlintVec};
 
 // -----------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------
+
+/// The 4×4 identity matrix as a degenerate `FlintArray<f64, 16>` (lb == ub).
+///
+/// Row-major, column-vector convention.
+pub const IDENTITY_4X4: FlintArray<f64, 16> = FlintArray {
+    lb: [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.],
+    ub: [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.],
+};
+
+// -----------------------------------------------------------------------
+// FlintArray<T, N> — general methods
+// -----------------------------------------------------------------------
+
+impl<T: Float + Copy, const N: usize> FlintArray<T, N> {
+    /// Returns the elementwise midpoint `(lb[i] + ub[i]) / 2` as a plain array.
+    ///
+    /// Division by 2 is exact in IEEE 754 (exponent decrement only), so the
+    /// result is the closest representable float to the true midpoint.
+    pub fn midpoint(&self) -> [T; N] {
+        let two = T::one() + T::one();
+        std::array::from_fn(|i| (self.lb[i] + self.ub[i]) / two)
+    }
+}
+
+// -----------------------------------------------------------------------
 // Internal helper: 3×3 determinant from nine interval values (row-major).
 // -----------------------------------------------------------------------
 
@@ -117,6 +144,17 @@ where
             m(1, 0), m(1, 1), m(1, 2),
             m(2, 0), m(2, 1), m(2, 2),
         ])
+    }
+
+    /// Compute the determinant of the upper-left 2×2 submatrix.
+    ///
+    /// For an affine transform whose x-y block is an isotropic scaling (uniform
+    /// scale `s` times a rotation), `det2` equals `s²`.  Used to extract the
+    /// x-y scale factor for revolution surfaces, where the z-axis may scale
+    /// independently.
+    pub fn det2(&self) -> Flint<T> {
+        let m = |r: usize, c: usize| Flint { lb: self.lb[r * 4 + c], ub: self.ub[r * 4 + c] };
+        m(0, 0) * m(1, 1) - m(0, 1) * m(1, 0)
     }
 
     /// Compute the 4×4 determinant via cofactor expansion along the first row.
@@ -499,6 +537,81 @@ mod test {
         let a: FlintArray<f64, 4> = flint64_arr!(1, 0, 0, 0);
         let cols = flint64_vec!(1, 2, 3, 4, 5); // 5 elements — not divisible by 4
         let _ = a.dot_batch(&cols);
+    }
+
+    // --- det2 ---
+
+    #[test]
+    fn det2_identity() {
+        let id = super::IDENTITY_4X4;
+        scalar_contains(id.det2(), 1.0);
+    }
+
+    #[test]
+    fn det2_scale() {
+        // diag(2, 3, 5, 1) → upper-left 2×2 det = 2*3 = 6
+        let m: FlintArray<f64, 16> =
+            flint64_arr!(2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 5, 0, 0, 0, 0, 1);
+        scalar_contains(m.det2(), 6.0);
+    }
+
+    #[test]
+    fn det2_singular() {
+        // zero first row in upper 2×2 → det2 = 0
+        let m: FlintArray<f64, 16> =
+            flint64_arr!(0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
+        scalar_contains(m.det2(), 0.0);
+    }
+
+    #[test]
+    fn det2_rotation_90() {
+        // 90° CCW in x-y: [[0,-1,..],[1,0,..],..] → det2 = 0*0 - (-1)*1 = 1
+        let m: FlintArray<f64, 16> =
+            flint64_arr!(0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
+        scalar_contains(m.det2(), 1.0);
+    }
+
+    #[test]
+    fn det2_isotropic_xy_scale() {
+        // uniform scale s=4 in x-y, independent z scale: det2 = s² = 16
+        let m: FlintArray<f64, 16> =
+            flint64_arr!(4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 7, 0, 0, 0, 0, 1);
+        scalar_contains(m.det2(), 16.0);
+    }
+
+    // --- midpoint ---
+
+    #[test]
+    fn midpoint_degenerate() {
+        // lb == ub (point interval) → midpoint is the exact value
+        let a: FlintArray<f64, 4> = flint64_arr!(1, 2, 3, 4);
+        let mid = a.midpoint();
+        for i in 0..4 {
+            assert!(
+                a.lb[i] <= mid[i] && mid[i] <= a.ub[i],
+                "midpoint[{i}] = {} not in [{}, {}]",
+                mid[i], a.lb[i], a.ub[i]
+            );
+        }
+        assert_eq!(mid, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn midpoint_wide_interval() {
+        // lb=0, ub=2 → midpoint=1; lb=-1, ub=1 → midpoint=0
+        let a = FlintArray::<f64, 2> { lb: [0.0, -1.0], ub: [2.0, 1.0] };
+        let mid = a.midpoint();
+        assert_eq!(mid[0], 1.0);
+        assert_eq!(mid[1], 0.0);
+    }
+
+    #[test]
+    fn midpoint_identity_matrix() {
+        let mid = super::IDENTITY_4X4.midpoint();
+        assert_eq!(
+            mid,
+            [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.]
+        );
     }
 
     // --- interval containment ---
