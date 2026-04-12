@@ -394,7 +394,8 @@ UV domains for our four surface types — all simple, no general polygon trimmin
 #### Step 3 — File export
 - [x] Binary STL: `write_stl<W: Write>(mesh, writer)` + `write_stl_file(mesh, path)`;
       per-triangle normal = averaged+renormalised corner normals; 308 tests
-- [_] OBJ (`write_obj(mesh, path)`) — shared vertices + normals; Blender-friendly
+- [x] OBJ: `write_obj<W: Write>(mesh, writer)` + `write_obj_file(mesh, path)`;
+      shared vertex positions, NT×3 per-corner vn/vt entries, f v/vt/vn syntax; 312 tests
 - [_] glTF — deferred until STL/OBJ are working
 
 #### Step 4 — Python binding

@@ -129,6 +129,63 @@ pub fn write_stl_file(mesh: &TriMesh, path: &std::path::Path) -> std::io::Result
     write_stl(mesh, &mut f)
 }
 
+// ── OBJ export ───────────────────────────────────────────────────────────────
+
+/// Write `mesh` as a Wavefront OBJ to `writer`.
+///
+/// # OBJ layout
+/// ```text
+/// # jefscad OBJ
+/// v  x y z          — one per vertex in mesh.vertices
+/// vn x y z          — one per triangle corner (NT×3 total)
+/// vt u v            — one per triangle corner (NT×3 total)
+/// f  v/vt/vn ...    — one per triangle; all indices 1-based
+/// ```
+///
+/// Because [`TriMesh`] stores normals and UVs per-triangle-corner rather than
+/// per-vertex, each corner gets its own `vn`/`vt` entry.  For triangle `t`,
+/// corner `k`: vertex index = `triangles[t][k] + 1`, normal/UV index = `t*3 + k + 1`.
+pub fn write_obj<W: std::io::Write>(mesh: &TriMesh, writer: &mut W) -> std::io::Result<()> {
+    use std::io::Write;
+
+    writeln!(writer, "# jefscad OBJ")?;
+
+    // Vertex positions
+    for v in &mesh.vertices {
+        writeln!(writer, "v  {} {} {}", v[0], v[1], v[2])?;
+    }
+
+    // Per-corner normals
+    for n in &mesh.tri_normals {
+        writeln!(writer, "vn {} {} {}", n[0], n[1], n[2])?;
+    }
+
+    // Per-corner UVs
+    for uv in &mesh.tri_uvs {
+        writeln!(writer, "vt {} {}", uv[0], uv[1])?;
+    }
+
+    // Faces: f v/vt/vn v/vt/vn v/vt/vn  (all 1-indexed)
+    for (t, tri) in mesh.triangles.iter().enumerate() {
+        let base = t * 3 + 1; // 1-indexed corner offset for this triangle
+        writeln!(
+            writer,
+            "f {}/{}/{} {}/{}/{} {}/{}/{}",
+            tri[0] + 1, base,     base,
+            tri[1] + 1, base + 1, base + 1,
+            tri[2] + 1, base + 2, base + 2,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Write `mesh` as a Wavefront OBJ to the file at `path`, creating or truncating it.
+pub fn write_obj_file(mesh: &TriMesh, path: &std::path::Path) -> std::io::Result<()> {
+    let mut f = std::fs::File::create(path)?;
+    write_obj(mesh, &mut f)
+}
+
 // ── mesh_solid ────────────────────────────────────────────────────────────────
 
 /// Tessellate all faces of solid `sid` and return a combined [`TriMesh`].
@@ -599,6 +656,60 @@ mod test {
             for &idx in tri {
                 assert!((idx as usize) < nv,
                     "triangle index {idx} out of range (vertices.len() = {nv})");
+            }
+        }
+    }
+
+    // ── OBJ export ───────────────────────────────────────────────────────────
+
+    fn obj_string(mesh: &TriMesh) -> String {
+        let mut buf = Vec::new();
+        write_obj(mesh, &mut buf).expect("write_obj failed");
+        String::from_utf8(buf).expect("OBJ output is not valid UTF-8")
+    }
+
+    fn count_lines_starting_with(s: &str, prefix: &str) -> usize {
+        s.lines().filter(|l| l.starts_with(prefix)).count()
+    }
+
+    #[test]
+    fn obj_empty_mesh_no_faces() {
+        let s = obj_string(&TriMesh::default());
+        assert_eq!(count_lines_starting_with(&s, "f "), 0);
+    }
+
+    #[test]
+    fn obj_cuboid_vertex_line_count() {
+        let mesh = mesh_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
+        let s = obj_string(&mesh);
+        assert_eq!(count_lines_starting_with(&s, "v "), 24);
+    }
+
+    #[test]
+    fn obj_cuboid_face_line_count() {
+        let mesh = mesh_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
+        let s = obj_string(&mesh);
+        assert_eq!(count_lines_starting_with(&s, "f "), 12);
+    }
+
+    #[test]
+    fn obj_cuboid_face_indices_valid() {
+        let mesh = mesh_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
+        let n_verts  = mesh.vertices.len();       // 24
+        let n_corners = mesh.triangles.len() * 3; // 36
+        let s = obj_string(&mesh);
+
+        for line in s.lines().filter(|l| l.starts_with("f ")) {
+            // Each token after "f" is "v/vt/vn"
+            for token in line.split_whitespace().skip(1) {
+                let parts: Vec<usize> = token.split('/')
+                    .map(|p| p.parse::<usize>().expect("index must be integer"))
+                    .collect();
+                assert_eq!(parts.len(), 3, "expected v/vt/vn in token {token}");
+                let (vi, vti, vni) = (parts[0], parts[1], parts[2]);
+                assert!(vi  >= 1 && vi  <= n_verts,   "vertex index {vi} out of range");
+                assert!(vti >= 1 && vti <= n_corners,  "vt index {vti} out of range");
+                assert!(vni >= 1 && vni <= n_corners,  "vn index {vni} out of range");
             }
         }
     }
