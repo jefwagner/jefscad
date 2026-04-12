@@ -279,16 +279,23 @@ Goal: “primitive -> B-rep -> mesh” pipeline working.
   - [x] `Point3` — x, y, z; Add/Sub/Mul<f64>, length/normalize/cross
   - [x] `Curve3` trait — eval(t)->Point3, eval_dt(t)->Point3, is_degenerate()->bool
   - [x] `Line3` — p0, p1, t_min, t_max; t=0 at p0, t=1 at p1; implements Curve3
-  - [x] `Curve3Kind` enum — Line3 and CircularArc3 implemented; Nurbs/Ssi stubs remain
+  - [x] `Curve3Kind` enum — Line3, CircularArc3, Polyline3 implemented; Nurbs/Ssi stubs remain
   - [x] `CircularArc3` — center, normal, ref_dir, radius, t0, t1; eval via angle param;
         eval_dt is tangent scaled by radius; is_degenerate when radius==0
+  - [x] `Polyline3` — Vec<Point3>; t∈[0, n_segments]; segment i covers t∈[i, i+1]
+        **Knot convention:** `eval`/`eval_dt` use `floor(t)` clamped to [0, n-1] to select
+        the segment. At an integer knot t=k, `eval_dt` returns the direction of segment k-1
+        (the segment *ending* at the knot) because floor(k) == k is clamped into [0, n-1],
+        i.e. for t=1.0 on a 3-point polyline, segment 0 (not segment 1) gives the tangent.
+        This is intentional: callers requiring the outgoing tangent should query t=k+ε.
   - [ ] `NurbsCurve3` — freeform; for future use
   - [ ] `SsiCurve3` — Phase 5: general surface-surface intersection curve
 - [x] Geometry — `Curve2` trait + `Curve2Kind` enum (geom.rs):
   - [x] `Point2` — u, v; Add/Sub/Mul<f64>
   - [x] `Curve2` trait — eval(t)->Point2, eval_dt(t)->Point2, is_degenerate()->bool
   - [x] `Line2` — p0, p1, t_min, t_max; implements Curve2
-  - [x] `Curve2Kind` enum skeleton — Line2 (implemented), Nurbs (stub)
+  - [x] `Curve2Kind` enum — Line2, CircularArc2, Polyline2 implemented; Nurbs stub remains
+  - [x] `Polyline2` — Vec<Point2>; same knot convention as Polyline3 (floor(t) selects segment)
   - [ ] `NurbsCurve2` — for freeform surface pcurves; future use
 - [x] Topology (brep_kernel.rs):
   - [x] Newtype IDs: VertexId, EdgeId, CoEdgeId, LoopId, FaceId, ShellId, SolidId,
@@ -429,6 +436,81 @@ returns a `PyMesh`.  Rationale:
 
 Deliverable for Phase 4: ✓
 - `sphere(2.5).translate(0,0,1).mesh().save_stl("out.stl")` works end-to-end.
+
+---
+
+### Phase 4.5 — Extrusion and Revolution primitives
+
+#### Design decisions (2026-04-12)
+
+**New surface types** — two new `SurfaceKind` variants:
+
+**`LinearExtrusionSurface`**
+- `profile: Curve3Kind` — generatrix curve in the base plane
+- `direction: Point3` — unit extrusion vector
+- `S(u, v) = profile.eval(u) + direction * v`
+- u = profile parameter, v = world-space extrusion distance
+- Normal = `cross(profile.eval_dt(u), direction).normalize()`
+- *Consistency check*: a cylinder is this type with a `CircularArc3` profile and
+  `direction = +Z`. On `CylindricalSurface`, `u = angle` and `v = height`, which
+  matches u=profile-param and v=extrusion-distance. ✓
+
+**`RevolutionSurface`**
+- `profile: Curve3Kind` — generatrix curve in the meridional half-plane (X ≥ 0 when axis = Z)
+- `axis_origin: Point3`, `axis_dir: Point3` (unit)
+- `S(u, v)` = rotate `profile.eval(v)` around axis by angle `u`
+- u = angle ∈ [0, 2π], v = profile parameter
+- *Consistency check*: cone is this type with a `Line3` profile; `ConicalSurface` has
+  `u = angle`, `v = slant distance`. Sphere is this type with a semicircular
+  `CircularArc3`; `SphericalSurface` has `u = longitude`, `v = latitude`. ✓
+
+**Coordinate conventions**
+- Extrusion: `Path2D` is in the X-Y plane; extrude along +Z. Consistent with
+  `build_cylinder`/`build_cone` placing base at z=0.
+- Revolution: `Path2D` profile in the X-Z half-plane (x ≥ 0); rotate around Z-axis.
+  Consistent with `build_cylinder`/`build_cone` having axis = +Z.
+
+**`Path2D`** — a Rust struct (in `geom.rs`), exposed to Python via a wrapper.
+Stores a `Vec<Curve2Kind>` of segments plus `start: Point2`, `current_pos: Point2`
+(private), and `closed: bool`. Canvas-style builder API: `line_to`, `arc_to`,
+`close` (topological only, no segment), `line_to_close` (adds closing segment + sets
+closed). Geometric closure validated by the B-rep compiler using `KernelTolerance`.
+Each segment becomes its own face in the B-rep (one surface per segment).
+
+**Solid validity rules**
+
+*Extrusion*: path must be closed; raise `ValueError` (Python) / `Err` (Rust) otherwise.
+
+*Revolution*: only three cases allowed (this is a solid modeler — no infinitely thin shells):
+- Both profile endpoints on the Z-axis → full solid; cap faces degenerate to points
+  (like sphere poles)
+- Exactly one endpoint on the Z-axis → full solid; one cap is a point, other is a disk
+- Closed path with all x-coordinates ≥ 0 (and path does not touch x=0) → solid of
+  revolution with a hole (torus-like); no cap faces needed since the swept path is closed
+  (e.g. a circle of radius 0.5 centred at x=0.6, z=0 → solid donut)
+- All other cases (open path with neither endpoint on axis; path crosses axis; closed
+  path that touches or crosses x=0) → raise
+
+*Partial revolution*: deferred. Full 360° only for now.
+
+#### Implementation status
+- [x] Add `LinearExtrusionSurface` and `RevolutionSurface` to `SurfaceKind` in `geom.rs`
+  - `todo!()` stubs in brep_compiler transform match arm
+  - `#[derive(Debug, Clone)]` added to `Curve3Kind`, `Curve2Kind`, and stub types
+  - 27 tests (13 LES + 14 RS), all passing
+- [x] Add `Path2D` struct to `geom.rs`
+  - `new`, `line_to`, `arc_to`, `close`, `line_to_close`, `current_pos` methods
+  - 13 tests, all passing
+- [ ] `build_extrusion(ctx, path, height, prov_id, geom_id) -> SolidId`
+  - Validates closed path (via KernelTolerance)
+  - One lateral face per segment (LinearExtrusionSurface)
+  - Bottom and top cap faces (Plane)
+- [ ] `build_revolution(ctx, path, prov_id, geom_id) -> SolidId`
+  - Validates endpoint-on-axis rule and case classification
+  - One lateral face per segment (RevolutionSurface)
+  - Disk cap face(s) where endpoint is off-axis; degenerate (point) caps where on-axis
+- [ ] Add `CsgPrim::Extrude { path, height }` and `CsgPrim::Revolve { path }` variants
+- [ ] Python `Path2D` wrapper with `extrude(height) -> Node` and `revolve() -> Node`
 
 ---
 

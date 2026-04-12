@@ -781,6 +781,9 @@ pub fn compile_primitive(
                 a.normal  = apply_vec(a.normal).normalize();
                 a.radius *= s;
             }
+            Curve3Kind::Polyline3(_) => {
+                todo!("transform absorption for Polyline3 not yet implemented")
+            }
             Curve3Kind::Nurbs(_) | Curve3Kind::Ssi(_) => {
                 todo!("transform absorption for NurbsCurve3 / SsiCurve3 not yet implemented")
             }
@@ -822,6 +825,9 @@ pub fn compile_primitive(
                 sp.axis    = apply_vec(sp.axis).normalize();
                 sp.radius *= s;
                 // SphericalSurface u,v are angles — pcurves unchanged.
+            }
+            SurfaceKind::Extrusion(_) | SurfaceKind::Revolution(_) => {
+                todo!("transform absorption for Extrusion/Revolution not yet implemented")
             }
             SurfaceKind::Nurbs(_) => {
                 todo!("transform absorption for NurbsSurf not yet implemented")
@@ -866,6 +872,9 @@ fn scale_lateral_pcurves(
             }
             Curve2Kind::CircularArc2(a) => {
                 a.center.v *= s;
+            }
+            Curve2Kind::Polyline2(_) => {
+                todo!("pcurve v-scaling for Polyline2 not yet implemented")
             }
             Curve2Kind::Nurbs(_) => {
                 todo!("pcurve v-scaling for NurbsCurve2 not yet implemented")

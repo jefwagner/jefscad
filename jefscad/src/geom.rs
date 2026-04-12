@@ -229,10 +229,66 @@ impl Curve3 for CircularArc3 {
 // ── Stub types for remaining Curve3Kind variants ───────────────────────────────
 
 /// A rational B-spline curve in 3-D space. Fields TBD — stub for `Curve3Kind`.
+#[derive(Debug, Clone)]
 pub struct NurbsCurve3;
 
 /// A surface-surface intersection curve. Fields TBD — Phase 5.
+#[derive(Debug, Clone)]
 pub struct SsiCurve3;
+
+// ── Polyline3 ─────────────────────────────────────────────────────────────────
+
+/// A piecewise-linear 3-D curve through `N` control points (`N - 1` segments).
+///
+/// # Parameterization
+/// `t ∈ [0, N-1]`: segment `i` covers `t ∈ [i, i+1]`.
+/// `eval(t)` for `t` outside `[0, N-1]` extrapolates along the first (t < 0) or
+/// last (t > N-1) segment, consistent with the no-clamping contract shared by all
+/// [`Curve3`] types.
+///
+/// # Panics
+/// [`Polyline3::new`] panics if fewer than 2 points are provided.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Polyline3 {
+    pub points: Vec<Point3>,
+}
+
+impl Polyline3 {
+    /// Construct a polyline from a sequence of control points.
+    ///
+    /// Panics if `points.len() < 2`.
+    pub fn new(points: Vec<Point3>) -> Self {
+        assert!(points.len() >= 2, "Polyline3 requires at least 2 points");
+        Self { points }
+    }
+
+    /// Number of linear segments (`points.len() - 1`).
+    pub fn n_segments(&self) -> usize {
+        self.points.len() - 1
+    }
+}
+
+impl Curve3 for Polyline3 {
+    fn eval(&self, t: f64) -> Point3 {
+        let n = self.n_segments();
+        let i = (t.floor() as i64).clamp(0, n as i64 - 1) as usize;
+        let frac = t - i as f64;
+        self.points[i] + (self.points[i + 1] - self.points[i]) * frac
+    }
+
+    /// Un-normalized tangent: the direction of the segment containing `t`.
+    /// Constant within each segment; at segment boundaries returns the direction
+    /// of the segment whose index equals `floor(t)` (clamped to valid range).
+    fn eval_dt(&self, t: f64) -> Point3 {
+        let n = self.n_segments();
+        let i = (t.floor() as i64).clamp(0, n as i64 - 1) as usize;
+        self.points[i + 1] - self.points[i]
+    }
+
+    fn is_degenerate(&self) -> bool {
+        self.points.iter().all(|&p| p == self.points[0])
+    }
+}
 
 // ── Curve3Kind enum ───────────────────────────────────────────────────────────
 
@@ -240,9 +296,11 @@ pub struct SsiCurve3;
 ///
 /// Each variant wraps a concrete curve struct that implements [`Curve3`]. Methods
 /// delegate to the inner type; unimplemented variants panic with `todo!`.
+#[derive(Debug, Clone)]
 pub enum Curve3Kind {
     Line3(Line3),
     CircularArc3(CircularArc3),
+    Polyline3(Polyline3),
     Nurbs(NurbsCurve3),
     Ssi(SsiCurve3),
 }
@@ -250,28 +308,31 @@ pub enum Curve3Kind {
 impl Curve3 for Curve3Kind {
     fn eval(&self, t: f64) -> Point3 {
         match self {
-            Curve3Kind::Line3(l) => l.eval(t),
+            Curve3Kind::Line3(l)       => l.eval(t),
             Curve3Kind::CircularArc3(a) => a.eval(t),
-            Curve3Kind::Nurbs(_) => todo!("NurbsCurve3::eval"),
-            Curve3Kind::Ssi(_) => todo!("SsiCurve3::eval"),
+            Curve3Kind::Polyline3(p)   => p.eval(t),
+            Curve3Kind::Nurbs(_)       => todo!("NurbsCurve3::eval"),
+            Curve3Kind::Ssi(_)         => todo!("SsiCurve3::eval"),
         }
     }
 
     fn eval_dt(&self, t: f64) -> Point3 {
         match self {
-            Curve3Kind::Line3(l) => l.eval_dt(t),
+            Curve3Kind::Line3(l)       => l.eval_dt(t),
             Curve3Kind::CircularArc3(a) => a.eval_dt(t),
-            Curve3Kind::Nurbs(_) => todo!("NurbsCurve3::eval_dt"),
-            Curve3Kind::Ssi(_) => todo!("SsiCurve3::eval_dt"),
+            Curve3Kind::Polyline3(p)   => p.eval_dt(t),
+            Curve3Kind::Nurbs(_)       => todo!("NurbsCurve3::eval_dt"),
+            Curve3Kind::Ssi(_)         => todo!("SsiCurve3::eval_dt"),
         }
     }
 
     fn is_degenerate(&self) -> bool {
         match self {
-            Curve3Kind::Line3(l) => l.is_degenerate(),
+            Curve3Kind::Line3(l)       => l.is_degenerate(),
             Curve3Kind::CircularArc3(a) => a.is_degenerate(),
-            Curve3Kind::Nurbs(_) => todo!("NurbsCurve3::is_degenerate"),
-            Curve3Kind::Ssi(_) => todo!("SsiCurve3::is_degenerate"),
+            Curve3Kind::Polyline3(p)   => p.is_degenerate(),
+            Curve3Kind::Nurbs(_)       => todo!("NurbsCurve3::is_degenerate"),
+            Curve3Kind::Ssi(_)         => todo!("SsiCurve3::is_degenerate"),
         }
     }
 }
@@ -365,42 +426,104 @@ impl Curve2 for CircularArc2 {
     }
 }
 
+// ── Polyline2 ─────────────────────────────────────────────────────────────────
+
+/// A piecewise-linear curve in UV space through `N` control points (`N - 1` segments).
+///
+/// # Parameterization
+/// `t ∈ [0, N-1]`: segment `i` covers `t ∈ [i, i+1]`.
+/// `eval(t)` for `t` outside `[0, N-1]` extrapolates along the first (t < 0) or
+/// last (t > N-1) segment, consistent with the no-clamping contract shared by all
+/// [`Curve2`] types.
+///
+/// # Panics
+/// [`Polyline2::new`] panics if fewer than 2 points are provided.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Polyline2 {
+    pub points: Vec<Point2>,
+}
+
+impl Polyline2 {
+    /// Construct a polyline from a sequence of UV control points.
+    ///
+    /// Panics if `points.len() < 2`.
+    pub fn new(points: Vec<Point2>) -> Self {
+        assert!(points.len() >= 2, "Polyline2 requires at least 2 points");
+        Self { points }
+    }
+
+    /// Number of linear segments (`points.len() - 1`).
+    pub fn n_segments(&self) -> usize {
+        self.points.len() - 1
+    }
+}
+
+impl Curve2 for Polyline2 {
+    fn eval(&self, t: f64) -> Point2 {
+        let n = self.n_segments();
+        let i = (t.floor() as i64).clamp(0, n as i64 - 1) as usize;
+        let frac = t - i as f64;
+        let p0 = self.points[i];
+        let p1 = self.points[i + 1];
+        Point2::new(p0.u + (p1.u - p0.u) * frac, p0.v + (p1.v - p0.v) * frac)
+    }
+
+    /// Un-normalized tangent: the direction of the segment containing `t`.
+    fn eval_dt(&self, t: f64) -> Point2 {
+        let n = self.n_segments();
+        let i = (t.floor() as i64).clamp(0, n as i64 - 1) as usize;
+        let p0 = self.points[i];
+        let p1 = self.points[i + 1];
+        Point2::new(p1.u - p0.u, p1.v - p0.v)
+    }
+
+    fn is_degenerate(&self) -> bool {
+        self.points.iter().all(|&p| p == self.points[0])
+    }
+}
+
 // ── Stub type for future Curve2Kind variant ───────────────────────────────────
 
 /// A rational B-spline curve in UV space. Fields TBD — stub for `Curve2Kind`.
+#[derive(Debug, Clone)]
 pub struct NurbsCurve2;
 
 // ── Curve2Kind enum ───────────────────────────────────────────────────────────
 
 /// The concrete stored pcurve type used in the B-rep arena.
+#[derive(Debug, Clone)]
 pub enum Curve2Kind {
     Line2(Line2),
     CircularArc2(CircularArc2),
+    Polyline2(Polyline2),
     Nurbs(NurbsCurve2),
 }
 
 impl Curve2 for Curve2Kind {
     fn eval(&self, t: f64) -> Point2 {
         match self {
-            Curve2Kind::Line2(l) => l.eval(t),
-            Curve2Kind::CircularArc2(a) => a.eval(t),
-            Curve2Kind::Nurbs(_) => todo!("NurbsCurve2::eval"),
+            Curve2Kind::Line2(l)         => l.eval(t),
+            Curve2Kind::CircularArc2(a)  => a.eval(t),
+            Curve2Kind::Polyline2(p)     => p.eval(t),
+            Curve2Kind::Nurbs(_)         => todo!("NurbsCurve2::eval"),
         }
     }
 
     fn eval_dt(&self, t: f64) -> Point2 {
         match self {
-            Curve2Kind::Line2(l) => l.eval_dt(t),
-            Curve2Kind::CircularArc2(a) => a.eval_dt(t),
-            Curve2Kind::Nurbs(_) => todo!("NurbsCurve2::eval_dt"),
+            Curve2Kind::Line2(l)         => l.eval_dt(t),
+            Curve2Kind::CircularArc2(a)  => a.eval_dt(t),
+            Curve2Kind::Polyline2(p)     => p.eval_dt(t),
+            Curve2Kind::Nurbs(_)         => todo!("NurbsCurve2::eval_dt"),
         }
     }
 
     fn is_degenerate(&self) -> bool {
         match self {
-            Curve2Kind::Line2(l) => l.is_degenerate(),
-            Curve2Kind::CircularArc2(a) => a.is_degenerate(),
-            Curve2Kind::Nurbs(_) => todo!("NurbsCurve2::is_degenerate"),
+            Curve2Kind::Line2(l)         => l.is_degenerate(),
+            Curve2Kind::CircularArc2(a)  => a.is_degenerate(),
+            Curve2Kind::Polyline2(p)     => p.is_degenerate(),
+            Curve2Kind::Nurbs(_)         => todo!("NurbsCurve2::is_degenerate"),
         }
     }
 }
@@ -620,9 +743,197 @@ impl Surface for SphericalSurface {
     }
 }
 
+// ── LinearExtrusionSurface ────────────────────────────────────────────────────
+
+/// A surface formed by sweeping a profile curve linearly along a direction vector.
+///
+/// Parameterization: `u` follows the profile, `v` is world-space distance along
+/// `direction`.
+///
+/// `S(u, v) = profile.eval(u) + direction * v`
+///
+/// This is consistent with `CylindricalSurface`: a cylinder is this type with a
+/// `CircularArc3` profile and `direction = +Z`, giving `u = angle`, `v = height`.
+#[derive(Debug, Clone)]
+pub struct LinearExtrusionSurface {
+    pub profile:   Curve3Kind,   // generatrix curve; lies in the base plane
+    pub direction: Point3,       // unit extrusion direction vector
+}
+
+impl LinearExtrusionSurface {
+    pub fn new(profile: Curve3Kind, direction: Point3) -> Self {
+        Self { profile, direction }
+    }
+}
+
+impl Surface for LinearExtrusionSurface {
+    fn eval(&self, u: f64, v: f64) -> Point3 {
+        self.profile.eval(u) + self.direction * v
+    }
+
+    fn eval_du(&self, u: f64, _v: f64) -> Point3 {
+        self.profile.eval_dt(u)
+    }
+
+    fn eval_dv(&self, _u: f64, _v: f64) -> Point3 {
+        self.direction
+    }
+
+    /// Cross product of the profile tangent and the extrusion direction, normalised.
+    /// Returns `None` when the profile tangent is zero (degenerate point on profile).
+    fn eval_n(&self, u: f64, v: f64) -> Option<Point3> {
+        let du = self.eval_du(u, v);
+        let dv = self.direction;
+        let n = du.cross(dv);
+        if n.length() == 0.0 { None } else { Some(n.normalize()) }
+    }
+}
+
+// ── RevolutionSurface ─────────────────────────────────────────────────────────
+
+/// A surface formed by rotating a profile curve around an axis.
+///
+/// Parameterization: `u = angle ∈ [0, 2π)` (rotation), `v` follows the profile.
+///
+/// `S(u, v)` = `profile.eval(v)` rotated around `axis_dir` through `axis_origin`
+/// by angle `u`, via Rodrigues' formula.
+///
+/// This is consistent with `CylindricalSurface` (`u = angle`, `v = height`),
+/// `ConicalSurface` (`u = angle`, `v = slant distance`), and `SphericalSurface`
+/// (`u = longitude`, `v = latitude`).
+#[derive(Debug, Clone)]
+pub struct RevolutionSurface {
+    pub profile:     Curve3Kind,   // generatrix in the meridional half-plane
+    pub axis_origin: Point3,       // any point on the revolution axis
+    pub axis_dir:    Point3,       // unit direction of axis
+}
+
+impl RevolutionSurface {
+    pub fn new(profile: Curve3Kind, axis_origin: Point3, axis_dir: Point3) -> Self {
+        Self { profile, axis_origin, axis_dir }
+    }
+
+    /// Rotate point `p` around the axis by angle `u` (Rodrigues' formula).
+    fn rotate(&self, p: Point3, u: f64) -> Point3 {
+        // translate to axis frame, rotate, translate back
+        let q = p - self.axis_origin;
+        let a = self.axis_dir;
+        let q_rot = q * u.cos()
+            + a.cross(q) * u.sin()
+            + a * a.dot(q) * (1.0 - u.cos());
+        self.axis_origin + q_rot
+    }
+}
+
+impl Surface for RevolutionSurface {
+    fn eval(&self, u: f64, v: f64) -> Point3 {
+        self.rotate(self.profile.eval(v), u)
+    }
+
+    /// Tangent along the sweep direction: `cross(axis_dir, radial) * |radial|` rotated.
+    /// Zero (and `eval_n` returns `None`) when the profile point lies on the axis.
+    fn eval_du(&self, u: f64, v: f64) -> Point3 {
+        // d/du of Rodrigues = cross(axis, q)*cos(u) - q*sin(u) + axis*dot(axis,q)*sin(u) … simplifies to:
+        // d/du rotate(q, u) = cross(axis, rotate(q, u) - axis_origin)
+        let rotated = self.eval(u, v);
+        self.axis_dir.cross(rotated - self.axis_origin)
+    }
+
+    /// Tangent along the profile, rotated by `u`.
+    fn eval_dv(&self, u: f64, v: f64) -> Point3 {
+        self.rotate(self.profile.eval_dt(v), u)
+    }
+
+    /// Returns `None` when the profile point is on the axis (`eval_du` is zero).
+    fn eval_n(&self, u: f64, v: f64) -> Option<Point3> {
+        let du = self.eval_du(u, v);
+        let dv = self.eval_dv(u, v);
+        let n = du.cross(dv);
+        if n.length() == 0.0 { None } else { Some(n.normalize()) }
+    }
+}
+
+// ── Path2D ────────────────────────────────────────────────────────────────────
+
+/// A piecewise curve in 2-D (UV / XZ) space, built with a canvas-style API.
+///
+/// Each segment is a [`Curve2Kind`]. Adjacent segments share endpoints implicitly:
+/// the start of segment `i+1` is the end of segment `i`, and the start of segment
+/// `0` is [`Path2D::start`].
+///
+/// Use [`Path2D::close`] to mark topological closure when the path already returns
+/// to `start`, or [`Path2D::line_to_close`] to add an explicit closing segment.
+/// Geometric validity (closed path within tolerance) is enforced by the B-rep
+/// compiler, not here.
+#[derive(Debug, Clone)]
+pub struct Path2D {
+    pub start:    Point2,
+    pub segments: Vec<Curve2Kind>,
+    pub closed:   bool,
+    current_pos:  Point2,
+}
+
+impl Path2D {
+    /// Create an empty path beginning at `start`.
+    pub fn new(start: Point2) -> Self {
+        Self { start, segments: Vec::new(), closed: false, current_pos: start }
+    }
+
+    /// The end-point of the last segment, or `start` if no segments have been added.
+    pub fn current_pos(&self) -> Point2 {
+        self.current_pos
+    }
+
+    /// Append a straight segment from the current position to `end`.
+    pub fn line_to(&mut self, end: Point2) -> &mut Self {
+        self.segments.push(Curve2Kind::Line2(Line2::new(self.current_pos, end)));
+        self.current_pos = end;
+        self
+    }
+
+    /// Append a circular arc from the current position, sweeping `sweep` radians
+    /// around `center`. Positive `sweep` is CCW; negative is CW. The end point is
+    /// derived geometrically — no redundant coordinate needed.
+    pub fn arc_to(&mut self, center: Point2, sweep: f64) -> &mut Self {
+        let p0 = self.current_pos;
+        // radius vector from center to current position
+        let r = p0 - center;
+        let radius = ((r.u * r.u) + (r.v * r.v)).sqrt();
+        let t0 = r.v.atan2(r.u);    // start angle
+        let t1 = t0 + sweep;         // end angle
+        let end = Point2::new(
+            center.u + radius * t1.cos(),
+            center.v + radius * t1.sin(),
+        );
+        self.segments.push(Curve2Kind::CircularArc2(
+            CircularArc2::new(center, radius, t0, t1),
+        ));
+        self.current_pos = end;
+        self
+    }
+
+    /// Mark the path as closed. No segment is added; the caller asserts that
+    /// `current_pos` is already at `start`. Geometric validation is done by the
+    /// B-rep compiler.
+    pub fn close(&mut self) -> &mut Self {
+        self.closed = true;
+        self
+    }
+
+    /// Add a straight closing segment from `current_pos` to `start`, then mark
+    /// the path as closed.
+    pub fn line_to_close(&mut self) -> &mut Self {
+        let start = self.start;
+        self.line_to(start);
+        self.closed = true;
+        self
+    }
+}
+
 // ── Stub type for remaining SurfaceKind variant ───────────────────────────────
 
 /// A rational B-spline surface. Fields TBD — stub for `SurfaceKind`.
+#[derive(Debug, Clone)]
 pub struct NurbsSurf;
 
 // ── SurfaceKind enum ──────────────────────────────────────────────────────────
@@ -633,47 +944,57 @@ pub enum SurfaceKind {
     Cylinder(CylindricalSurface),
     Cone(ConicalSurface),
     Sphere(SphericalSurface),
+    Extrusion(LinearExtrusionSurface),
+    Revolution(RevolutionSurface),
     Nurbs(NurbsSurf),
 }
 
 impl Surface for SurfaceKind {
     fn eval(&self, u: f64, v: f64) -> Point3 {
         match self {
-            SurfaceKind::Plane(p) => p.eval(u, v),
-            SurfaceKind::Cylinder(c) => c.eval(u, v),
-            SurfaceKind::Cone(c) => c.eval(u, v),
-            SurfaceKind::Sphere(s) => s.eval(u, v),
-            SurfaceKind::Nurbs(_) => todo!("NurbsSurf::eval"),
+            SurfaceKind::Plane(p)      => p.eval(u, v),
+            SurfaceKind::Cylinder(c)   => c.eval(u, v),
+            SurfaceKind::Cone(c)       => c.eval(u, v),
+            SurfaceKind::Sphere(s)     => s.eval(u, v),
+            SurfaceKind::Extrusion(e)  => e.eval(u, v),
+            SurfaceKind::Revolution(r) => r.eval(u, v),
+            SurfaceKind::Nurbs(_)      => todo!("NurbsSurf::eval"),
         }
     }
 
     fn eval_du(&self, u: f64, v: f64) -> Point3 {
         match self {
-            SurfaceKind::Plane(p) => p.eval_du(u, v),
-            SurfaceKind::Cylinder(c) => c.eval_du(u, v),
-            SurfaceKind::Cone(c) => c.eval_du(u, v),
-            SurfaceKind::Sphere(s) => s.eval_du(u, v),
-            SurfaceKind::Nurbs(_) => todo!("NurbsSurf::eval_du"),
+            SurfaceKind::Plane(p)      => p.eval_du(u, v),
+            SurfaceKind::Cylinder(c)   => c.eval_du(u, v),
+            SurfaceKind::Cone(c)       => c.eval_du(u, v),
+            SurfaceKind::Sphere(s)     => s.eval_du(u, v),
+            SurfaceKind::Extrusion(e)  => e.eval_du(u, v),
+            SurfaceKind::Revolution(r) => r.eval_du(u, v),
+            SurfaceKind::Nurbs(_)      => todo!("NurbsSurf::eval_du"),
         }
     }
 
     fn eval_dv(&self, u: f64, v: f64) -> Point3 {
         match self {
-            SurfaceKind::Plane(p) => p.eval_dv(u, v),
-            SurfaceKind::Cylinder(c) => c.eval_dv(u, v),
-            SurfaceKind::Cone(c) => c.eval_dv(u, v),
-            SurfaceKind::Sphere(s) => s.eval_dv(u, v),
-            SurfaceKind::Nurbs(_) => todo!("NurbsSurf::eval_dv"),
+            SurfaceKind::Plane(p)      => p.eval_dv(u, v),
+            SurfaceKind::Cylinder(c)   => c.eval_dv(u, v),
+            SurfaceKind::Cone(c)       => c.eval_dv(u, v),
+            SurfaceKind::Sphere(s)     => s.eval_dv(u, v),
+            SurfaceKind::Extrusion(e)  => e.eval_dv(u, v),
+            SurfaceKind::Revolution(r) => r.eval_dv(u, v),
+            SurfaceKind::Nurbs(_)      => todo!("NurbsSurf::eval_dv"),
         }
     }
 
     fn eval_n(&self, u: f64, v: f64) -> Option<Point3> {
         match self {
-            SurfaceKind::Plane(p) => p.eval_n(u, v),
-            SurfaceKind::Cylinder(c) => c.eval_n(u, v),
-            SurfaceKind::Cone(c) => c.eval_n(u, v),
-            SurfaceKind::Sphere(s) => s.eval_n(u, v),
-            SurfaceKind::Nurbs(_) => todo!("NurbsSurf::eval_n"),
+            SurfaceKind::Plane(p)      => p.eval_n(u, v),
+            SurfaceKind::Cylinder(c)   => c.eval_n(u, v),
+            SurfaceKind::Cone(c)       => c.eval_n(u, v),
+            SurfaceKind::Sphere(s)     => s.eval_n(u, v),
+            SurfaceKind::Extrusion(e)  => e.eval_n(u, v),
+            SurfaceKind::Revolution(r) => r.eval_n(u, v),
+            SurfaceKind::Nurbs(_)      => todo!("NurbsSurf::eval_n"),
         }
     }
 }
@@ -1011,6 +1332,236 @@ mod test {
     fn curve2kind_arc2_is_degenerate() {
         let nd = Curve2Kind::CircularArc2(CircularArc2::new(uv(0.0, 0.0), 1.0, 0.0, 2.0 * std::f64::consts::PI));
         let dg = Curve2Kind::CircularArc2(CircularArc2::new(uv(0.0, 0.0), 0.0, 0.0, 2.0 * std::f64::consts::PI));
+        assert!(!nd.is_degenerate());
+        assert!(dg.is_degenerate());
+    }
+
+    // ── Polyline3 construction ────────────────────────────────────────────────
+
+    #[test]
+    fn polyline3_new_stores_points() {
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0)]);
+        assert_eq!(pl.points.len(), 3);
+        assert_eq!(pl.n_segments(), 2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn polyline3_new_panics_on_one_point() {
+        Polyline3::new(vec![p(0.0, 0.0, 0.0)]);
+    }
+
+    // ── Polyline3::eval ───────────────────────────────────────────────────────
+
+    #[test]
+    fn polyline3_eval_at_t0() {
+        let pl = Polyline3::new(vec![p(1.0, 2.0, 3.0), p(4.0, 5.0, 6.0)]);
+        assert_eq!(pl.eval(0.0), p(1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn polyline3_eval_at_t_n() {
+        let pl = Polyline3::new(vec![p(1.0, 2.0, 3.0), p(4.0, 5.0, 6.0)]);
+        assert_eq!(pl.eval(1.0), p(4.0, 5.0, 6.0));
+    }
+
+    #[test]
+    fn polyline3_eval_midpoint_first_seg() {
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(2.0, 2.0, 0.0)]);
+        assert_eq!(pl.eval(0.5), p(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn polyline3_eval_midpoint_second_seg() {
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(2.0, 2.0, 0.0)]);
+        assert_eq!(pl.eval(1.5), p(2.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn polyline3_eval_at_knot() {
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0)]);
+        assert_eq!(pl.eval(1.0), p(1.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn polyline3_eval_extrapolate_negative() {
+        // t < 0: extrapolates along segment 0
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0)]);
+        assert!(approx_eq3(pl.eval(-1.0), p(-1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn polyline3_eval_extrapolate_past_end() {
+        // t > n_segments: extrapolates along last segment
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0), p(1.0, 1.0, 0.0)]);
+        assert!(approx_eq3(pl.eval(3.0), p(1.0, 2.0, 0.0)));
+    }
+
+    // ── Polyline3::eval_dt ────────────────────────────────────────────────────
+
+    #[test]
+    fn polyline3_eval_dt_first_seg() {
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(3.0, 0.0, 0.0), p(3.0, 4.0, 0.0)]);
+        assert_eq!(pl.eval_dt(0.5), p(3.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn polyline3_eval_dt_second_seg() {
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(3.0, 0.0, 0.0), p(3.0, 4.0, 0.0)]);
+        assert_eq!(pl.eval_dt(1.5), p(0.0, 4.0, 0.0));
+    }
+
+    #[test]
+    fn polyline3_eval_dt_at_knot() {
+        // t=1.0: floor(1.0)==1, clamped to [0, n-1=1] → segment 1; not segment 0.
+        // (This is the "knot picks incoming segment" contract — see notes.md.)
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(3.0, 0.0, 0.0), p(3.0, 4.0, 0.0)]);
+        assert_eq!(pl.eval_dt(1.0), p(0.0, 4.0, 0.0));
+    }
+
+    // ── Polyline3::is_degenerate ──────────────────────────────────────────────
+
+    #[test]
+    fn polyline3_not_degenerate() {
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0)]);
+        assert!(!pl.is_degenerate());
+    }
+
+    #[test]
+    fn polyline3_is_degenerate() {
+        let pl = Polyline3::new(vec![p(1.0, 2.0, 3.0), p(1.0, 2.0, 3.0), p(1.0, 2.0, 3.0)]);
+        assert!(pl.is_degenerate());
+    }
+
+    // ── Curve3Kind::Polyline3 delegation ─────────────────────────────────────
+
+    #[test]
+    fn curve3kind_polyline3_eval() {
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(2.0, 2.0, 0.0)]);
+        let ck = Curve3Kind::Polyline3(pl.clone());
+        assert_eq!(ck.eval(0.0), pl.eval(0.0));
+        assert_eq!(ck.eval(0.5), pl.eval(0.5));
+        assert_eq!(ck.eval(1.5), pl.eval(1.5));
+    }
+
+    #[test]
+    fn curve3kind_polyline3_eval_dt() {
+        let pl = Polyline3::new(vec![p(0.0, 0.0, 0.0), p(2.0, 0.0, 0.0), p(2.0, 2.0, 0.0)]);
+        let ck = Curve3Kind::Polyline3(pl.clone());
+        assert_eq!(ck.eval_dt(0.5), pl.eval_dt(0.5));
+        assert_eq!(ck.eval_dt(1.5), pl.eval_dt(1.5));
+    }
+
+    #[test]
+    fn curve3kind_polyline3_is_degenerate() {
+        let nd = Curve3Kind::Polyline3(Polyline3::new(vec![p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0)]));
+        let dg = Curve3Kind::Polyline3(Polyline3::new(vec![p(1.0, 1.0, 1.0), p(1.0, 1.0, 1.0)]));
+        assert!(!nd.is_degenerate());
+        assert!(dg.is_degenerate());
+    }
+
+    // ── Polyline2 construction ────────────────────────────────────────────────
+
+    #[test]
+    fn polyline2_new_stores_points() {
+        let pl = Polyline2::new(vec![uv(0.0, 0.0), uv(1.0, 0.0), uv(1.0, 1.0)]);
+        assert_eq!(pl.points.len(), 3);
+        assert_eq!(pl.n_segments(), 2);
+    }
+
+    #[test]
+    #[should_panic]
+    fn polyline2_new_panics_on_one_point() {
+        Polyline2::new(vec![uv(0.0, 0.0)]);
+    }
+
+    // ── Polyline2::eval ───────────────────────────────────────────────────────
+
+    #[test]
+    fn polyline2_eval_at_t0() {
+        let pl = Polyline2::new(vec![uv(1.0, 2.0), uv(3.0, 4.0)]);
+        assert_eq!(pl.eval(0.0), uv(1.0, 2.0));
+    }
+
+    #[test]
+    fn polyline2_eval_at_t_n() {
+        let pl = Polyline2::new(vec![uv(1.0, 2.0), uv(3.0, 4.0)]);
+        assert_eq!(pl.eval(1.0), uv(3.0, 4.0));
+    }
+
+    #[test]
+    fn polyline2_eval_midpoint_first_seg() {
+        let pl = Polyline2::new(vec![uv(0.0, 0.0), uv(2.0, 0.0), uv(2.0, 4.0)]);
+        assert_eq!(pl.eval(0.5), uv(1.0, 0.0));
+    }
+
+    #[test]
+    fn polyline2_eval_midpoint_second_seg() {
+        let pl = Polyline2::new(vec![uv(0.0, 0.0), uv(2.0, 0.0), uv(2.0, 4.0)]);
+        assert_eq!(pl.eval(1.5), uv(2.0, 2.0));
+    }
+
+    #[test]
+    fn polyline2_eval_extrapolate_negative() {
+        let pl = Polyline2::new(vec![uv(0.0, 0.0), uv(1.0, 0.0), uv(1.0, 1.0)]);
+        assert_eq!(pl.eval(-1.0), uv(-1.0, 0.0));
+    }
+
+    #[test]
+    fn polyline2_eval_extrapolate_past_end() {
+        let pl = Polyline2::new(vec![uv(0.0, 0.0), uv(1.0, 0.0), uv(1.0, 1.0)]);
+        assert_eq!(pl.eval(3.0), uv(1.0, 2.0));
+    }
+
+    // ── Polyline2::eval_dt ────────────────────────────────────────────────────
+
+    #[test]
+    fn polyline2_eval_dt_first_seg() {
+        let pl = Polyline2::new(vec![uv(0.0, 0.0), uv(3.0, 0.0), uv(3.0, 4.0)]);
+        assert_eq!(pl.eval_dt(0.5), uv(3.0, 0.0));
+    }
+
+    #[test]
+    fn polyline2_eval_dt_second_seg() {
+        let pl = Polyline2::new(vec![uv(0.0, 0.0), uv(3.0, 0.0), uv(3.0, 4.0)]);
+        assert_eq!(pl.eval_dt(1.5), uv(0.0, 4.0));
+    }
+
+    // ── Polyline2::is_degenerate ──────────────────────────────────────────────
+
+    #[test]
+    fn polyline2_not_degenerate() {
+        assert!(!Polyline2::new(vec![uv(0.0, 0.0), uv(1.0, 0.0)]).is_degenerate());
+    }
+
+    #[test]
+    fn polyline2_is_degenerate() {
+        assert!(Polyline2::new(vec![uv(1.0, 2.0), uv(1.0, 2.0), uv(1.0, 2.0)]).is_degenerate());
+    }
+
+    // ── Curve2Kind::Polyline2 delegation ─────────────────────────────────────
+
+    #[test]
+    fn curve2kind_polyline2_eval() {
+        let pl = Polyline2::new(vec![uv(0.0, 0.0), uv(2.0, 0.0), uv(2.0, 2.0)]);
+        let ck = Curve2Kind::Polyline2(pl.clone());
+        assert_eq!(ck.eval(0.0), pl.eval(0.0));
+        assert_eq!(ck.eval(0.5), pl.eval(0.5));
+        assert_eq!(ck.eval(1.5), pl.eval(1.5));
+    }
+
+    #[test]
+    fn curve2kind_polyline2_eval_dt() {
+        let pl = Polyline2::new(vec![uv(0.0, 0.0), uv(2.0, 0.0), uv(2.0, 2.0)]);
+        let ck = Curve2Kind::Polyline2(pl.clone());
+        assert_eq!(ck.eval_dt(0.5), pl.eval_dt(0.5));
+        assert_eq!(ck.eval_dt(1.5), pl.eval_dt(1.5));
+    }
+
+    #[test]
+    fn curve2kind_polyline2_is_degenerate() {
+        let nd = Curve2Kind::Polyline2(Polyline2::new(vec![uv(0.0, 0.0), uv(1.0, 0.0)]));
+        let dg = Curve2Kind::Polyline2(Polyline2::new(vec![uv(1.0, 1.0), uv(1.0, 1.0)]));
         assert!(!nd.is_degenerate());
         assert!(dg.is_degenerate());
     }
@@ -1355,5 +1906,395 @@ mod test {
         let sk = SurfaceKind::Sphere(s);
         assert!(approx_eq3(sk.eval(0.0, 0.0), s.eval(0.0, 0.0)));
         assert_eq!(sk.eval_n(0.0, 0.0), s.eval_n(0.0, 0.0));
+    }
+
+    // ── LinearExtrusionSurface helpers ────────────────────────────────────────
+
+    /// Profile: Line3 from (0,0,0) to (1,0,0); direction: +Z.
+    fn std_les() -> LinearExtrusionSurface {
+        let profile = Curve3Kind::Line3(Line3::new(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0)));
+        LinearExtrusionSurface::new(profile, p(0.0, 0.0, 1.0))
+    }
+
+    // ── LinearExtrusionSurface construction ───────────────────────────────────
+
+    #[test]
+    fn les_new_stores_fields() {
+        let s = std_les();
+        assert_eq!(s.direction, p(0.0, 0.0, 1.0));
+        // profile stored: eval at u=0 gives origin
+        assert_eq!(s.profile.eval(0.0), p(0.0, 0.0, 0.0));
+    }
+
+    // ── LinearExtrusionSurface::eval ──────────────────────────────────────────
+
+    #[test]
+    fn les_eval_at_v0() {
+        let s = std_les();
+        // At v=0 the direction term vanishes; eval should equal profile.eval(u)
+        assert!(approx_eq3(s.eval(0.0, 0.0), s.profile.eval(0.0)));
+        assert!(approx_eq3(s.eval(0.5, 0.0), s.profile.eval(0.5)));
+        assert!(approx_eq3(s.eval(1.0, 0.0), s.profile.eval(1.0)));
+    }
+
+    #[test]
+    fn les_eval_along_direction() {
+        let s = std_les();
+        // Fixed u=0 (profile origin); varying v moves along +Z
+        assert!(approx_eq3(s.eval(0.0, 3.0), p(0.0, 0.0, 3.0)));
+        assert!(approx_eq3(s.eval(0.0, -1.0), p(0.0, 0.0, -1.0)));
+    }
+
+    #[test]
+    fn les_eval_midpoint() {
+        let s = std_les();
+        // u=0.5 → profile midpoint (0.5, 0, 0); v=2 → +2 along Z
+        assert!(approx_eq3(s.eval(0.5, 2.0), p(0.5, 0.0, 2.0)));
+    }
+
+    // ── LinearExtrusionSurface::eval_du ───────────────────────────────────────
+
+    #[test]
+    fn les_eval_du_matches_profile_tangent() {
+        let s = std_les();
+        assert!(approx_eq3(s.eval_du(0.0, 0.0), s.profile.eval_dt(0.0)));
+        assert!(approx_eq3(s.eval_du(0.5, 0.0), s.profile.eval_dt(0.5)));
+    }
+
+    #[test]
+    fn les_eval_du_v_independent() {
+        let s = std_les();
+        let at_v0 = s.eval_du(0.5, 0.0);
+        let at_v5 = s.eval_du(0.5, 5.0);
+        assert!(approx_eq3(at_v0, at_v5));
+    }
+
+    // ── LinearExtrusionSurface::eval_dv ───────────────────────────────────────
+
+    #[test]
+    fn les_eval_dv_is_direction() {
+        let s = std_les();
+        assert!(approx_eq3(s.eval_dv(0.0, 0.0), s.direction));
+        assert!(approx_eq3(s.eval_dv(0.7, 3.0), s.direction));
+    }
+
+    // ── LinearExtrusionSurface::eval_n ────────────────────────────────────────
+
+    #[test]
+    fn les_eval_n_unit_length() {
+        let s = std_les();
+        let n = s.eval_n(0.5, 1.0).unwrap();
+        assert!((n.length() - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn les_eval_n_perpendicular_to_du_and_dv() {
+        let s = std_les();
+        let n  = s.eval_n(0.5, 1.0).unwrap();
+        let du = s.eval_du(0.5, 1.0);
+        let dv = s.eval_dv(0.5, 1.0);
+        assert!(du.dot(n).abs() < 1e-14);
+        assert!(dv.dot(n).abs() < 1e-14);
+    }
+
+    #[test]
+    fn les_eval_n_none_on_degenerate_profile() {
+        // Degenerate profile: both endpoints the same → zero tangent everywhere
+        let profile = Curve3Kind::Line3(Line3::new(p(1.0, 1.0, 0.0), p(1.0, 1.0, 0.0)));
+        let s = LinearExtrusionSurface::new(profile, p(0.0, 0.0, 1.0));
+        assert!(s.eval_n(0.0, 0.0).is_none());
+    }
+
+    // ── LinearExtrusionSurface SurfaceKind delegation ─────────────────────────
+
+    #[test]
+    fn surfacekind_les_eval() {
+        let s = std_les();
+        let sk = SurfaceKind::Extrusion(s.clone());
+        assert!(approx_eq3(sk.eval(0.0, 0.0), s.eval(0.0, 0.0)));
+        assert!(approx_eq3(sk.eval(0.5, 2.0), s.eval(0.5, 2.0)));
+    }
+
+    #[test]
+    fn surfacekind_les_eval_n() {
+        let s = std_les();
+        let sk = SurfaceKind::Extrusion(s.clone());
+        assert_eq!(sk.eval_n(0.5, 1.0).is_some(), s.eval_n(0.5, 1.0).is_some());
+        let n_sk = sk.eval_n(0.5, 1.0).unwrap();
+        let n_s  = s.eval_n(0.5, 1.0).unwrap();
+        assert!(approx_eq3(n_sk, n_s));
+    }
+
+    // ── RevolutionSurface helpers ─────────────────────────────────────────────
+
+    /// Profile: Line3 from (1,0,0) to (2,0,0) (radial, no Z component).
+    /// Axis: Z through origin. This sweeps a flat annular strip.
+    fn std_rs() -> RevolutionSurface {
+        let profile = Curve3Kind::Line3(Line3::new(p(1.0, 0.0, 0.0), p(2.0, 0.0, 0.0)));
+        RevolutionSurface::new(profile, p(0.0, 0.0, 0.0), p(0.0, 0.0, 1.0))
+    }
+
+    // ── RevolutionSurface construction ────────────────────────────────────────
+
+    #[test]
+    fn rs_new_stores_fields() {
+        let s = std_rs();
+        assert_eq!(s.axis_origin, p(0.0, 0.0, 0.0));
+        assert_eq!(s.axis_dir,    p(0.0, 0.0, 1.0));
+        assert_eq!(s.profile.eval(0.0), p(1.0, 0.0, 0.0));
+    }
+
+    // ── RevolutionSurface::eval ───────────────────────────────────────────────
+
+    #[test]
+    fn rs_eval_at_u0() {
+        let s = std_rs();
+        // No rotation; eval equals profile.eval(v)
+        assert!(approx_eq3(s.eval(0.0, 0.0), p(1.0, 0.0, 0.0)));
+        assert!(approx_eq3(s.eval(0.0, 1.0), p(2.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn rs_eval_at_u_half_pi() {
+        let s = std_rs();
+        // 90° rotation of (1,0,0) around Z → (0,1,0)
+        let got = s.eval(std::f64::consts::FRAC_PI_2, 0.0);
+        assert!((got.x - 0.0).abs() < 1e-14);
+        assert!((got.y - 1.0).abs() < 1e-14);
+        assert!((got.z - 0.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn rs_eval_at_u_pi() {
+        let s = std_rs();
+        // 180° rotation of (1,0,0) around Z → (-1,0,0)
+        let got = s.eval(std::f64::consts::PI, 0.0);
+        assert!((got.x - -1.0).abs() < 1e-14);
+        assert!((got.y - 0.0).abs() < 1e-12);
+        assert!((got.z - 0.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn rs_eval_full_rotation() {
+        let s = std_rs();
+        // eval(2π, v) ≈ eval(0, v)
+        let a = s.eval(0.0, 0.5);
+        let b = s.eval(2.0 * std::f64::consts::PI, 0.5);
+        assert!(approx_eq3(a, b));
+    }
+
+    #[test]
+    fn rs_eval_on_axis() {
+        // Profile point on the Z axis: rotation should leave it unchanged
+        let profile = Curve3Kind::Line3(Line3::new(p(0.0, 0.0, 0.0), p(0.0, 0.0, 1.0)));
+        let s = RevolutionSurface::new(profile, p(0.0, 0.0, 0.0), p(0.0, 0.0, 1.0));
+        let pt = s.eval(1.23, 0.0);
+        assert!(approx_eq3(pt, p(0.0, 0.0, 0.0)));
+    }
+
+    // ── RevolutionSurface::eval_du ────────────────────────────────────────────
+
+    #[test]
+    fn rs_eval_du_perpendicular_to_axis() {
+        let s = std_rs();
+        let du = s.eval_du(0.0, 0.0);
+        assert!(s.axis_dir.dot(du).abs() < 1e-14);
+    }
+
+    #[test]
+    fn rs_eval_du_zero_on_axis() {
+        // When the profile point is on the axis, eval_du should be zero
+        let profile = Curve3Kind::Line3(Line3::new(p(0.0, 0.0, 0.0), p(0.0, 0.0, 1.0)));
+        let s = RevolutionSurface::new(profile, p(0.0, 0.0, 0.0), p(0.0, 0.0, 1.0));
+        let du = s.eval_du(0.7, 0.0); // profile.eval(0) = (0,0,0) = on axis
+        assert!(approx_eq3(du, p(0.0, 0.0, 0.0)));
+    }
+
+    // ── RevolutionSurface::eval_dv ────────────────────────────────────────────
+
+    #[test]
+    fn rs_eval_dv_at_u0() {
+        let s = std_rs();
+        // No rotation: dv should equal profile tangent
+        let dv = s.eval_dv(0.0, 0.5);
+        let tangent = s.profile.eval_dt(0.5);
+        assert!(approx_eq3(dv, tangent));
+    }
+
+    #[test]
+    fn rs_eval_dv_rotated() {
+        let s = std_rs();
+        // At u=π/2, profile tangent (1,0,0) rotated 90° around Z → (0,1,0)
+        let dv = s.eval_dv(std::f64::consts::FRAC_PI_2, 0.5);
+        assert!((dv.x - 0.0).abs() < 1e-14);
+        assert!((dv.y - 1.0).abs() < 1e-14);
+        assert!((dv.z - 0.0).abs() < 1e-14);
+    }
+
+    // ── RevolutionSurface::eval_n ─────────────────────────────────────────────
+
+    #[test]
+    fn rs_eval_n_unit_length() {
+        let s = std_rs();
+        let n = s.eval_n(0.5, 0.5).unwrap();
+        assert!((n.length() - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn rs_eval_n_perpendicular_to_du_and_dv() {
+        let s = std_rs();
+        let n  = s.eval_n(0.5, 0.5).unwrap();
+        let du = s.eval_du(0.5, 0.5);
+        let dv = s.eval_dv(0.5, 0.5);
+        assert!(du.dot(n).abs() < 1e-14);
+        assert!(dv.dot(n).abs() < 1e-14);
+    }
+
+    #[test]
+    fn rs_eval_n_none_on_axis() {
+        // Profile point on the axis → eval_du is zero → normal is None
+        let profile = Curve3Kind::Line3(Line3::new(p(0.0, 0.0, 0.0), p(0.0, 0.0, 1.0)));
+        let s = RevolutionSurface::new(profile, p(0.0, 0.0, 0.0), p(0.0, 0.0, 1.0));
+        assert!(s.eval_n(0.7, 0.0).is_none()); // profile.eval(0) = (0,0,0) = on axis
+    }
+
+    // ── RevolutionSurface SurfaceKind delegation ──────────────────────────────
+
+    #[test]
+    fn surfacekind_rs_eval() {
+        let s = std_rs();
+        let sk = SurfaceKind::Revolution(s.clone());
+        assert!(approx_eq3(sk.eval(0.0, 0.0), s.eval(0.0, 0.0)));
+        assert!(approx_eq3(sk.eval(std::f64::consts::FRAC_PI_2, 0.5), s.eval(std::f64::consts::FRAC_PI_2, 0.5)));
+    }
+
+    #[test]
+    fn surfacekind_rs_eval_n() {
+        let s = std_rs();
+        let sk = SurfaceKind::Revolution(s.clone());
+        let n_sk = sk.eval_n(0.5, 0.5).unwrap();
+        let n_s  = s.eval_n(0.5, 0.5).unwrap();
+        assert!(approx_eq3(n_sk, n_s));
+    }
+
+    // ── Path2D construction ───────────────────────────────────────────────────
+
+    #[test]
+    fn path2d_new_empty() {
+        let path = Path2D::new(uv(1.0, 2.0));
+        assert_eq!(path.start, uv(1.0, 2.0));
+        assert_eq!(path.segments.len(), 0);
+        assert!(!path.closed);
+    }
+
+    #[test]
+    fn path2d_new_current_pos_is_start() {
+        let path = Path2D::new(uv(3.0, 4.0));
+        assert_eq!(path.current_pos(), uv(3.0, 4.0));
+    }
+
+    // ── Path2D::line_to ───────────────────────────────────────────────────────
+
+    #[test]
+    fn path2d_line_to_adds_segment() {
+        let mut path = Path2D::new(uv(0.0, 0.0));
+        path.line_to(uv(1.0, 0.0));
+        assert_eq!(path.segments.len(), 1);
+        // segment should be a Line2 from start to end
+        assert_eq!(path.segments[0].eval(0.0), uv(0.0, 0.0));
+        assert_eq!(path.segments[0].eval(1.0), uv(1.0, 0.0));
+    }
+
+    #[test]
+    fn path2d_line_to_advances_current_pos() {
+        let mut path = Path2D::new(uv(0.0, 0.0));
+        path.line_to(uv(2.0, 3.0));
+        assert_eq!(path.current_pos(), uv(2.0, 3.0));
+    }
+
+    #[test]
+    fn path2d_line_to_chained() {
+        let mut path = Path2D::new(uv(0.0, 0.0));
+        path.line_to(uv(1.0, 0.0)).line_to(uv(1.0, 1.0));
+        assert_eq!(path.segments.len(), 2);
+        // second segment starts where first ended
+        assert_eq!(path.segments[1].eval(0.0), uv(1.0, 0.0));
+        assert_eq!(path.current_pos(), uv(1.0, 1.0));
+    }
+
+    // ── Path2D::arc_to ────────────────────────────────────────────────────────
+
+    #[test]
+    fn path2d_arc_to_adds_arc_segment() {
+        let mut path = Path2D::new(uv(1.0, 0.0));
+        path.arc_to(uv(0.0, 0.0), std::f64::consts::FRAC_PI_2); // 90° CCW around origin
+        assert_eq!(path.segments.len(), 1);
+        // should be a CircularArc2
+        matches!(path.segments[0], Curve2Kind::CircularArc2(_));
+    }
+
+    #[test]
+    fn path2d_arc_to_ccw_advances_current_pos() {
+        let mut path = Path2D::new(uv(1.0, 0.0));
+        path.arc_to(uv(0.0, 0.0), std::f64::consts::FRAC_PI_2); // 90° CCW → end at (0,1)
+        let pos = path.current_pos();
+        assert!((pos.u - 0.0).abs() < 1e-14);
+        assert!((pos.v - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn path2d_arc_to_cw_negative_sweep() {
+        let mut path = Path2D::new(uv(0.0, 1.0));
+        path.arc_to(uv(0.0, 0.0), -std::f64::consts::FRAC_PI_2); // 90° CW → end at (1,0)
+        let pos = path.current_pos();
+        assert!((pos.u - 1.0).abs() < 1e-14);
+        assert!((pos.v - 0.0).abs() < 1e-14);
+    }
+
+    // ── Path2D::close ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn path2d_close_sets_closed_flag() {
+        let mut path = Path2D::new(uv(0.0, 0.0));
+        path.line_to(uv(1.0, 0.0));
+        path.close();
+        assert!(path.closed);
+    }
+
+    #[test]
+    fn path2d_close_does_not_add_segment() {
+        let mut path = Path2D::new(uv(0.0, 0.0));
+        path.line_to(uv(1.0, 0.0));
+        let count_before = path.segments.len();
+        path.close();
+        assert_eq!(path.segments.len(), count_before);
+    }
+
+    // ── Path2D::line_to_close ─────────────────────────────────────────────────
+
+    #[test]
+    fn path2d_line_to_close_adds_segment() {
+        let mut path = Path2D::new(uv(0.0, 0.0));
+        path.line_to(uv(1.0, 0.0)).line_to(uv(1.0, 1.0));
+        path.line_to_close();
+        assert_eq!(path.segments.len(), 3);
+        // closing segment ends at start
+        assert_eq!(path.segments[2].eval(1.0), uv(0.0, 0.0));
+    }
+
+    #[test]
+    fn path2d_line_to_close_sets_closed_flag() {
+        let mut path = Path2D::new(uv(0.0, 0.0));
+        path.line_to(uv(1.0, 0.0));
+        path.line_to_close();
+        assert!(path.closed);
+    }
+
+    #[test]
+    fn path2d_line_to_close_current_pos_is_start() {
+        let mut path = Path2D::new(uv(2.0, 3.0));
+        path.line_to(uv(5.0, 3.0)).line_to(uv(5.0, 6.0));
+        path.line_to_close();
+        assert_eq!(path.current_pos(), uv(2.0, 3.0));
     }
 }

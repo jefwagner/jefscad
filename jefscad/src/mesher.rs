@@ -696,6 +696,9 @@ fn sample_loop_uvs(
                     uvs.push([p.u, p.v]);
                 }
             }
+            Curve2Kind::Polyline2(_) => {
+                todo!("UV sampling for Polyline2 not yet implemented")
+            }
             Curve2Kind::Nurbs(_) => {
                 todo!("UV sampling for NurbsCurve2 not yet implemented")
             }
