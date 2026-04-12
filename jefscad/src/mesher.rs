@@ -29,13 +29,13 @@ use crate::geom::{ConicalSurface, Curve2, Curve2Kind, CylindricalSurface, Plane,
 #[derive(Debug, Default, Clone)]
 pub struct TriMesh {
     /// 3-D vertex positions.
-    pub vertices:    Vec<[f32; 3]>,
+    pub vertices:    Vec<[f64; 3]>,
     /// Index triples — each triple defines one triangle.
     pub triangles:   Vec<[u32; 3]>,
     /// Per-triangle-corner normals; `tri_normals[t*3 + k]` for triangle `t`, corner `k`.
-    pub tri_normals: Vec<[f32; 3]>,
+    pub tri_normals: Vec<[f64; 3]>,
     /// Per-triangle-corner UV params; `tri_uvs[t*3 + k]` for triangle `t`, corner `k`.
-    pub tri_uvs:     Vec<[f32; 2]>,
+    pub tri_uvs:     Vec<[f64; 2]>,
 }
 
 // ── MeshOptions ───────────────────────────────────────────────────────────────
@@ -100,20 +100,20 @@ pub fn write_stl<W: std::io::Write>(mesh: &TriMesh, writer: &mut W) -> std::io::
         let (nx, ny, nz) = if len > 1e-15 {
             (nx / len, ny / len, nz / len)
         } else {
-            (0.0f32, 0.0f32, 1.0f32)
+            (0.0f64, 0.0f64, 1.0f64)
         };
 
-        // Normal
-        writer.write_all(&nx.to_le_bytes())?;
-        writer.write_all(&ny.to_le_bytes())?;
-        writer.write_all(&nz.to_le_bytes())?;
+        // Normal — STL format requires f32
+        writer.write_all(&(nx as f32).to_le_bytes())?;
+        writer.write_all(&(ny as f32).to_le_bytes())?;
+        writer.write_all(&(nz as f32).to_le_bytes())?;
 
-        // Three vertices
+        // Three vertices — STL format requires f32
         for &vi in tri {
             let v = mesh.vertices[vi as usize];
-            writer.write_all(&v[0].to_le_bytes())?;
-            writer.write_all(&v[1].to_le_bytes())?;
-            writer.write_all(&v[2].to_le_bytes())?;
+            writer.write_all(&(v[0] as f32).to_le_bytes())?;
+            writer.write_all(&(v[1] as f32).to_le_bytes())?;
+            writer.write_all(&(v[2] as f32).to_le_bytes())?;
         }
 
         // Attribute byte count
@@ -265,12 +265,12 @@ fn mesh_plane_face(
     } else {
         raw_n
     };
-    let normal = [out_n.x as f32, out_n.y as f32, out_n.z as f32];
+    let normal = [out_n.x, out_n.y, out_n.z];
 
     // 3-D vertex positions from surface eval
-    let vertices: Vec<[f32; 3]> = uvs.iter().map(|&[u, v]| {
+    let vertices: Vec<[f64; 3]> = uvs.iter().map(|&[u, v]| {
         let p = plane.eval(u, v);
-        [p.x as f32, p.y as f32, p.z as f32]
+        [p.x, p.y, p.z]
     }).collect();
 
     // Fan triangulation from vertex 0: triangles (0, i, i+1) for i in 1..n-1
@@ -282,7 +282,7 @@ fn mesh_plane_face(
         triangles.push([0u32, i as u32, (i + 1) as u32]);
         for &corner in &[0, i, i + 1] {
             tri_normals.push(normal);
-            tri_uvs.push([uvs[corner][0] as f32, uvs[corner][1] as f32]);
+            tri_uvs.push([uvs[corner][0], uvs[corner][1]]);
         }
     }
 
@@ -329,10 +329,10 @@ fn mesh_cylindrical_face(
         for ui in 0..nu {
             let u = ui as f64 * TAU / res as f64;
             let p = cyl.eval(u, v);
-            vertices.push([p.x as f32, p.y as f32, p.z as f32]);
+            vertices.push([p.x, p.y, p.z]);
             let n = cyl.eval_n(u, v).expect("CylindricalSurface normal is always defined");
-            vert_norms.push([n.x as f32, n.y as f32, n.z as f32]);
-            vert_uvs.push([u as f32, v as f32]);
+            vert_norms.push([n.x, n.y, n.z]);
+            vert_uvs.push([u, v]);
         }
     }
 
@@ -400,13 +400,13 @@ fn mesh_conical_face(
     // Vertices: index 0 = apex, indices 1..=res = base circle
     let apex_pos = cone.eval(0.0, 0.0);
     let mut vertices = Vec::with_capacity(res + 1);
-    vertices.push([apex_pos.x as f32, apex_pos.y as f32, apex_pos.z as f32]);
+    vertices.push([apex_pos.x, apex_pos.y, apex_pos.z]);
 
     let mut base_u = Vec::with_capacity(res);
     for j in 0..res {
         let u = j as f64 * TAU / res as f64;
         let p = cone.eval(u, v_max);
-        vertices.push([p.x as f32, p.y as f32, p.z as f32]);
+        vertices.push([p.x, p.y, p.z]);
         base_u.push(u);
     }
 
@@ -426,14 +426,14 @@ fn mesh_conical_face(
         let bv_next = vertices[next_idx as usize];
         let bv_curr = vertices[curr_idx as usize];
         let v1 = Point3::new(
-            bv_next[0] as f64 - apex_pos.x,
-            bv_next[1] as f64 - apex_pos.y,
-            bv_next[2] as f64 - apex_pos.z,
+            bv_next[0] - apex_pos.x,
+            bv_next[1] - apex_pos.y,
+            bv_next[2] - apex_pos.z,
         );
         let v2 = Point3::new(
-            bv_curr[0] as f64 - apex_pos.x,
-            bv_curr[1] as f64 - apex_pos.y,
-            bv_curr[2] as f64 - apex_pos.z,
+            bv_curr[0] - apex_pos.x,
+            bv_curr[1] - apex_pos.y,
+            bv_curr[2] - apex_pos.z,
         );
         let raw_n = v1.cross(v2);
         let len = (raw_n.x*raw_n.x + raw_n.y*raw_n.y + raw_n.z*raw_n.z).sqrt();
@@ -442,18 +442,18 @@ fn mesh_conical_face(
         } else {
             [0.0, 0.0, 1.0] // degenerate fallback
         };
-        let out_n: [f32; 3] = if sense == FaceSense::AntiAligned {
-            [-n[0] as f32, -n[1] as f32, -n[2] as f32]
+        let out_n: [f64; 3] = if sense == FaceSense::AntiAligned {
+            [-n[0], -n[1], -n[2]]
         } else {
-            [n[0] as f32, n[1] as f32, n[2] as f32]
+            n
         };
 
         // Triangle: (apex, base_next, base_curr)
         triangles.push([0u32, next_idx, curr_idx]);
         // apex corner UV (use u_curr so UV matches the adjacent base edge)
-        tri_uvs.push([u_curr as f32, 0.0f32]);
-        tri_uvs.push([u_next as f32, v_max as f32]);
-        tri_uvs.push([u_curr as f32, v_max as f32]);
+        tri_uvs.push([u_curr, 0.0]);
+        tri_uvs.push([u_next, v_max]);
+        tri_uvs.push([u_curr, v_max]);
         tri_normals.push(out_n);
         tri_normals.push(out_n);
         tri_normals.push(out_n);
@@ -504,16 +504,16 @@ fn mesh_spherical_face(
     let mut vert_norms  = Vec::with_capacity(n_verts);
     let mut vert_uvs    = Vec::with_capacity(n_verts);
 
-    let push_vert = |verts: &mut Vec<[f32; 3]>,
-                     norms: &mut Vec<[f32; 3]>,
-                     uvs:   &mut Vec<[f32; 2]>,
+    let push_vert = |verts: &mut Vec<[f64; 3]>,
+                     norms: &mut Vec<[f64; 3]>,
+                     uvs:   &mut Vec<[f64; 2]>,
                      u: f64, v: f64| {
         let p = sph.eval(u, v);
-        verts.push([p.x as f32, p.y as f32, p.z as f32]);
+        verts.push([p.x, p.y, p.z]);
         let n = sph.eval_n(u, v).expect("SphericalSurface::eval_n is always Some");
         let out_n = if sense == FaceSense::AntiAligned { [-n.x, -n.y, -n.z] } else { [n.x, n.y, n.z] };
-        norms.push([out_n[0] as f32, out_n[1] as f32, out_n[2] as f32]);
-        uvs.push([u as f32, v as f32]);
+        norms.push(out_n);
+        uvs.push([u, v]);
     };
 
     // South pole (u=0 is arbitrary; position and normal are u-independent)
