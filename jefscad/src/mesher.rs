@@ -46,11 +46,24 @@ pub struct MeshOptions {
     /// Number of segments per full circle (360°).  Higher values give smoother
     /// curved surfaces at the cost of more triangles.  Default: 32.
     pub resolution: u32,
+    /// Vertex-merging tolerance in world units.  After per-face tessellation,
+    /// vertices whose positions are within `epsilon` of each other are collapsed
+    /// to a single vertex, making the mesh watertight at shared edges.
+    ///
+    /// Default: `1e-8`.  Set to `0.0` (or any non-positive value) to skip merging.
+    ///
+    /// **Scale guidance (units = mm):** f64 floating-point noise between two
+    /// different surface evaluations of the same geometric point is well below
+    /// `1e-10` for geometry up to 300 mm, so the default `1e-8` merges all
+    /// genuine seam duplicates while leaving a 10 000× safety margin before
+    /// the nearest intentionally-distinct vertices (minimum tessellation spacing
+    /// at `resolution=32`, `r=0.01 mm` is ≈ 2×10⁻³ mm).
+    pub epsilon: f64,
 }
 
 impl Default for MeshOptions {
     fn default() -> Self {
-        Self { resolution: 32 }
+        Self { resolution: 32, epsilon: 1e-8 }
     }
 }
 
@@ -186,13 +199,65 @@ pub fn write_obj_file(mesh: &TriMesh, path: &std::path::Path) -> std::io::Result
     write_obj(mesh, &mut f)
 }
 
+// ── merge_vertices ────────────────────────────────────────────────────────────
+
+/// Merge vertices whose positions are within `epsilon` of each other.
+///
+/// Uses a quantised hash map: each coordinate is rounded to the nearest multiple
+/// of `epsilon` and the resulting `(i64, i64, i64)` triple is used as the key.
+/// The first vertex seen for a given key becomes the canonical representative;
+/// all later vertices that hash to the same key are remapped to it.
+///
+/// [`TriMesh::tri_normals`] and [`TriMesh::tri_uvs`] are per-triangle-corner and
+/// are copied unchanged — only `vertices` and the indices in `triangles` change.
+///
+/// If `epsilon` is zero or negative the mesh is returned unmodified.
+pub fn merge_vertices(mesh: &TriMesh, epsilon: f64) -> TriMesh {
+    if epsilon <= 0.0 {
+        return mesh.clone();
+    }
+
+    use std::collections::HashMap;
+
+    let inv_eps = 1.0 / epsilon;
+    let quantize = |x: f64| -> i64 { (x * inv_eps).round() as i64 };
+    let key      = |v: [f64; 3]| -> (i64, i64, i64) {
+        (quantize(v[0]), quantize(v[1]), quantize(v[2]))
+    };
+
+    let mut map: HashMap<(i64, i64, i64), u32> = HashMap::new();
+    let mut new_vertices: Vec<[f64; 3]>        = Vec::new();
+    let mut remap: Vec<u32>                    = Vec::with_capacity(mesh.vertices.len());
+
+    for &v in &mesh.vertices {
+        let idx = *map.entry(key(v)).or_insert_with(|| {
+            let idx = new_vertices.len() as u32;
+            new_vertices.push(v);
+            idx
+        });
+        remap.push(idx);
+    }
+
+    let new_triangles = mesh.triangles.iter()
+        .map(|&[a, b, c]| [remap[a as usize], remap[b as usize], remap[c as usize]])
+        .collect();
+
+    TriMesh {
+        vertices:    new_vertices,
+        triangles:   new_triangles,
+        tri_normals: mesh.tri_normals.clone(),
+        tri_uvs:     mesh.tri_uvs.clone(),
+    }
+}
+
 // ── mesh_solid ────────────────────────────────────────────────────────────────
 
 /// Tessellate all faces of solid `sid` and return a combined [`TriMesh`].
 ///
 /// Each face is tessellated independently by the internal `mesh_face` function.
 /// The resulting per-face meshes are concatenated with triangle indices adjusted
-/// to the global vertex offset.
+/// to the global vertex offset, then [`merge_vertices`] is applied to produce a
+/// watertight mesh (controlled by [`MeshOptions::epsilon`]).
 pub fn mesh_solid(ctx: &SolidModelingContext, sid: SolidId, opts: &MeshOptions) -> TriMesh {
     let shell_id = ctx.get_solid(sid).outer;
     let face_ids: Vec<FaceId> = ctx.get_shell(shell_id).faces.clone();
@@ -212,7 +277,7 @@ pub fn mesh_solid(ctx: &SolidModelingContext, sid: SolidId, opts: &MeshOptions) 
         }
     }
 
-    out
+    merge_vertices(&out, opts.epsilon)
 }
 
 // ── mesh_face ─────────────────────────────────────────────────────────────────
@@ -642,7 +707,7 @@ mod test {
     fn mesh_prim_res(node: &CsgNode, resolution: u32) -> TriMesh {
         let mut ctx = SolidModelingContext::new();
         let sid = compile_csg_node(&mut ctx, node);
-        mesh_solid(&ctx, sid, &MeshOptions { resolution })
+        mesh_solid(&ctx, sid, &MeshOptions { resolution, ..MeshOptions::default() })
     }
 
     fn check_invariants(mesh: &TriMesh) {
@@ -658,6 +723,45 @@ mod test {
                     "triangle index {idx} out of range (vertices.len() = {nv})");
             }
         }
+    }
+
+    // ── merge_vertices ───────────────────────────────────────────────────────
+
+    fn unmerged_prim(node: &CsgNode) -> TriMesh {
+        // mesh_solid with epsilon=0 to get the pre-merge mesh
+        let mut ctx = SolidModelingContext::new();
+        let sid = compile_csg_node(&mut ctx, node);
+        mesh_solid(&ctx, sid, &MeshOptions { resolution: 32, epsilon: 0.0 })
+    }
+
+    #[test]
+    fn merge_vertices_no_op_when_epsilon_zero() {
+        let mesh = unmerged_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
+        let merged = merge_vertices(&mesh, 0.0);
+        assert_eq!(merged.vertices.len(), mesh.vertices.len());
+    }
+
+    #[test]
+    fn merge_vertices_cuboid_collapses_to_8() {
+        let mesh = unmerged_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
+        assert_eq!(mesh.vertices.len(), 24, "pre-merge should be 24");
+        let merged = merge_vertices(&mesh, 1e-8);
+        assert_eq!(merged.vertices.len(), 8);
+    }
+
+    #[test]
+    fn merge_vertices_cylinder_collapses_to_64() {
+        let mesh = unmerged_prim(&CsgNode::cylinder(1.0, 2.0));
+        assert_eq!(mesh.vertices.len(), 130, "pre-merge should be 130");
+        let merged = merge_vertices(&mesh, 1e-8);
+        assert_eq!(merged.vertices.len(), 64);
+    }
+
+    #[test]
+    fn merge_vertices_invariants_hold() {
+        let mesh = unmerged_prim(&CsgNode::sphere(1.5));
+        let merged = merge_vertices(&mesh, 1e-8);
+        check_invariants(&merged);
     }
 
     // ── OBJ export ───────────────────────────────────────────────────────────
@@ -680,9 +784,10 @@ mod test {
 
     #[test]
     fn obj_cuboid_vertex_line_count() {
+        // 8 unique corners after vertex merging
         let mesh = mesh_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
         let s = obj_string(&mesh);
-        assert_eq!(count_lines_starting_with(&s, "v "), 24);
+        assert_eq!(count_lines_starting_with(&s, "v "), 8);
     }
 
     #[test]
@@ -695,7 +800,7 @@ mod test {
     #[test]
     fn obj_cuboid_face_indices_valid() {
         let mesh = mesh_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
-        let n_verts  = mesh.vertices.len();       // 24
+        let n_verts  = mesh.vertices.len();       // 8 after merge
         let n_corners = mesh.triangles.len() * 3; // 36
         let s = obj_string(&mesh);
 
@@ -804,9 +909,9 @@ mod test {
 
     #[test]
     fn mesh_solid_cuboid_vertex_count() {
-        // 6 faces × 4 vertices each (no sharing across faces) = 24
+        // 8 unique corners (3 faces share each corner); merge collapses 24 → 8
         let mesh = mesh_prim(&CsgNode::cuboid(2.0, 3.0, 4.0));
-        assert_eq!(mesh.vertices.len(), 24);
+        assert_eq!(mesh.vertices.len(), 8);
     }
 
     #[test]
@@ -844,11 +949,10 @@ mod test {
 
     #[test]
     fn mesh_solid_cylinder_vertex_count() {
-        // lateral:  (resolution + 1) × 2 = 33 × 2 = 66
-        // 2 caps:   2 × resolution = 2 × 32 = 64
-        // total: 130
+        // 32 unique base-circle positions + 32 unique top-circle positions = 64
+        // (lateral seam duplicate + cap vertices all collapse onto the two circles)
         let mesh = mesh_prim_res(&CsgNode::cylinder(1.0, 2.0), 32);
-        assert_eq!(mesh.vertices.len(), (32 + 1) * 2 + 2 * 32);
+        assert_eq!(mesh.vertices.len(), 32 + 32);
     }
 
     #[test]
@@ -873,11 +977,10 @@ mod test {
 
     #[test]
     fn mesh_solid_cone_vertex_count() {
-        // lateral:  1 apex + resolution base = 33
-        // base cap: resolution = 32
-        // total: 65
+        // 1 apex + 32 base-circle positions = 33
+        // (cap vertices collapse onto the lateral base ring)
         let mesh = mesh_prim_res(&CsgNode::cone(1.0, 2.0), 32);
-        assert_eq!(mesh.vertices.len(), (32 + 1) + 32);
+        assert_eq!(mesh.vertices.len(), 1 + 32);
     }
 
     #[test]
@@ -913,9 +1016,10 @@ mod test {
 
     #[test]
     fn mesh_solid_sphere_vertex_count() {
-        // 2 poles + 15 rings × 33 columns = 2 + 495 = 497
+        // 2 + 15 rings × 33 columns = 497 pre-merge;
+        // 15 seam duplicate pairs collapse → 497 - 15 = 482
         let mesh = mesh_prim_res(&CsgNode::sphere(1.0), 32);
-        assert_eq!(mesh.vertices.len(), 2 + 15 * 33);
+        assert_eq!(mesh.vertices.len(), 2 + 15 * 33 - 15);
     }
 
     #[test]

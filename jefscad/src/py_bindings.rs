@@ -139,7 +139,7 @@ impl PyNode {
         use crate::brep_kernel::SolidModelingContext;
         let mut ctx = SolidModelingContext::new();
         let sid = compile_csg_node(&mut ctx, &self.inner);
-        let tri_mesh = mesh_solid(&ctx, sid, &MeshOptions { resolution });
+        let tri_mesh = mesh_solid(&ctx, sid, &MeshOptions { resolution, ..MeshOptions::default() });
         PyMesh { inner: tri_mesh }
     }
 

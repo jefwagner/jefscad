@@ -389,7 +389,9 @@ UV domains for our four surface types — all simple, no general polygon trimmin
 - [x] `SphericalSurface`: (n_lon+1)×(n_lat-1) grid + 2 pole vertices; n_lon=resolution,
       n_lat=max(2, resolution/2); south/north fans + middle strips; analytic eval_n smooth
       everywhere including poles (no special-casing); 304 tests
-- [_] Watertightness: post-merge coincident vertices by position after per-face meshing
+- [x] Watertightness: `merge_vertices(mesh, epsilon)` — quantised hash map (i64 key),
+      epsilon=1e-8 default in MeshOptions; called automatically by `mesh_solid`;
+      cuboid 24→8, cylinder 130→64, cone 65→33, sphere 497→482 vertices; 316 Rust tests
 
 #### Step 3 — File export
 - [x] Binary STL: `write_stl<W: Write>(mesh, writer)` + `write_stl_file(mesh, path)`;
