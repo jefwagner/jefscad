@@ -415,13 +415,13 @@ returns a `PyMesh`.  Rationale:
 - *Current cost is zero*: `compile_csg_node` rebuilds from scratch anyway, so a
   persistent context provides no speedup today.
 
-- [_] `PyMesh` class wrapping `TriMesh`
-- [_] `PyNode::mesh(resolution=32) -> PyMesh`
-  - creates a fresh `SolidModelingContext` internally, calls `compile_csg_node`,
-    then `mesh_solid`; context is dropped on return
-- [_] `PyMesh::save_stl(path)`, `PyMesh::save_obj(path)`
+- [x] `PyMesh` class wrapping `TriMesh`: `triangle_count`, `vertex_count` properties,
+      `save_stl(path)`, `save_obj(path)` methods, `__repr__`
+- [x] `PyNode::mesh(resolution=32) -> PyMesh`: creates fresh `SolidModelingContext`
+      internally, calls `compile_csg_node` + `mesh_solid`, drops context on return
+- [x] `Mesh` exported from `jefscad.__init__`; 49 pytest + 312 Rust tests passing
 
-Deliverable for Phase 4:
+Deliverable for Phase 4: ✓
 - `sphere(2.5).translate(0,0,1).mesh().save_stl("out.stl")` works end-to-end.
 
 ---

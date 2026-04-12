@@ -7,6 +7,8 @@ are already covered by the Rust unit tests in csg_lang.rs.
 """
 
 import math
+import os
+import tempfile
 import jefscad
 
 
@@ -298,3 +300,31 @@ def test_str_tree_connectors_present():
     s = str(jefscad.union(jefscad.sphere(1.0), jefscad.cuboid(2.0, 2.0, 2.0)))
     assert "├──" in s
     assert "└──" in s
+
+# ---------------------------------------------------------------------------
+# Group N — Mesh / tessellation
+# ---------------------------------------------------------------------------
+
+def test_mesh_returns_mesh_instance():
+    assert isinstance(jefscad.sphere(1.0).mesh(), jefscad.Mesh)
+
+
+def test_mesh_resolution_affects_triangle_count():
+    lo = jefscad.sphere(1.0).mesh(resolution=16).triangle_count
+    hi = jefscad.sphere(1.0).mesh(resolution=32).triangle_count
+    assert lo < hi
+
+
+def test_mesh_save_stl(tmp_path):
+    path = str(tmp_path / "cuboid.stl")
+    jefscad.cuboid(1.0, 1.0, 1.0).mesh().save_stl(path)
+    # binary STL: 80-byte header + 4-byte count + 12 triangles × 50 bytes = 684
+    assert os.path.getsize(path) == 684
+
+
+def test_mesh_save_obj(tmp_path):
+    path = str(tmp_path / "cuboid.obj")
+    jefscad.cuboid(1.0, 1.0, 1.0).mesh().save_obj(path)
+    content = open(path).read()
+    assert any(l.startswith("v ") for l in content.splitlines())
+    assert any(l.startswith("f ") for l in content.splitlines())

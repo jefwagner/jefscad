@@ -8,14 +8,14 @@ augmentations on top of the Rust layer.
 """
 
 from ._jefscad import (  # noqa: F401
-    Node,
+    Mesh, Node,
     sphere, cuboid, cylinder, cone,
     union, intersection, difference,
     select_largest, select_closest_to, select_contains,
 )
 
 __all__ = [
-    "Node",
+    "Mesh", "Node",
     "sphere", "cuboid", "cylinder", "cone",
     "union", "intersection", "difference",
     "select_largest", "select_closest_to", "select_contains",

@@ -12,6 +12,74 @@ use std::sync::Arc;
 #[cfg(feature = "extension-module")]
 use crate::csg_lang::{CsgNode, SelectPolicy};
 
+#[cfg(feature = "extension-module")]
+use crate::mesher::{MeshOptions, TriMesh, mesh_solid, write_stl, write_obj};
+
+// ---------------------------------------------------------------------------
+// Python-visible Mesh class
+// ---------------------------------------------------------------------------
+
+/// A triangle mesh produced by tessellating a CSG solid.
+///
+/// Obtain one via `Node.mesh(resolution=32)`. Export with `save_stl` or `save_obj`.
+#[cfg(feature = "extension-module")]
+#[gen_stub_pyclass]
+#[pyclass(name = "Mesh")]
+pub struct PyMesh {
+    inner: TriMesh,
+}
+
+#[cfg(feature = "extension-module")]
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyMesh {
+    /// Number of triangles in the mesh.
+    #[getter]
+    fn triangle_count(&self) -> usize {
+        self.inner.triangles.len()
+    }
+
+    /// Number of vertices in the mesh.
+    #[getter]
+    fn vertex_count(&self) -> usize {
+        self.inner.vertices.len()
+    }
+
+    /// Write the mesh to a binary STL file at `path`.
+    fn save_stl(&self, path: &str) -> PyResult<()> {
+        write_stl_file_py(&self.inner, path)
+    }
+
+    /// Write the mesh to a Wavefront OBJ file at `path`.
+    fn save_obj(&self, path: &str) -> PyResult<()> {
+        write_obj_file_py(&self.inner, path)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Mesh(triangles={}, vertices={})",
+            self.inner.triangles.len(),
+            self.inner.vertices.len(),
+        )
+    }
+}
+
+#[cfg(feature = "extension-module")]
+fn write_stl_file_py(mesh: &TriMesh, path: &str) -> PyResult<()> {
+    let mut f = std::fs::File::create(path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    write_stl(mesh, &mut f)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+}
+
+#[cfg(feature = "extension-module")]
+fn write_obj_file_py(mesh: &TriMesh, path: &str) -> PyResult<()> {
+    let mut f = std::fs::File::create(path)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    write_obj(mesh, &mut f)
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // Python-visible Node class
 // ---------------------------------------------------------------------------
@@ -53,6 +121,26 @@ impl PyNode {
 
     fn __str__(&self) -> String {
         format!("{}", self.inner)
+    }
+
+    // --- mesh ---------------------------------------------------------------
+
+    /// Tessellate this node into a triangle mesh.
+    ///
+    /// Args:
+    ///     resolution: Number of segments per full circle (default 32).
+    ///                 Higher values give smoother curves at the cost of more triangles.
+    ///
+    /// Returns:
+    ///     A `Mesh` object with `save_stl` and `save_obj` export methods.
+    #[pyo3(signature = (resolution=32))]
+    fn mesh(&self, resolution: u32) -> PyMesh {
+        use crate::brep_compiler::compile_csg_node;
+        use crate::brep_kernel::SolidModelingContext;
+        let mut ctx = SolidModelingContext::new();
+        let sid = compile_csg_node(&mut ctx, &self.inner);
+        let tri_mesh = mesh_solid(&ctx, sid, &MeshOptions { resolution });
+        PyMesh { inner: tri_mesh }
     }
 
     // --- transform methods --------------------------------------------------
@@ -218,6 +306,7 @@ fn select_contains(node: Bound<'_, PyNode>, point: [f64; 3]) -> PyNode {
 
 #[cfg(feature = "extension-module")]
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyMesh>()?;
     m.add_class::<PyNode>()?;
     m.add_function(wrap_pyfunction!(sphere, m)?)?;
     m.add_function(wrap_pyfunction!(cuboid, m)?)?;
