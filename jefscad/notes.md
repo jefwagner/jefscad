@@ -399,9 +399,26 @@ UV domains for our four surface types — all simple, no general polygon trimmin
 - [_] glTF — deferred until STL/OBJ are working
 
 #### Step 4 — Python binding
+
+**Design decision: hide `SolidModelingContext` from Python users.**
+
+`SolidModelingContext` is not exposed as a Python type.  `PyNode.mesh()` creates
+a fresh context internally on every call, compiles the CSG tree, tessellates, and
+returns a `PyMesh`.  Rationale:
+
+- *Jupyter ergonomics*: the full round-trip is a single expression —
+  `sphere(r=1.5).mesh().save_stl("out.stl")` — with no setup object to manage.
+- *Clean-slate semantics*: re-running a notebook cell always starts fresh; no
+  stale B-rep data accumulates in a long-lived context.
+- *Future-proof*: sub-tree caching (keyed on `geom_id`) can be added inside
+  `.mesh()` transparently later without changing the Python API.
+- *Current cost is zero*: `compile_csg_node` rebuilds from scratch anyway, so a
+  persistent context provides no speedup today.
+
 - [_] `PyMesh` class wrapping `TriMesh`
 - [_] `PyNode::mesh(resolution=32) -> PyMesh`
-  - creates `SolidModelingContext`, calls `compile_csg_node`, then `mesh_solid`
+  - creates a fresh `SolidModelingContext` internally, calls `compile_csg_node`,
+    then `mesh_solid`; context is dropped on return
 - [_] `PyMesh::save_stl(path)`, `PyMesh::save_obj(path)`
 
 Deliverable for Phase 4:
