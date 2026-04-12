@@ -378,7 +378,11 @@ UV domains for our four surface types — all simple, no general polygon trimmin
       radial analytic normals; seam at u=0/2π has duplicate positions, separate UVs; 296 tests
 - [x] `ConicalSurface`: apex-fan: 1 apex + resolution base vertices; cross-product flat normals
       (avoids apex singularity); winding (apex, base_next, base_curr) for outward normal; 300 tests
-  - [REVISIT] Flat normals make the cone look faceted.  The lateral surface is smooth
+  - [DONE] Hybrid normals implemented: base-circle corners use analytic eval_n
+    (smooth shading around circumference); apex corner uses flat cross-product
+    normal per triangle (singularity — no single outward normal definable).
+    Verified by mesh_solid_cone_lateral_normals_hybrid test. 317 Rust tests.
+  - [REVISIT — lower priority] Further improvement possible if needed:  The lateral surface is smooth
     everywhere except the apex (eval_n returns None at v=0).  Base-circle vertices can
     use analytic normals from eval_n(u, v_max).  The apex is the hard case: no single
     well-defined normal exists there — one option is to omit the apex vertex from the

@@ -434,8 +434,14 @@ fn mesh_cylindrical_face(
 /// Tessellate the lateral face of a [`ConicalSurface`].
 ///
 /// Uses an apex-fan: 1 apex vertex + `resolution` base-circle vertices forming
-/// `resolution` triangles.  Normals are computed via cross product (flat shading)
-/// to avoid the singularity where [`ConicalSurface::eval_n`] returns `None` at v=0.
+/// `resolution` triangles.
+///
+/// **Normals (hybrid):**
+/// - Base-circle corners: analytic `eval_n(u, v_max)` — smooth shading around
+///   the circumference.
+/// - Apex corner: flat cross-product normal for that triangle — the apex is a
+///   geometric singularity where no single outward normal is definable, so the
+///   per-face normal is the most honest representation.
 ///
 /// Triangle winding: `(apex, base_next, base_curr)` produces an outward-facing
 /// cross product for [`FaceSense::Aligned`] faces.  The face sense is respected by
@@ -487,7 +493,8 @@ fn mesh_conical_face(
         let u_curr = base_u[j];
         let u_next = if j + 1 < res { base_u[j + 1] } else { TAU };
 
-        // Outward normal via cross product: (base_next - apex) × (base_curr - apex)
+        // Apex normal: flat cross-product for this triangle
+        //   (base_next - apex) × (base_curr - apex)
         let bv_next = vertices[next_idx as usize];
         let bv_curr = vertices[curr_idx as usize];
         let v1 = Point3::new(
@@ -502,26 +509,34 @@ fn mesh_conical_face(
         );
         let raw_n = v1.cross(v2);
         let len = (raw_n.x*raw_n.x + raw_n.y*raw_n.y + raw_n.z*raw_n.z).sqrt();
-        let n = if len > 1e-15 {
+        let flat_n = if len > 1e-15 {
             [raw_n.x/len, raw_n.y/len, raw_n.z/len]
         } else {
             [0.0, 0.0, 1.0] // degenerate fallback
         };
-        let out_n: [f64; 3] = if sense == FaceSense::AntiAligned {
-            [-n[0], -n[1], -n[2]]
-        } else {
-            n
+
+        // Base-circle corners: analytic normals (smooth around circumference)
+        let an_next = cone.eval_n(u_next, v_max)
+            .expect("eval_n is defined for v > 0");
+        let an_curr = cone.eval_n(u_curr, v_max)
+            .expect("eval_n is defined for v > 0");
+
+        let flip = sense == FaceSense::AntiAligned;
+        let sign = |n: [f64; 3]| -> [f64; 3] {
+            if flip { [-n[0], -n[1], -n[2]] } else { n }
         };
+        let apex_n      = sign(flat_n);
+        let base_next_n = sign([an_next.x, an_next.y, an_next.z]);
+        let base_curr_n = sign([an_curr.x, an_curr.y, an_curr.z]);
 
         // Triangle: (apex, base_next, base_curr)
         triangles.push([0u32, next_idx, curr_idx]);
-        // apex corner UV (use u_curr so UV matches the adjacent base edge)
         tri_uvs.push([u_curr, 0.0]);
         tri_uvs.push([u_next, v_max]);
         tri_uvs.push([u_curr, v_max]);
-        tri_normals.push(out_n);
-        tri_normals.push(out_n);
-        tri_normals.push(out_n);
+        tri_normals.push(apex_n);
+        tri_normals.push(base_next_n);
+        tri_normals.push(base_curr_n);
     }
 
     TriMesh { vertices, triangles, tri_normals, tri_uvs }
@@ -990,6 +1005,26 @@ mod test {
             let len = (n[0]*n[0] + n[1]*n[1] + n[2]*n[2]).sqrt();
             assert!((len - 1.0).abs() < 1e-5, "normal {n:?} has length {len}");
         }
+    }
+
+    #[test]
+    fn mesh_solid_cone_lateral_normals_hybrid() {
+        // Hybrid normals: within each lateral triangle the apex corner's normal
+        // must differ from the two base-circle corners' normals.
+        // (Before this change all three corners had the same flat normal.)
+        let mesh = mesh_prim(&CsgNode::cone(1.0, 2.0));
+        let mut found_difference = false;
+        for t in 0..mesh.triangles.len() {
+            let n_apex      = mesh.tri_normals[t * 3];
+            let n_base_next = mesh.tri_normals[t * 3 + 1];
+            let n_base_curr = mesh.tri_normals[t * 3 + 2];
+            if n_apex != n_base_next || n_apex != n_base_curr {
+                found_difference = true;
+                break;
+            }
+        }
+        assert!(found_difference,
+            "apex corner normals should differ from base corner normals");
     }
 
     #[test]
