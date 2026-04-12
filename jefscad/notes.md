@@ -501,14 +501,18 @@ Each segment becomes its own face in the B-rep (one surface per segment).
 - [x] Add `Path2D` struct to `geom.rs`
   - `new`, `line_to`, `arc_to`, `close`, `line_to_close`, `current_pos` methods
   - 13 tests, all passing
-- [ ] `build_extrusion(ctx, path, height, prov_id, geom_id) -> SolidId`
+- [x] `build_extrusion(ctx, path, height, prov_id, geom_id) -> SolidId`
   - Validates closed path (via KernelTolerance)
   - One lateral face per segment (LinearExtrusionSurface)
   - Bottom and top cap faces (Plane)
-- [ ] `build_revolution(ctx, path, prov_id, geom_id) -> SolidId`
+  - 27 tests, all passing
+- [x] `build_revolution(ctx, path, prov_id, geom_id) -> SolidId`
   - Validates endpoint-on-axis rule and case classification
   - One lateral face per segment (RevolutionSurface)
   - Disk cap face(s) where endpoint is off-axis; degenerate (point) caps where on-axis
+  - 19 tests, all passing
+  - All lateral faces: FaceSense::Aligned (RevolutionSurface natural normal is outward for
+    standard profiles). End cap: Fwd circle + Aligned (outward +Z). Start cap: Rev + AntiAligned.
 - [ ] Add `CsgPrim::Extrude { path, height }` and `CsgPrim::Revolve { path }` variants
 - [ ] Python `Path2D` wrapper with `extrude(height) -> Node` and `revolve() -> Node`
 

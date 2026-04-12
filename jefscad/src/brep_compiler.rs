@@ -9,8 +9,9 @@ use crate::brep_kernel::{
     Shell, Solid, SolidId, SolidModelingContext, Vertex,
 };
 use crate::geom::{
-    CircularArc2, CircularArc3, ConicalSurface, Curve2Kind, Curve3Kind, CylindricalSurface,
-    Line2, Line3, Plane, Point2, Point3, SphericalSurface, SurfaceKind,
+    CircularArc2, CircularArc3, ConicalSurface, Curve2, Curve2Kind, Curve3Kind, CylindricalSurface,
+    Line2, Line3, LinearExtrusionSurface, Path2D, Plane, Point2, Point3, Polyline3,
+    RevolutionSurface, SphericalSurface, SurfaceKind,
 };
 
 // ── build_cuboid ──────────────────────────────────────────────────────────────
@@ -674,6 +675,477 @@ pub fn build_sphere(
     }
 
     solid_id
+}
+
+// ── build_extrusion ───────────────────────────────────────────────────────────
+
+/// Reasons `build_extrusion` can fail.
+#[derive(Debug, PartialEq)]
+pub enum ExtrusionError {
+    /// `path.closed` is `false`.
+    PathNotClosed,
+    /// `path.segments` is empty.
+    PathEmpty,
+    /// `height` is zero or negative.
+    NonPositiveHeight,
+    /// `path.closed` is `true` but `path.current_pos()` is not within
+    /// `ctx.tolerance.pos_tol` of `path.start`.
+    GeometricallyOpen,
+}
+
+/// End-point (at t_max) of a `Curve2Kind`.
+fn curve2_end(c: &Curve2Kind) -> Point2 {
+    match c {
+        Curve2Kind::Line2(l)        => l.p1,
+        Curve2Kind::CircularArc2(a) => a.eval(a.t1),
+        Curve2Kind::Polyline2(pl)   => *pl.points.last().expect("Polyline2 has points"),
+        Curve2Kind::Nurbs(_)        => todo!("curve2_end for NurbsCurve2"),
+    }
+}
+
+/// Parameter range `[t_min, t_max]` of a `Curve2Kind`.
+fn curve2_t_range(c: &Curve2Kind) -> (f64, f64) {
+    match c {
+        Curve2Kind::Line2(l)        => (l.t_min, l.t_max),
+        Curve2Kind::CircularArc2(a) => (a.t0, a.t1),
+        Curve2Kind::Polyline2(pl)   => (0.0, pl.n_segments() as f64),
+        Curve2Kind::Nurbs(_)        => todo!("curve2_t_range for NurbsCurve2"),
+    }
+}
+
+/// Lift a 2-D path segment to a 3-D curve at height `z`.
+///
+/// For line segments the result is a `Line3` in the z=`z` plane.
+/// For circular arcs the result is a `CircularArc3` with `normal = +Z`, `ref_dir = +X`,
+/// preserving the same angle parameterization so edge t-values stay compatible.
+fn lift_curve2(c: &Curve2Kind, z: f64) -> Curve3Kind {
+    let p3 = |u: f64, v: f64| Point3::new(u, v, z);
+    match c {
+        Curve2Kind::Line2(l) => Curve3Kind::Line3(
+            Line3::new(p3(l.p0.u, l.p0.v), p3(l.p1.u, l.p1.v)),
+        ),
+        Curve2Kind::CircularArc2(a) => Curve3Kind::CircularArc3(
+            CircularArc3::new(
+                p3(a.center.u, a.center.v),
+                Point3::new(0.0, 0.0, 1.0), // normal = +Z
+                Point3::new(1.0, 0.0, 0.0), // ref_dir = +X (angle measured from +X)
+                a.radius,
+                a.t0,
+                a.t1,
+            ),
+        ),
+        Curve2Kind::Polyline2(pl) => Curve3Kind::Polyline3(
+            Polyline3::new(pl.points.iter().map(|pt| Point3::new(pt.u, pt.v, z)).collect()),
+        ),
+        Curve2Kind::Nurbs(_) => todo!("lift NurbsCurve2 to Curve3Kind"),
+    }
+}
+
+/// Lift a 2-D profile segment to a 3-D curve in the x-z half-plane (y = 0).
+///
+/// Used for revolution seam edges.  `Path2D` coordinates `(u, v)` map to 3-D `(u, 0, v)`.
+fn lift_xz_curve2(c: &Curve2Kind) -> Curve3Kind {
+    let p3 = |u: f64, v: f64| Point3::new(u, 0.0, v);
+    match c {
+        Curve2Kind::Line2(l) => Curve3Kind::Line3(
+            Line3::new(p3(l.p0.u, l.p0.v), p3(l.p1.u, l.p1.v)),
+        ),
+        Curve2Kind::CircularArc2(a) => Curve3Kind::CircularArc3(
+            CircularArc3::new(
+                p3(a.center.u, a.center.v),
+                Point3::new(0.0, 1.0, 0.0), // normal = +Y  (the x-z plane)
+                Point3::new(1.0, 0.0, 0.0), // ref_dir = +X
+                a.radius,
+                a.t0,
+                a.t1,
+            ),
+        ),
+        Curve2Kind::Polyline2(pl) => Curve3Kind::Polyline3(
+            Polyline3::new(pl.points.iter().map(|pt| Point3::new(pt.u, 0.0, pt.v)).collect()),
+        ),
+        Curve2Kind::Nurbs(_) => todo!("lift_xz_curve2 for NurbsCurve2"),
+    }
+}
+
+/// Build the B-rep solid for a linear extrusion of a closed [`Path2D`] by `height`
+/// along +Z.
+///
+/// The path is assumed to lie in the X-Y plane (z = 0).  Each segment becomes one
+/// lateral face backed by a [`LinearExtrusionSurface`].  Bottom and top caps are
+/// flat [`Plane`] faces.
+///
+/// Topology for an N-segment path: 2N vertices, 3N edges, N+2 faces, 6N coedges.
+///
+/// # Errors
+/// Returns [`ExtrusionError`] if the path is not closed, empty, the height is
+/// non-positive, or the path is geometrically open (endpoints don't meet within
+/// `ctx.tolerance.pos_tol`).
+pub fn build_extrusion(
+    ctx: &mut SolidModelingContext,
+    path: &Path2D,
+    height: f64,
+    prov_id: u64,
+    geom_id: u64,
+) -> Result<SolidId, ExtrusionError> {
+    // ── Validation ────────────────────────────────────────────────────────────
+    if !path.closed               { return Err(ExtrusionError::PathNotClosed);    }
+    if path.segments.is_empty()   { return Err(ExtrusionError::PathEmpty);        }
+    if height <= 0.0              { return Err(ExtrusionError::NonPositiveHeight); }
+    {
+        let cp = path.current_pos();
+        let dx = cp.u - path.start.u;
+        let dy = cp.v - path.start.v;
+        if (dx * dx + dy * dy).sqrt() > ctx.tolerance.pos_tol {
+            return Err(ExtrusionError::GeometricallyOpen);
+        }
+    }
+
+    let n   = path.segments.len();
+    let h   = height;
+    let tol = ctx.tolerance.pos_tol;
+    let p3  = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+    let p2  = |u: f64, v: f64| Point2::new(u, v);
+    let up  = p3(0.0, 0.0, 1.0);
+
+    // ── Knot points ───────────────────────────────────────────────────────────
+    // knots[i] = 2-D start of segment i (= end of segment i-1 for a closed path).
+    let mut knots: Vec<Point2> = Vec::with_capacity(n);
+    knots.push(path.start);
+    for seg in &path.segments[..n - 1] {
+        knots.push(curve2_end(seg));
+    }
+
+    // ── Vertices: N bottom (z=0) + N top (z=h) ───────────────────────────────
+    let verts_bot: Vec<_> = knots.iter()
+        .map(|k| ctx.push_vertex(Vertex::new(p3(k.u, k.v, 0.0), tol)))
+        .collect();
+    let verts_top: Vec<_> = knots.iter()
+        .map(|k| ctx.push_vertex(Vertex::new(p3(k.u, k.v, h), tol)))
+        .collect();
+
+    // ── Curves3: N bottom + N top (lifted from path) + N vertical seams ──────
+    let c3_bot: Vec<_>  = path.segments.iter()
+        .map(|s| ctx.push_curve3(lift_curve2(s, 0.0)))
+        .collect();
+    let c3_top: Vec<_>  = path.segments.iter()
+        .map(|s| ctx.push_curve3(lift_curve2(s, h)))
+        .collect();
+    let c3_seam: Vec<_> = knots.iter()
+        .map(|k| ctx.push_curve3(Curve3Kind::Line3(
+            Line3::new(p3(k.u, k.v, 0.0), p3(k.u, k.v, h)),
+        )))
+        .collect();
+
+    // ── Edges: N bottom + N top + N seams ────────────────────────────────────
+    let e_bot: Vec<_> = (0..n).map(|i| {
+        let (t0, t1) = curve2_t_range(&path.segments[i]);
+        ctx.push_edge(Edge::new(c3_bot[i], verts_bot[i], verts_bot[(i+1)%n], t0, t1))
+    }).collect();
+    let e_top: Vec<_> = (0..n).map(|i| {
+        let (t0, t1) = curve2_t_range(&path.segments[i]);
+        ctx.push_edge(Edge::new(c3_top[i], verts_top[i], verts_top[(i+1)%n], t0, t1))
+    }).collect();
+    let e_seam: Vec<_> = (0..n).map(|i|
+        ctx.push_edge(Edge::new(c3_seam[i], verts_bot[i], verts_top[i], 0.0, 1.0))
+    ).collect();
+
+    // ── Topology skeleton ─────────────────────────────────────────────────────
+    let solid_id = ctx.push_solid(Solid::new(crate::brep_kernel::ShellId(usize::MAX)));
+    let shell_id = ctx.push_shell(Shell::new(solid_id, true));
+    ctx.get_mut_solid(solid_id).outer = shell_id;
+
+    let prov = || ProvenanceData::primitive(prov_id, geom_id);
+
+    macro_rules! make_face {
+        ($surf:expr, $sense:expr) => {{
+            let surf_id = ctx.push_surface($surf);
+            let face_id = ctx.push_face(Face::new(
+                shell_id, surf_id, LoopId(usize::MAX), $sense, prov(),
+            ));
+            let loop_id = ctx.push_loop(Loop::new(face_id, true));
+            ctx.get_mut_face(face_id).outer = loop_id;
+            ctx.get_mut_shell(shell_id).faces.push(face_id);
+            (face_id, loop_id)
+        }};
+    }
+
+    macro_rules! add_coedge {
+        ($edge:expr, $orient:expr, $face:expr, $pcurve:expr) => {{
+            let ce = ctx.push_coedge(CoEdge::new($edge, $orient, $face, $pcurve));
+            ctx.get_mut_edge($edge).coedges.push(ce);
+            ce
+        }};
+    }
+
+    // ── Lateral faces (one per segment) ──────────────────────────────────────
+    // Face i loop (CCW from outside): bot[i] Fwd | seam[i+1] Fwd | top[i] Rev | seam[i] Rev
+    //
+    // PCurve trick: Line2((0,v_const),(1,v_const)) gives eval(t) = (t, v_const) for any t,
+    // directly mapping the edge parameter to the surface u-coordinate.
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let (t_min, t_max) = curve2_t_range(&path.segments[i]);
+        let profile = lift_curve2(&path.segments[i], 0.0);
+        let les = LinearExtrusionSurface::new(profile, up);
+        let (face_id, loop_id) = make_face!(SurfaceKind::Extrusion(les), FaceSense::Aligned);
+
+        let pc_bot    = ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0,   0.0), p2(1.0,   0.0))));
+        let pc_seam_r = ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(t_max, 0.0), p2(t_max, h  ))));
+        let pc_top    = ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0,   h  ), p2(1.0,   h  ))));
+        let pc_seam_l = ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(t_min, 0.0), p2(t_min, h  ))));
+
+        let ce_bot    = add_coedge!(e_bot[i],   Orientation::Forward, face_id, pc_bot);
+        let ce_seam_r = add_coedge!(e_seam[j],  Orientation::Forward, face_id, pc_seam_r);
+        let ce_top    = add_coedge!(e_top[i],   Orientation::Reverse, face_id, pc_top);
+        let ce_seam_l = add_coedge!(e_seam[i],  Orientation::Reverse, face_id, pc_seam_l);
+        ctx.get_mut_loop(loop_id).coedges.extend([ce_bot, ce_seam_r, ce_top, ce_seam_l]);
+    }
+
+    // ── Bottom cap (z=0, outward normal = -Z) ─────────────────────────────────
+    // Plane: u_dir=+X, v_dir=+Y → natural normal = +Z → AntiAligned gives outward = -Z.
+    // Loop: traverse segments in reverse order, each Reverse → CW in XY from above.
+    // Consecutive chain: seg[N-1] Rev ends at knot[N-1], seg[N-2] Rev starts there ✓
+    // PCurve: cap UV = (x, y), so pcurve is the 2-D path segment directly.
+    {
+        let plane = Plane::new(p3(0.0, 0.0, 0.0), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
+        let (face_id, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::AntiAligned);
+        let ces: Vec<_> = (0..n).rev().map(|i| {
+            let pc = ctx.push_curve2(path.segments[i].clone());
+            add_coedge!(e_bot[i], Orientation::Reverse, face_id, pc)
+        }).collect();
+        ctx.get_mut_loop(loop_id).coedges.extend(ces);
+    }
+
+    // ── Top cap (z=h, outward normal = +Z) ───────────────────────────────────
+    // Plane: u_dir=+X, v_dir=+Y → natural normal = +Z → Aligned.
+    // Loop: traverse segments in forward order, each Forward → CCW in XY from above.
+    // PCurve: cap UV = (x, y), same 2-D shape.
+    {
+        let plane = Plane::new(p3(0.0, 0.0, h), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
+        let (face_id, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::Aligned);
+        let ces: Vec<_> = (0..n).map(|i| {
+            let pc = ctx.push_curve2(path.segments[i].clone());
+            add_coedge!(e_top[i], Orientation::Forward, face_id, pc)
+        }).collect();
+        ctx.get_mut_loop(loop_id).coedges.extend(ces);
+    }
+
+    Ok(solid_id)
+}
+
+// ── build_revolution ──────────────────────────────────────────────────────────
+
+/// Reasons `build_revolution` can fail.
+#[derive(Debug, PartialEq)]
+pub enum RevolutionError {
+    /// `path.segments` is empty.
+    PathEmpty,
+    /// A knot point has x < -`ctx.tolerance.pos_tol` (profile enters the negative half-plane).
+    ProfileBelowAxis,
+    /// The path is open and neither endpoint lies on the Z-axis (x ≤ `ctx.tolerance.pos_tol`).
+    OpenProfileNoAxisEndpoint,
+}
+
+/// Build the B-rep solid by revolving a [`Path2D`] profile 360° around the Z-axis.
+///
+/// The profile is in the x-z half-plane: `Path2D` coordinate `u` is the radial distance
+/// from the Z-axis and `v` is the height.  Three cases are handled automatically:
+///
+/// * **Both endpoints on axis** (`x ≤ tol`): no caps; degenerate pole edges at both ends.
+/// * **One endpoint on axis**: one disk cap at the off-axis endpoint.
+/// * **Closed path** (`path.closed == true`): torus-like; no caps required.
+///
+/// # Topology
+///
+/// For an N-segment profile:
+/// * Case 1 (both on axis): N+1 vertices, 2N+1 edges, N faces, 4N coedges.
+/// * Case 2 (one on axis): N+1 vertices, 2N+1 edges, N+1 faces, 4N+1 coedges.
+/// * Case 3 (closed):        N vertices,    2N edges, N faces, 4N coedges.
+///
+/// Each lateral face is a [`RevolutionSurface`] with `u` = angle ∈ [0, 2π] and
+/// `v` = profile parameter.  The seam is the x-z half-plane.
+///
+/// # Errors
+/// Returns [`RevolutionError`] if the path is empty, a knot has x < −tol, or the
+/// path is open with neither endpoint on the axis.
+pub fn build_revolution(
+    ctx: &mut SolidModelingContext,
+    path: &Path2D,
+    prov_id: u64,
+    geom_id: u64,
+) -> Result<SolidId, RevolutionError> {
+    use std::f64::consts::TAU;
+
+    if path.segments.is_empty() {
+        return Err(RevolutionError::PathEmpty);
+    }
+
+    let tol = ctx.tolerance.pos_tol;
+    let n   = path.segments.len();
+
+    // ── Collect distinct knot points ──────────────────────────────────────────
+    // Open path:   N+1 knots (knots[0..=N])
+    // Closed path: N   knots (knots[0..N-1]; end of last seg == start)
+    let n_knots = if path.closed { n } else { n + 1 };
+    let mut knots: Vec<Point2> = Vec::with_capacity(n_knots);
+    knots.push(path.start);
+    for seg in &path.segments[..n - 1] {
+        knots.push(curve2_end(seg));
+    }
+    if !path.closed {
+        knots.push(curve2_end(path.segments.last().unwrap()));
+    }
+
+    // ── Validation ────────────────────────────────────────────────────────────
+    for k in &knots {
+        if k.u < -tol {
+            return Err(RevolutionError::ProfileBelowAxis);
+        }
+    }
+
+    let first_on_axis = knots[0].u         <= tol;
+    let last_on_axis  = knots[n_knots - 1].u <= tol;
+
+    if !path.closed && !first_on_axis && !last_on_axis {
+        return Err(RevolutionError::OpenProfileNoAxisEndpoint);
+    }
+
+    let p3  = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+    let p2  = |u: f64, v: f64|         Point2::new(u, v);
+
+    // ── Vertices: one per knot, on the seam (y = 0) ──────────────────────────
+    let verts: Vec<_> = knots.iter()
+        .map(|k| ctx.push_vertex(Vertex::new(p3(k.u, 0.0, k.v), tol)))
+        .collect();
+
+    // ── Circle edges: one per knot ────────────────────────────────────────────
+    // x ≤ tol → degenerate (Line3 p0==p1, t ∈ [0, 1]).
+    // x > tol → full CCW circle (CircularArc3, t ∈ [0, 2π]).
+    let circles: Vec<_> = knots.iter().zip(verts.iter()).map(|(k, &v)| {
+        if k.u <= tol {
+            let c = ctx.push_curve3(Curve3Kind::Line3(
+                Line3::new(p3(0.0, 0.0, k.v), p3(0.0, 0.0, k.v)),
+            ));
+            ctx.push_edge(Edge::new(c, v, v, 0.0, 1.0))
+        } else {
+            let c = ctx.push_curve3(Curve3Kind::CircularArc3(
+                CircularArc3::new(
+                    p3(0.0, 0.0, k.v), p3(0.0, 0.0, 1.0), p3(1.0, 0.0, 0.0), k.u, 0.0, TAU,
+                ),
+            ));
+            ctx.push_edge(Edge::new(c, v, v, 0.0, TAU))
+        }
+    }).collect();
+
+    // ── Seam edges: one per segment (profile lifted into x-z plane) ──────────
+    let seams: Vec<_> = (0..n).map(|i| {
+        let j      = if path.closed { (i + 1) % n } else { i + 1 };
+        let (t0, t1) = curve2_t_range(&path.segments[i]);
+        let c = ctx.push_curve3(lift_xz_curve2(&path.segments[i]));
+        ctx.push_edge(Edge::new(c, verts[i], verts[j], t0, t1))
+    }).collect();
+
+    // ── Topology skeleton ─────────────────────────────────────────────────────
+    let solid_id = ctx.push_solid(Solid::new(crate::brep_kernel::ShellId(usize::MAX)));
+    let shell_id = ctx.push_shell(Shell::new(solid_id, true));
+    ctx.get_mut_solid(solid_id).outer = shell_id;
+
+    let prov = || ProvenanceData::primitive(prov_id, geom_id);
+
+    macro_rules! make_face {
+        ($surf:expr, $sense:expr) => {{
+            let surf_id = ctx.push_surface($surf);
+            let face_id = ctx.push_face(Face::new(
+                shell_id, surf_id, LoopId(usize::MAX), $sense, prov(),
+            ));
+            let loop_id = ctx.push_loop(Loop::new(face_id, true));
+            ctx.get_mut_face(face_id).outer = loop_id;
+            ctx.get_mut_shell(shell_id).faces.push(face_id);
+            (face_id, loop_id)
+        }};
+    }
+
+    macro_rules! add_coedge {
+        ($edge:expr, $orient:expr, $face:expr, $pcurve:expr) => {{
+            let ce = ctx.push_coedge(CoEdge::new($edge, $orient, $face, $pcurve));
+            ctx.get_mut_edge($edge).coedges.push(ce);
+            ce
+        }};
+    }
+
+    // ── Lateral faces ─────────────────────────────────────────────────────────
+    //
+    // UV rectangle for segment i: u ∈ [0, 2π], v ∈ [t0, t1].
+    // Loop CCW in UV (Aligned outward normal):
+    //   circle[i] Fwd | seam[i] Fwd | circle[j] Rev | seam[i] Rev
+    //
+    // PCurve conventions:
+    //   Non-degenerate circle (t ∈ [0,2π]): Line2((0,v),(1,v)) → eval(t)=(t, v)   [slope=1]
+    //   Degenerate circle     (t ∈ [0,1]):  Line2((0,v),(τ,v)) → eval(t)=(τ·t, v) [full span]
+    //   Seam right (u=2π): Line2((τ,0),(τ,1)) → eval(t)=(τ, t)
+    //   Seam left  (u=0):  Line2((0, 0),(0,1)) → eval(t)=(0, t)
+    for i in 0..n {
+        let j = if path.closed { (i + 1) % n } else { i + 1 };
+        let (t0_seg, t1_seg) = curve2_t_range(&path.segments[i]);
+
+        let rev_surf = RevolutionSurface::new(
+            lift_xz_curve2(&path.segments[i]),
+            p3(0.0, 0.0, 0.0),
+            p3(0.0, 0.0, 1.0),
+        );
+        let (face_id, loop_id) = make_face!(SurfaceKind::Revolution(rev_surf), FaceSense::Aligned);
+
+        // PCurve for circle[i] (bottom of face, at v = t0_seg)
+        let pc_circ_bot = if knots[i].u <= tol {
+            ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, t0_seg), p2(TAU, t0_seg))))
+        } else {
+            ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, t0_seg), p2(1.0, t0_seg))))
+        };
+        // PCurve for seam[i] Forward (right side, u = 2π)
+        let pc_seam_rgt = ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(TAU, 0.0), p2(TAU, 1.0))));
+        // PCurve for circle[j] (top of face, at v = t1_seg)
+        let pc_circ_top = if knots[j].u <= tol {
+            ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, t1_seg), p2(TAU, t1_seg))))
+        } else {
+            ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, t1_seg), p2(1.0, t1_seg))))
+        };
+        // PCurve for seam[i] Reverse (left side, u = 0)
+        let pc_seam_lft = ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, 0.0), p2(0.0, 1.0))));
+
+        let ce_bot = add_coedge!(circles[i],  Orientation::Forward, face_id, pc_circ_bot);
+        let ce_sr  = add_coedge!(seams[i],    Orientation::Forward, face_id, pc_seam_rgt);
+        let ce_top = add_coedge!(circles[j],  Orientation::Reverse, face_id, pc_circ_top);
+        let ce_sl  = add_coedge!(seams[i],    Orientation::Reverse, face_id, pc_seam_lft);
+        ctx.get_mut_loop(loop_id).coedges.extend([ce_bot, ce_sr, ce_top, ce_sl]);
+    }
+
+    // ── Caps (open path, case 2) ──────────────────────────────────────────────
+    // Start cap (non-degenerate start): lateral uses circle[0] Fwd → cap uses Rev + AntiAligned.
+    // End cap   (non-degenerate end):   lateral uses circle[n] Rev → cap uses Fwd + Aligned.
+    if !path.closed {
+        if !first_on_axis {
+            let k = knots[0];
+            let plane = Plane::new(p3(0.0, 0.0, k.v), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
+            let (face_id, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::AntiAligned);
+            let pc = ctx.push_curve2(Curve2Kind::CircularArc2(
+                CircularArc2::new(p2(0.0, 0.0), k.u, 0.0, TAU),
+            ));
+            let ce = add_coedge!(circles[0], Orientation::Reverse, face_id, pc);
+            ctx.get_mut_loop(loop_id).coedges.push(ce);
+        }
+        if !last_on_axis {
+            let k = knots[n];
+            let plane = Plane::new(p3(0.0, 0.0, k.v), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
+            let (face_id, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::Aligned);
+            let pc = ctx.push_curve2(Curve2Kind::CircularArc2(
+                CircularArc2::new(p2(0.0, 0.0), k.u, 0.0, TAU),
+            ));
+            let ce = add_coedge!(circles[n], Orientation::Forward, face_id, pc);
+            ctx.get_mut_loop(loop_id).coedges.push(ce);
+        }
+    }
+
+    Ok(solid_id)
 }
 
 // ── compile_primitive ─────────────────────────────────────────────────────────
@@ -1902,6 +2374,648 @@ mod test {
         // Plane-face pcurve unchanged
         let Curve2Kind::CircularArc2(base_cap) = ctx.curves2[4] else { panic!() };
         assert!(approx(base_cap.radius, 1.0), "cap CircularArc2 radius should be unchanged");
+    }
+
+    // ── build_extrusion ───────────────────────────────────────────────────────
+
+    use crate::geom::{Curve2, Path2D, Point2};
+
+    fn triangle_path() -> Path2D {
+        let mut p = Path2D::new(Point2::new(0.0, 0.0));
+        p.line_to(Point2::new(1.0, 0.0))
+         .line_to(Point2::new(0.5, 1.0))
+         .line_to_close();
+        p
+    }
+
+    fn std_extrude_triangle() -> (SolidModelingContext, SolidId) {
+        let mut ctx = SolidModelingContext::new();
+        let sid = build_extrusion(&mut ctx, &triangle_path(), 2.0, 7, 13).unwrap();
+        (ctx, sid)
+    }
+
+    // Validation
+
+    #[test]
+    fn extrude_err_not_closed() {
+        let mut ctx = SolidModelingContext::new();
+        let mut path = Path2D::new(Point2::new(0.0, 0.0));
+        path.line_to(Point2::new(1.0, 0.0)).line_to(Point2::new(0.5, 1.0));
+        // closed = false (default)
+        assert_eq!(
+            build_extrusion(&mut ctx, &path, 2.0, 0, 0),
+            Err(ExtrusionError::PathNotClosed)
+        );
+    }
+
+    #[test]
+    fn extrude_err_empty() {
+        let mut ctx = SolidModelingContext::new();
+        let mut path = Path2D::new(Point2::new(0.0, 0.0));
+        path.close();
+        assert_eq!(
+            build_extrusion(&mut ctx, &path, 2.0, 0, 0),
+            Err(ExtrusionError::PathEmpty)
+        );
+    }
+
+    #[test]
+    fn extrude_err_zero_height() {
+        let mut ctx = SolidModelingContext::new();
+        assert_eq!(
+            build_extrusion(&mut ctx, &triangle_path(), 0.0, 0, 0),
+            Err(ExtrusionError::NonPositiveHeight)
+        );
+    }
+
+    #[test]
+    fn extrude_err_negative_height() {
+        let mut ctx = SolidModelingContext::new();
+        assert_eq!(
+            build_extrusion(&mut ctx, &triangle_path(), -1.0, 0, 0),
+            Err(ExtrusionError::NonPositiveHeight)
+        );
+    }
+
+    #[test]
+    fn extrude_err_geometrically_open() {
+        let mut ctx = SolidModelingContext::new();
+        let mut path = Path2D::new(Point2::new(0.0, 0.0));
+        path.line_to(Point2::new(1.0, 0.0))
+            .line_to(Point2::new(0.5, 1.0));
+        path.close(); // sets flag without adding closing segment — current_pos ≠ start
+        assert_eq!(
+            build_extrusion(&mut ctx, &path, 2.0, 0, 0),
+            Err(ExtrusionError::GeometricallyOpen)
+        );
+    }
+
+    // Entity counts — triangle (N=3 → 6V, 9E, 5F, 18CE)
+
+    #[test]
+    fn extrude_triangle_vertex_count() {
+        let (ctx, _) = std_extrude_triangle();
+        assert_eq!(ctx.vertices.len(), 6);
+    }
+
+    #[test]
+    fn extrude_triangle_edge_count() {
+        let (ctx, _) = std_extrude_triangle();
+        assert_eq!(ctx.edges.len(), 9);
+    }
+
+    #[test]
+    fn extrude_triangle_coedge_count() {
+        let (ctx, _) = std_extrude_triangle();
+        assert_eq!(ctx.coedges.len(), 18);
+    }
+
+    #[test]
+    fn extrude_triangle_face_count() {
+        let (ctx, _) = std_extrude_triangle();
+        assert_eq!(ctx.faces.len(), 5);
+    }
+
+    #[test]
+    fn extrude_triangle_shell_solid_count() {
+        let (ctx, _) = std_extrude_triangle();
+        assert_eq!(ctx.shells.len(), 1);
+        assert_eq!(ctx.solids.len(), 1);
+    }
+
+    // Vertex positions
+
+    #[test]
+    fn extrude_triangle_bottom_vertices_at_z0() {
+        let (ctx, _) = std_extrude_triangle();
+        let bot: Vec<_> = ctx.vertices.iter().filter(|v| v.point.z == 0.0).collect();
+        assert_eq!(bot.len(), 3);
+        let pts: Vec<_> = bot.iter().map(|v| (v.point.x, v.point.y)).collect();
+        assert!(pts.contains(&(0.0, 0.0)));
+        assert!(pts.contains(&(1.0, 0.0)));
+        assert!(pts.contains(&(0.5, 1.0)));
+    }
+
+    #[test]
+    fn extrude_triangle_top_vertices_at_z_height() {
+        let (ctx, _) = std_extrude_triangle();
+        let top: Vec<_> = ctx.vertices.iter().filter(|v| v.point.z == 2.0).collect();
+        assert_eq!(top.len(), 3);
+        let pts: Vec<_> = top.iter().map(|v| (v.point.x, v.point.y)).collect();
+        assert!(pts.contains(&(0.0, 0.0)));
+        assert!(pts.contains(&(1.0, 0.0)));
+        assert!(pts.contains(&(0.5, 1.0)));
+    }
+
+    // Surface types
+
+    #[test]
+    fn extrude_triangle_lateral_surfaces_are_extrusion() {
+        let (ctx, _) = std_extrude_triangle();
+        let lateral_count = ctx.faces.iter()
+            .filter(|f| matches!(ctx.surfaces[f.surface.0], SurfaceKind::Extrusion(_)))
+            .count();
+        assert_eq!(lateral_count, 3);
+    }
+
+    #[test]
+    fn extrude_triangle_cap_surfaces_are_planes() {
+        let (ctx, _) = std_extrude_triangle();
+        let plane_count = ctx.faces.iter()
+            .filter(|f| matches!(ctx.surfaces[f.surface.0], SurfaceKind::Plane(_)))
+            .count();
+        assert_eq!(plane_count, 2);
+    }
+
+    #[test]
+    fn extrude_lateral_direction_is_z() {
+        let (ctx, _) = std_extrude_triangle();
+        for surf in &ctx.surfaces {
+            if let SurfaceKind::Extrusion(les) = surf {
+                assert_eq!(les.direction, Point3::new(0.0, 0.0, 1.0));
+            }
+        }
+    }
+
+    // Face sense
+
+    #[test]
+    fn extrude_lateral_faces_are_aligned() {
+        let (ctx, _) = std_extrude_triangle();
+        for face in &ctx.faces {
+            if matches!(ctx.surfaces[face.surface.0], SurfaceKind::Extrusion(_)) {
+                assert_eq!(face.sense, FaceSense::Aligned);
+            }
+        }
+    }
+
+    #[test]
+    fn extrude_bottom_cap_is_antialigned() {
+        let (ctx, _) = std_extrude_triangle();
+        // Bottom cap: plane at z=0
+        let bottom = ctx.faces.iter().find(|f| {
+            if let SurfaceKind::Plane(pl) = &ctx.surfaces[f.surface.0] {
+                pl.p0.z == 0.0
+            } else { false }
+        }).expect("bottom cap face");
+        assert_eq!(bottom.sense, FaceSense::AntiAligned);
+    }
+
+    #[test]
+    fn extrude_top_cap_is_aligned() {
+        let (ctx, _) = std_extrude_triangle();
+        let top = ctx.faces.iter().find(|f| {
+            if let SurfaceKind::Plane(pl) = &ctx.surfaces[f.surface.0] {
+                pl.p0.z == 2.0
+            } else { false }
+        }).expect("top cap face");
+        assert_eq!(top.sense, FaceSense::Aligned);
+    }
+
+    // Topology consistency
+
+    #[test]
+    fn extrude_triangle_each_edge_has_two_coedges() {
+        let (ctx, _) = std_extrude_triangle();
+        for (i, edge) in ctx.edges.iter().enumerate() {
+            assert_eq!(edge.coedges.len(), 2, "edge {i} must have exactly 2 coedges");
+        }
+    }
+
+    #[test]
+    fn extrude_triangle_each_edge_one_fwd_one_rev() {
+        let (ctx, _) = std_extrude_triangle();
+        for edge in &ctx.edges {
+            let fwd = edge.coedges.iter()
+                .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Forward)
+                .count();
+            let rev = edge.coedges.iter()
+                .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Reverse)
+                .count();
+            assert_eq!(fwd, 1);
+            assert_eq!(rev, 1);
+        }
+    }
+
+    #[test]
+    fn extrude_triangle_lateral_loops_have_four_coedges() {
+        let (ctx, _) = std_extrude_triangle();
+        for face in &ctx.faces {
+            if matches!(ctx.surfaces[face.surface.0], SurfaceKind::Extrusion(_)) {
+                let lp = ctx.get_loop(face.outer);
+                assert_eq!(lp.coedges.len(), 4);
+            }
+        }
+    }
+
+    #[test]
+    fn extrude_triangle_cap_loops_have_three_coedges() {
+        let (ctx, _) = std_extrude_triangle();
+        for face in &ctx.faces {
+            if matches!(ctx.surfaces[face.surface.0], SurfaceKind::Plane(_)) {
+                let lp = ctx.get_loop(face.outer);
+                assert_eq!(lp.coedges.len(), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn extrude_triangle_loop_coedges_form_closed_chain() {
+        let (ctx, _) = std_extrude_triangle();
+        for lp in &ctx.loops {
+            let n = lp.coedges.len();
+            for i in 0..n {
+                let ce_cur  = ctx.get_coedge(lp.coedges[i]);
+                let ce_next = ctx.get_coedge(lp.coedges[(i + 1) % n]);
+                let end_cur = match ce_cur.orientation {
+                    Orientation::Forward => ctx.get_edge(ce_cur.edge).v1,
+                    Orientation::Reverse => ctx.get_edge(ce_cur.edge).v0,
+                };
+                let start_next = match ce_next.orientation {
+                    Orientation::Forward => ctx.get_edge(ce_next.edge).v0,
+                    Orientation::Reverse => ctx.get_edge(ce_next.edge).v1,
+                };
+                assert_eq!(end_cur, start_next,
+                    "loop coedge {i} end must equal coedge {} start", (i+1)%n);
+            }
+        }
+    }
+
+    // PCurve sanity
+
+    #[test]
+    fn extrude_triangle_bottom_pcurves_at_v0() {
+        // For each lateral face, coedges[0] is the bottom edge.
+        // Its pcurve is Line2((0,0),(1,0)): eval(t).v must be 0.0 everywhere.
+        let (ctx, _) = std_extrude_triangle();
+        for face in &ctx.faces {
+            if matches!(ctx.surfaces[face.surface.0], SurfaceKind::Extrusion(_)) {
+                let lp   = ctx.get_loop(face.outer);
+                let ce   = ctx.get_coedge(lp.coedges[0]);
+                let edge = ctx.get_edge(ce.edge);
+                let pc   = ctx.get_curve2(ce.pcurve);
+                assert_eq!(pc.eval(edge.t0).v, 0.0, "bottom pcurve v at t0 must be 0");
+                assert_eq!(pc.eval(edge.t1).v, 0.0, "bottom pcurve v at t1 must be 0");
+            }
+        }
+    }
+
+    #[test]
+    fn extrude_triangle_top_pcurves_at_v_height() {
+        // For each lateral face, coedges[2] is the top edge (Reverse).
+        // Its pcurve is Line2((0,h),(1,h)): eval(t).v must be height everywhere.
+        let (ctx, _) = std_extrude_triangle();
+        let height = 2.0_f64;
+        for face in &ctx.faces {
+            if matches!(ctx.surfaces[face.surface.0], SurfaceKind::Extrusion(_)) {
+                let lp   = ctx.get_loop(face.outer);
+                let ce   = ctx.get_coedge(lp.coedges[2]);
+                let edge = ctx.get_edge(ce.edge);
+                let pc   = ctx.get_curve2(ce.pcurve);
+                assert_eq!(pc.eval(edge.t0).v, height, "top pcurve v at t0 must be height");
+                assert_eq!(pc.eval(edge.t1).v, height, "top pcurve v at t1 must be height");
+            }
+        }
+    }
+
+    // Provenance
+
+    #[test]
+    fn extrude_triangle_face_provenance() {
+        let (ctx, _) = std_extrude_triangle();
+        for face in &ctx.faces {
+            assert_eq!(face.prov.sources.len(), 1);
+            assert_eq!(face.prov.sources[0].prov_id, 7);
+            assert_eq!(face.prov.sources[0].geom_id, 13);
+            assert_eq!(face.prov.last_op, None);
+        }
+    }
+
+    // Square cross-validation against build_cuboid
+
+    #[test]
+    fn extrude_square_matches_cuboid_entity_counts() {
+        // Square (0,0)→(2,0)→(2,3)→(0,3), extruded to h=4 should match build_cuboid(2,3,4)
+        let mut ctx = SolidModelingContext::new();
+        let mut path = Path2D::new(Point2::new(0.0, 0.0));
+        path.line_to(Point2::new(2.0, 0.0))
+            .line_to(Point2::new(2.0, 3.0))
+            .line_to(Point2::new(0.0, 3.0))
+            .line_to_close();
+        build_extrusion(&mut ctx, &path, 4.0, 0, 0).unwrap();
+        assert_eq!(ctx.vertices.len(), 8);
+        assert_eq!(ctx.edges.len(),    12);
+        assert_eq!(ctx.faces.len(),    6);
+        assert_eq!(ctx.coedges.len(),  24);
+    }
+
+    // ── build_revolution ──────────────────────────────────────────────────────
+
+    use std::f64::consts::FRAC_PI_2;
+
+    /// Case 2, N=1: line from (0,0) to (r,h) — degenerate at start, disk cap at end.
+    fn cone_path() -> Path2D {
+        let mut p = Path2D::new(Point2::new(0.0, 0.0));
+        p.line_to(Point2::new(1.0, 2.0));
+        p
+    }
+
+    fn std_revolve_cone() -> (SolidModelingContext, SolidId) {
+        let mut ctx = SolidModelingContext::new();
+        let sid = build_revolution(&mut ctx, &cone_path(), 5, 9).unwrap();
+        (ctx, sid)
+    }
+
+    /// Case 1, N=2: two lines (0,0)→(1,1)→(0,2) — both endpoints on axis, no caps.
+    fn bipoint_path() -> Path2D {
+        let mut p = Path2D::new(Point2::new(0.0, 0.0));
+        p.line_to(Point2::new(1.0, 1.0)).line_to(Point2::new(0.0, 2.0));
+        p
+    }
+
+    fn std_revolve_bipoint() -> (SolidModelingContext, SolidId) {
+        let mut ctx = SolidModelingContext::new();
+        let sid = build_revolution(&mut ctx, &bipoint_path(), 5, 9).unwrap();
+        (ctx, sid)
+    }
+
+    /// Case 3, N=4: closed square (1,0)→(2,0)→(2,1)→(1,1)→close — torus-like, no caps.
+    fn ring_path() -> Path2D {
+        let mut p = Path2D::new(Point2::new(1.0, 0.0));
+        p.line_to(Point2::new(2.0, 0.0))
+         .line_to(Point2::new(2.0, 1.0))
+         .line_to(Point2::new(1.0, 1.0))
+         .line_to_close();
+        p
+    }
+
+    fn std_revolve_ring() -> (SolidModelingContext, SolidId) {
+        let mut ctx = SolidModelingContext::new();
+        let sid = build_revolution(&mut ctx, &ring_path(), 5, 9).unwrap();
+        (ctx, sid)
+    }
+
+    // Validation — PathEmpty
+
+    #[test]
+    fn revolve_err_empty() {
+        let mut ctx = SolidModelingContext::new();
+        let mut path = Path2D::new(Point2::new(0.0, 0.0));
+        path.close();
+        assert_eq!(build_revolution(&mut ctx, &path, 0, 0), Err(RevolutionError::PathEmpty));
+    }
+
+    // Validation — ProfileBelowAxis
+
+    #[test]
+    fn revolve_err_start_below_axis() {
+        let mut ctx = SolidModelingContext::new();
+        let mut path = Path2D::new(Point2::new(-0.5, 0.0));
+        path.line_to(Point2::new(0.0, 1.0));
+        assert_eq!(
+            build_revolution(&mut ctx, &path, 0, 0),
+            Err(RevolutionError::ProfileBelowAxis)
+        );
+    }
+
+    #[test]
+    fn revolve_err_interior_knot_below_axis() {
+        let mut ctx = SolidModelingContext::new();
+        let mut path = Path2D::new(Point2::new(1.0, 0.0));
+        path.line_to(Point2::new(-0.5, 1.0)).line_to(Point2::new(0.0, 2.0));
+        assert_eq!(
+            build_revolution(&mut ctx, &path, 0, 0),
+            Err(RevolutionError::ProfileBelowAxis)
+        );
+    }
+
+    #[test]
+    fn revolve_err_closed_below_axis() {
+        let mut ctx = SolidModelingContext::new();
+        let mut path = Path2D::new(Point2::new(1.0, 0.0));
+        path.line_to(Point2::new(-0.5, 0.5))
+            .line_to(Point2::new(1.0, 1.0))
+            .line_to_close();
+        assert_eq!(
+            build_revolution(&mut ctx, &path, 0, 0),
+            Err(RevolutionError::ProfileBelowAxis)
+        );
+    }
+
+    // Validation — OpenProfileNoAxisEndpoint
+
+    #[test]
+    fn revolve_err_open_neither_endpoint_on_axis() {
+        let mut ctx = SolidModelingContext::new();
+        let mut path = Path2D::new(Point2::new(1.0, 0.0));
+        path.line_to(Point2::new(2.0, 1.0));
+        assert_eq!(
+            build_revolution(&mut ctx, &path, 0, 0),
+            Err(RevolutionError::OpenProfileNoAxisEndpoint)
+        );
+    }
+
+    // Entity counts
+
+    #[test]
+    fn revolve_cone_entity_counts() {
+        // Case 2, N=1: 2V, 3E, 2F (1 lateral + 1 cap), 5CE
+        let (ctx, _) = std_revolve_cone();
+        assert_eq!(ctx.vertices.len(),  2);
+        assert_eq!(ctx.edges.len(),     3);
+        assert_eq!(ctx.faces.len(),     2);
+        assert_eq!(ctx.coedges.len(),   5);
+    }
+
+    #[test]
+    fn revolve_bipoint_entity_counts() {
+        // Case 1, N=2: 3V, 5E, 2F, 8CE
+        let (ctx, _) = std_revolve_bipoint();
+        assert_eq!(ctx.vertices.len(),  3);
+        assert_eq!(ctx.edges.len(),     5);
+        assert_eq!(ctx.faces.len(),     2);
+        assert_eq!(ctx.coedges.len(),   8);
+    }
+
+    #[test]
+    fn revolve_ring_entity_counts() {
+        // Case 3, N=4: 4V, 8E, 4F, 16CE
+        let (ctx, _) = std_revolve_ring();
+        assert_eq!(ctx.vertices.len(),  4);
+        assert_eq!(ctx.edges.len(),     8);
+        assert_eq!(ctx.faces.len(),     4);
+        assert_eq!(ctx.coedges.len(),  16);
+    }
+
+    // Surface types
+
+    #[test]
+    fn revolve_cone_lateral_is_revolution() {
+        let (ctx, _) = std_revolve_cone();
+        let rev_count = ctx.faces.iter()
+            .filter(|f| matches!(ctx.surfaces[f.surface.0], SurfaceKind::Revolution(_)))
+            .count();
+        assert_eq!(rev_count, 1);
+    }
+
+    #[test]
+    fn revolve_cone_cap_is_plane() {
+        let (ctx, _) = std_revolve_cone();
+        let plane_count = ctx.faces.iter()
+            .filter(|f| matches!(ctx.surfaces[f.surface.0], SurfaceKind::Plane(_)))
+            .count();
+        assert_eq!(plane_count, 1);
+    }
+
+    // Degenerate edge
+
+    #[test]
+    fn revolve_cone_degenerate_edge_has_one_coedge() {
+        let (ctx, _) = std_revolve_cone();
+        // The degenerate apex edge (v0==v1, at z=0) is only adjacent to one face.
+        let deg_edges: Vec<_> = ctx.edges.iter()
+            .filter(|e| e.v0 == e.v1 && e.t0 == 0.0 && e.t1 == 1.0)
+            .collect();
+        assert_eq!(deg_edges.len(), 1, "expect exactly one degenerate edge");
+        assert_eq!(deg_edges[0].coedges.len(), 1);
+    }
+
+    // Face sense
+
+    #[test]
+    fn revolve_cone_lateral_face_is_aligned() {
+        let (ctx, _) = std_revolve_cone();
+        for face in &ctx.faces {
+            if matches!(ctx.surfaces[face.surface.0], SurfaceKind::Revolution(_)) {
+                assert_eq!(face.sense, FaceSense::Aligned);
+            }
+        }
+    }
+
+    #[test]
+    fn revolve_cone_cap_face_is_aligned() {
+        // End cap at top (outward = +Z) → Aligned.
+        let (ctx, _) = std_revolve_cone();
+        for face in &ctx.faces {
+            if matches!(ctx.surfaces[face.surface.0], SurfaceKind::Plane(_)) {
+                assert_eq!(face.sense, FaceSense::Aligned);
+            }
+        }
+    }
+
+    // Topology consistency
+
+    #[test]
+    fn revolve_cone_non_degenerate_edges_have_two_coedges() {
+        let (ctx, _) = std_revolve_cone();
+        for edge in &ctx.edges {
+            if !(edge.v0 == edge.v1 && edge.t0 == 0.0 && edge.t1 == 1.0) {
+                // non-degenerate
+                assert_eq!(edge.coedges.len(), 2, "non-degenerate edge must have 2 coedges");
+            }
+        }
+    }
+
+    #[test]
+    fn revolve_cone_loop_coedges_form_closed_chain() {
+        let (ctx, _) = std_revolve_cone();
+        for lp in &ctx.loops {
+            let nc = lp.coedges.len();
+            for i in 0..nc {
+                let ce_cur  = ctx.get_coedge(lp.coedges[i]);
+                let ce_next = ctx.get_coedge(lp.coedges[(i + 1) % nc]);
+                let end_cur = match ce_cur.orientation {
+                    Orientation::Forward => ctx.get_edge(ce_cur.edge).v1,
+                    Orientation::Reverse => ctx.get_edge(ce_cur.edge).v0,
+                };
+                let start_next = match ce_next.orientation {
+                    Orientation::Forward => ctx.get_edge(ce_next.edge).v0,
+                    Orientation::Reverse => ctx.get_edge(ce_next.edge).v1,
+                };
+                assert_eq!(end_cur, start_next,
+                    "loop coedge {i} end must equal coedge {} start", (i + 1) % nc);
+            }
+        }
+    }
+
+    // PCurve sanity
+
+    #[test]
+    fn revolve_cone_seam_pcurve_maps_to_u0_and_utau() {
+        use std::f64::consts::TAU;
+        // Lateral face: seam used twice — Fwd pcurve maps t→(TAU,t), Rev pcurve maps t→(0,t).
+        let (ctx, _) = std_revolve_cone();
+        let lat_face = ctx.faces.iter()
+            .find(|f| matches!(ctx.surfaces[f.surface.0], SurfaceKind::Revolution(_)))
+            .expect("lateral face");
+        let lp = ctx.get_loop(lat_face.outer);
+        // coedges[1] = seam Fwd (right, u=TAU), coedges[3] = seam Rev (left, u=0)
+        let ce_seam_fwd = ctx.get_coedge(lp.coedges[1]);
+        let ce_seam_rev = ctx.get_coedge(lp.coedges[3]);
+        let pc_fwd = ctx.get_curve2(ce_seam_fwd.pcurve);
+        let pc_rev = ctx.get_curve2(ce_seam_rev.pcurve);
+        let t_mid  = 0.5_f64;
+        assert!((pc_fwd.eval(t_mid).u - TAU).abs() < 1e-12, "seam Fwd pcurve u must be TAU");
+        assert!( pc_rev.eval(t_mid).u.abs()          < 1e-12, "seam Rev pcurve u must be 0");
+    }
+
+    #[test]
+    fn revolve_cone_circle_pcurve_maps_angle_to_u() {
+        use std::f64::consts::TAU;
+        // The disk cap reuses the top circle (non-degenerate, t ∈ [0,2π]).
+        // Its PCurve is a CircularArc2 (cap) — the lateral face's top circle PCurve is Line2 with slope 1.
+        let (ctx, _) = std_revolve_cone();
+        let lat_face = ctx.faces.iter()
+            .find(|f| matches!(ctx.surfaces[f.surface.0], SurfaceKind::Revolution(_)))
+            .expect("lateral face");
+        let lp = ctx.get_loop(lat_face.outer);
+        // coedges[2] = circle[top] Reverse
+        let ce_top = ctx.get_coedge(lp.coedges[2]);
+        let pc_top = ctx.get_curve2(ce_top.pcurve);
+        // Line2((0, t1),(1, t1)) → eval(t) = (t, t1). At t=TAU/4: u = TAU/4.
+        let t_test = TAU / 4.0;
+        assert!((pc_top.eval(t_test).u - t_test).abs() < 1e-12, "circle top pcurve u must equal t");
+    }
+
+    // Cross-validation with build_sphere
+
+    #[test]
+    fn revolve_semicircle_matches_sphere_entity_counts() {
+        use std::f64::consts::FRAC_PI_2;
+        // Revolve a semicircle: start=(0,-1), CircularArc2 center=(0,0) r=1, t0=-π/2, t1=+π/2.
+        // Both endpoints on axis → Case 1, N=1 → 2V, 3E, 1F, 4CE  (same as build_sphere).
+        let mut ctx_rev  = SolidModelingContext::new();
+        let arc = Curve2Kind::CircularArc2(CircularArc2::new(
+            Point2::new(0.0, 0.0), 1.0, -FRAC_PI_2, FRAC_PI_2,
+        ));
+        let mut path = Path2D::new(arc.eval(-FRAC_PI_2));
+        path.segments.push(arc);  // bypass builder to set the arc directly
+
+        // Hmm, actually Path2D doesn't expose direct segment push publicly.
+        // Use arc_to instead:
+        let mut path2 = Path2D::new(Point2::new(0.0, -1.0));
+        path2.arc_to(Point2::new(0.0, 0.0), std::f64::consts::PI);
+        build_revolution(&mut ctx_rev, &path2, 0, 0).unwrap();
+
+        let mut ctx_sph = SolidModelingContext::new();
+        build_sphere(&mut ctx_sph, 1.0, 0, 0);
+
+        assert_eq!(ctx_rev.vertices.len(), ctx_sph.vertices.len());
+        assert_eq!(ctx_rev.edges.len(),    ctx_sph.edges.len());
+        assert_eq!(ctx_rev.faces.len(),    ctx_sph.faces.len());
+        assert_eq!(ctx_rev.coedges.len(),  ctx_sph.coedges.len());
+    }
+
+    // Provenance
+
+    #[test]
+    fn revolve_cone_face_provenance() {
+        let (ctx, _) = std_revolve_cone();
+        for face in &ctx.faces {
+            assert_eq!(face.prov.sources.len(), 1);
+            assert_eq!(face.prov.sources[0].prov_id, 5);
+            assert_eq!(face.prov.sources[0].geom_id, 9);
+        }
     }
 
     // ── compile_csg_node ──────────────────────────────────────────────────────
