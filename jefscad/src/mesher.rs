@@ -54,6 +54,81 @@ impl Default for MeshOptions {
     }
 }
 
+// ── STL export ───────────────────────────────────────────────────────────────
+
+/// Write `mesh` as binary STL to `writer`.
+///
+/// # Binary STL layout
+/// ```text
+/// [  0.. 80)  80-byte ASCII header
+/// [ 80.. 84)  u32 LE — triangle count
+/// per triangle (50 bytes):
+///   [  0.. 12)  3 × f32 LE — face normal
+///   [ 12.. 24)  3 × f32 LE — vertex 0
+///   [ 24.. 36)  3 × f32 LE — vertex 1
+///   [ 36.. 48)  3 × f32 LE — vertex 2
+///   [ 48.. 50)  u16 LE — attribute byte count (0)
+/// ```
+///
+/// The per-triangle normal is the average of the three corner normals from
+/// [`TriMesh::tri_normals`], re-normalised.  STL readers commonly recompute
+/// normals from vertices anyway, but this produces a correct value for
+/// flat-shaded faces and a reasonable approximation for smooth ones.
+pub fn write_stl<W: std::io::Write>(mesh: &TriMesh, writer: &mut W) -> std::io::Result<()> {
+    use std::io::Write;
+
+    // 80-byte header
+    let mut header = [0u8; 80];
+    let tag = b"jefscad binary STL";
+    header[..tag.len()].copy_from_slice(tag);
+    writer.write_all(&header)?;
+
+    // Triangle count
+    let n_tris = mesh.triangles.len() as u32;
+    writer.write_all(&n_tris.to_le_bytes())?;
+
+    // Per-triangle records
+    for (t, tri) in mesh.triangles.iter().enumerate() {
+        // Average and renormalise the three corner normals
+        let n0 = mesh.tri_normals[t * 3];
+        let n1 = mesh.tri_normals[t * 3 + 1];
+        let n2 = mesh.tri_normals[t * 3 + 2];
+        let nx = (n0[0] + n1[0] + n2[0]) / 3.0;
+        let ny = (n0[1] + n1[1] + n2[1]) / 3.0;
+        let nz = (n0[2] + n1[2] + n2[2]) / 3.0;
+        let len = (nx*nx + ny*ny + nz*nz).sqrt();
+        let (nx, ny, nz) = if len > 1e-15 {
+            (nx / len, ny / len, nz / len)
+        } else {
+            (0.0f32, 0.0f32, 1.0f32)
+        };
+
+        // Normal
+        writer.write_all(&nx.to_le_bytes())?;
+        writer.write_all(&ny.to_le_bytes())?;
+        writer.write_all(&nz.to_le_bytes())?;
+
+        // Three vertices
+        for &vi in tri {
+            let v = mesh.vertices[vi as usize];
+            writer.write_all(&v[0].to_le_bytes())?;
+            writer.write_all(&v[1].to_le_bytes())?;
+            writer.write_all(&v[2].to_le_bytes())?;
+        }
+
+        // Attribute byte count
+        writer.write_all(&0u16.to_le_bytes())?;
+    }
+
+    Ok(())
+}
+
+/// Write `mesh` as binary STL to the file at `path`, creating or truncating it.
+pub fn write_stl_file(mesh: &TriMesh, path: &std::path::Path) -> std::io::Result<()> {
+    let mut f = std::fs::File::create(path)?;
+    write_stl(mesh, &mut f)
+}
+
 // ── mesh_solid ────────────────────────────────────────────────────────────────
 
 /// Tessellate all faces of solid `sid` and return a combined [`TriMesh`].
@@ -525,6 +600,52 @@ mod test {
                 assert!((idx as usize) < nv,
                     "triangle index {idx} out of range (vertices.len() = {nv})");
             }
+        }
+    }
+
+    // ── STL export ───────────────────────────────────────────────────────────
+
+    fn stl_bytes(mesh: &TriMesh) -> Vec<u8> {
+        let mut buf = Vec::new();
+        write_stl(mesh, &mut buf).expect("write_stl failed");
+        buf
+    }
+
+    #[test]
+    fn stl_empty_mesh_byte_count() {
+        let bytes = stl_bytes(&TriMesh::default());
+        assert_eq!(bytes.len(), 84); // 80 header + 4 count
+    }
+
+    #[test]
+    fn stl_cuboid_byte_count() {
+        let mesh = mesh_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
+        let bytes = stl_bytes(&mesh);
+        assert_eq!(bytes.len(), 84 + 12 * 50); // 684
+    }
+
+    #[test]
+    fn stl_triangle_count_field() {
+        let mesh = mesh_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
+        let bytes = stl_bytes(&mesh);
+        let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
+        assert_eq!(count, 12);
+    }
+
+    #[test]
+    fn stl_cuboid_normals_axis_aligned() {
+        let mesh = mesh_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
+        let bytes = stl_bytes(&mesh);
+        // Each triangle record starts at 84 + t*50; normal is the first 12 bytes (3×f32)
+        for t in 0..12usize {
+            let off = 84 + t * 50;
+            let nx = f32::from_le_bytes(bytes[off     ..off +  4].try_into().unwrap());
+            let ny = f32::from_le_bytes(bytes[off +  4..off +  8].try_into().unwrap());
+            let nz = f32::from_le_bytes(bytes[off +  8..off + 12].try_into().unwrap());
+            let is_axis = (nx.abs() > 0.9 && ny.abs() < 0.1 && nz.abs() < 0.1)
+                       || (ny.abs() > 0.9 && nx.abs() < 0.1 && nz.abs() < 0.1)
+                       || (nz.abs() > 0.9 && nx.abs() < 0.1 && ny.abs() < 0.1);
+            assert!(is_axis, "triangle {t} normal ({nx},{ny},{nz}) is not axis-aligned");
         }
     }
 

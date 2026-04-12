@@ -392,7 +392,8 @@ UV domains for our four surface types — all simple, no general polygon trimmin
 - [_] Watertightness: post-merge coincident vertices by position after per-face meshing
 
 #### Step 3 — File export
-- [_] Binary STL (`write_stl(mesh, path)`) — flat triangle list, face normals; no vertex sharing needed
+- [x] Binary STL: `write_stl<W: Write>(mesh, writer)` + `write_stl_file(mesh, path)`;
+      per-triangle normal = averaged+renormalised corner normals; 308 tests
 - [_] OBJ (`write_obj(mesh, path)`) — shared vertices + normals; Blender-friendly
 - [_] glTF — deferred until STL/OBJ are working
 
