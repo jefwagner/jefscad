@@ -18,6 +18,8 @@ name = "stub_gen"
 required-features = ["extension-module"]
 
 [dependencies]
+# flint: interval arithmetic library, co-developed in this workspace.
+flint = { path = "../flint" }
 # pyo3 is optional so that `cargo +nightly test` works without linking Python.
 # maturin activates the "extension-module" feature when building for Python.
 pyo3 = { version = "0.28", optional = true }

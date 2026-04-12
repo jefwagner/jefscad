@@ -30,6 +30,26 @@ impl<T: Float + Copy, const N: usize> FlintArray<T, N> {
     }
 }
 
+impl<const N: usize> FlintArray<f64, N> {
+    /// Construct a `FlintArray<f64, N>` from a plain `[f64; N]`, widening each
+    /// element by 1 ULP in both directions (same semantics as `Flint::from(f64)`).
+    ///
+    /// Use this when converting f64 values that may not be exactly representable
+    /// (e.g. trig function outputs) into an interval array.  For values that are
+    /// provably exact (integer-valued constants) you may construct the struct
+    /// literal directly with `lb == ub`.
+    pub fn from_f64(arr: [f64; N]) -> Self {
+        let mut lb = [0.0f64; N];
+        let mut ub = [0.0f64; N];
+        for (i, &v) in arr.iter().enumerate() {
+            let f: crate::Flint<f64> = crate::Flint::from(v);
+            lb[i] = f.lb;
+            ub[i] = f.ub;
+        }
+        FlintArray { lb, ub }
+    }
+}
+
 // -----------------------------------------------------------------------
 // Internal helper: 3×3 determinant from nine interval values (row-major).
 // -----------------------------------------------------------------------
@@ -577,6 +597,31 @@ mod test {
         let m: FlintArray<f64, 16> =
             flint64_arr!(4, 0, 0, 0, 0, 4, 0, 0, 0, 0, 7, 0, 0, 0, 0, 1);
         scalar_contains(m.det2(), 16.0);
+    }
+
+    // --- from_f64 ---
+
+    #[test]
+    fn from_f64_exact_values_contain_exact_result() {
+        // 0.0 and 1.0 are exactly representable; interval must contain them.
+        let a = FlintArray::<f64, 2>::from_f64([0.0, 1.0]);
+        assert!(a.lb[0] <= 0.0 && 0.0 <= a.ub[0]);
+        assert!(a.lb[1] <= 1.0 && 1.0 <= a.ub[1]);
+    }
+
+    #[test]
+    fn from_f64_widens_by_one_ulp() {
+        // 0.1 is not exactly representable; lb < 0.1 < ub (strict).
+        let a = FlintArray::<f64, 1>::from_f64([0.1]);
+        assert!(a.lb[0] < 0.1 && 0.1 < a.ub[0], "interval must strictly contain 0.1");
+    }
+
+    #[test]
+    fn from_f64_trig_value_widens() {
+        // sin(1.0) is not exactly representable; lb < sin(1.0) < ub.
+        let v = 1.0_f64.sin();
+        let a = FlintArray::<f64, 1>::from_f64([v]);
+        assert!(a.lb[0] < v && v < a.ub[0], "interval must strictly contain sin(1.0)");
     }
 
     // --- midpoint ---
