@@ -930,6 +930,49 @@ impl Path2D {
     }
 }
 
+// ── Display for Path2D ────────────────────────────────────────────────────────
+
+fn fmt_f64_path(v: f64) -> String {
+    let rounded = (v * 1e4).round() / 1e4;
+    let mut buf = ryu::Buffer::new();
+    buf.format(rounded).to_owned()
+}
+
+impl std::fmt::Display for Path2D {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "path(start=({}, {}), segs={}, closed={})",
+            fmt_f64_path(self.start.u),
+            fmt_f64_path(self.start.v),
+            self.segments.len(),
+            self.closed,
+        )?;
+        let n = self.segments.len();
+        for (i, seg) in self.segments.iter().enumerate() {
+            let connector = if i + 1 == n { "\n└── " } else { "\n├── " };
+            let seg_str = match seg {
+                Curve2Kind::Line2(l) =>
+                    format!("line_to({}, {})", fmt_f64_path(l.p1.u), fmt_f64_path(l.p1.v)),
+                Curve2Kind::CircularArc2(a) => {
+                    let sweep = a.t1 - a.t0;
+                    format!(
+                        "arc_to(center=({}, {}), r={}, sweep={})",
+                        fmt_f64_path(a.center.u), fmt_f64_path(a.center.v),
+                        fmt_f64_path(a.radius),   fmt_f64_path(sweep),
+                    )
+                }
+                Curve2Kind::Polyline2(pl) =>
+                    format!("polyline({} pts)", pl.points.len()),
+                Curve2Kind::Nurbs(_) =>
+                    "nurbs(...)".to_owned(),
+            };
+            write!(f, "{}{}", connector, seg_str)?;
+        }
+        Ok(())
+    }
+}
+
 // ── Stub type for remaining SurfaceKind variant ───────────────────────────────
 
 /// A rational B-spline surface. Fields TBD — stub for `SurfaceKind`.
@@ -2296,5 +2339,27 @@ mod test {
         path.line_to(uv(5.0, 3.0)).line_to(uv(5.0, 6.0));
         path.line_to_close();
         assert_eq!(path.current_pos(), uv(2.0, 3.0));
+    }
+
+    #[test]
+    fn path2d_display_empty() {
+        let path = Path2D::new(uv(1.0, 2.0));
+        let s = format!("{path}");
+        assert!(s.starts_with("path(start=("), "header missing: {s}");
+        assert!(s.contains("segs=0, closed=false"), "body wrong: {s}");
+    }
+
+    #[test]
+    fn path2d_display_triangle() {
+        let mut path = Path2D::new(uv(0.0, 0.0));
+        path.line_to(uv(1.0, 0.0))
+            .line_to(uv(0.5, 1.0))
+            .line_to_close();
+        let s = format!("{path}");
+        assert!(s.starts_with("path(start=("), "header missing: {s}");
+        assert!(s.contains("segs=3, closed=true"), "body wrong: {s}");
+        // Three line_to entries; last uses └──
+        assert!(s.contains("├── line_to("), "missing ├── entries: {s}");
+        assert!(s.contains("└── line_to("), "missing └── entry: {s}");
     }
 }

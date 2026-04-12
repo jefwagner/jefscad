@@ -13,6 +13,9 @@ use std::sync::Arc;
 use crate::csg_lang::{CsgNode, SelectPolicy};
 
 #[cfg(feature = "extension-module")]
+use crate::geom::{Path2D, Point2};
+
+#[cfg(feature = "extension-module")]
 use crate::mesher::{MeshOptions, TriMesh, mesh_solid, write_stl, write_obj};
 
 // ---------------------------------------------------------------------------
@@ -78,6 +81,140 @@ fn write_obj_file_py(mesh: &TriMesh, path: &str) -> PyResult<()> {
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
     write_obj(mesh, &mut f)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Python-visible Path2D class
+// ---------------------------------------------------------------------------
+
+/// A 2-D path for use with `extrude` and `revolve`.
+///
+/// For **extrusion** the path is in the X-Y plane: `u` = x, `v` = y.
+/// For **revolution** the path is in the X-Z half-plane: `u` = radial distance, `v` = height.
+///
+/// Build the path with the builder methods (`line_to`, `arc_to`, `close`,
+/// `line_to_close`), all of which return `self` for chaining.  Then call
+/// `extrude(height)` or `revolve()` to obtain a `Node`.
+#[cfg(feature = "extension-module")]
+#[gen_stub_pyclass]
+#[pyclass(name = "Path2D")]
+pub struct PyPath2D {
+    inner: Path2D,
+}
+
+#[cfg(feature = "extension-module")]
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyPath2D {
+    /// Create a new path starting at `(u, v)`.
+    #[new]
+    fn new(u: f64, v: f64) -> Self {
+        PyPath2D { inner: Path2D::new(Point2::new(u, v)) }
+    }
+
+    // --- introspection ------------------------------------------------------
+
+    /// Starting point of the path as `(u, v)`.
+    #[getter]
+    fn start(&self) -> (f64, f64) {
+        (self.inner.start.u, self.inner.start.v)
+    }
+
+    /// Current end-point of the path as `(u, v)`.
+    #[getter]
+    fn current_pos(&self) -> (f64, f64) {
+        let p = self.inner.current_pos();
+        (p.u, p.v)
+    }
+
+    /// Number of segments.
+    #[getter]
+    fn n_segments(&self) -> usize {
+        self.inner.segments.len()
+    }
+
+    /// Whether the path has been marked closed.
+    #[getter]
+    fn closed(&self) -> bool {
+        self.inner.closed
+    }
+
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.inner)
+    }
+
+    fn __str__(&self) -> String {
+        format!("{}", self.inner)
+    }
+
+    // --- builder methods ----------------------------------------------------
+
+    /// Append a straight segment to `(u, v)`.  Returns `self` for chaining.
+    fn line_to(mut slf: pyo3::PyRefMut<'_, Self>, u: f64, v: f64) -> pyo3::PyRefMut<'_, Self> {
+        slf.inner.line_to(Point2::new(u, v));
+        slf
+    }
+
+    /// Append a circular arc sweeping `sweep` radians around `(cu, cv)`.
+    /// Positive sweep is CCW; negative is CW.  Returns `self` for chaining.
+    fn arc_to(mut slf: pyo3::PyRefMut<'_, Self>, cu: f64, cv: f64, sweep: f64) -> pyo3::PyRefMut<'_, Self> {
+        slf.inner.arc_to(Point2::new(cu, cv), sweep);
+        slf
+    }
+
+    /// Mark the path as closed without adding a segment.
+    /// The caller must ensure `current_pos` is already at `start`.
+    /// Returns `self` for chaining.
+    fn close(mut slf: pyo3::PyRefMut<'_, Self>) -> pyo3::PyRefMut<'_, Self> {
+        slf.inner.close();
+        slf
+    }
+
+    /// Append a straight segment back to `start` and mark the path as closed.
+    /// Returns `self` for chaining.
+    fn line_to_close(mut slf: pyo3::PyRefMut<'_, Self>) -> pyo3::PyRefMut<'_, Self> {
+        slf.inner.line_to_close();
+        slf
+    }
+
+    // --- solid constructors -------------------------------------------------
+
+    /// Extrude this closed path by `height` along +Z, returning a `Node`.
+    ///
+    /// Raises `ValueError` if the path is not closed, has no segments,
+    /// `height` is non-positive, or the path is geometrically open.
+    fn extrude(&self, height: f64) -> pyo3::PyResult<PyNode> {
+        use crate::brep_compiler::build_extrusion;
+        use crate::brep_kernel::SolidModelingContext;
+        let mut ctx = SolidModelingContext::new();
+        build_extrusion(&mut ctx, &self.inner, height, 0, 0)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e:?}")))?;
+        Ok(PyNode { inner: CsgNode::extrude(self.inner.clone(), height) })
+    }
+
+    /// Revolve this profile 360° around the Z-axis, returning a `Node`.
+    ///
+    /// Raises `ValueError` if the path is empty, a knot has x < 0,
+    /// or the path is open with neither endpoint on the Z-axis.
+    fn revolve(&self) -> pyo3::PyResult<PyNode> {
+        use crate::brep_compiler::build_revolution;
+        use crate::brep_kernel::SolidModelingContext;
+        let mut ctx = SolidModelingContext::new();
+        build_revolution(&mut ctx, &self.inner, 0, 0)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e:?}")))?;
+        Ok(PyNode { inner: CsgNode::revolve(self.inner.clone()) })
+    }
+}
+
+/// Create a new 2-D path starting at `(u, v)`.
+///
+/// Use the builder methods `line_to`, `arc_to`, `close`, and `line_to_close`
+/// to define the path, then call `extrude(height)` or `revolve()`.
+#[cfg(feature = "extension-module")]
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn path2d(u: f64, v: f64) -> PyPath2D {
+    PyPath2D::new(u, v)
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +444,9 @@ fn select_contains(node: Bound<'_, PyNode>, point: [f64; 3]) -> PyNode {
 #[cfg(feature = "extension-module")]
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMesh>()?;
+    m.add_class::<PyPath2D>()?;
     m.add_class::<PyNode>()?;
+    m.add_function(wrap_pyfunction!(path2d, m)?)?;
     m.add_function(wrap_pyfunction!(sphere, m)?)?;
     m.add_function(wrap_pyfunction!(cuboid, m)?)?;
     m.add_function(wrap_pyfunction!(cylinder, m)?)?;
