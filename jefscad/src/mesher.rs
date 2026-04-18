@@ -226,7 +226,14 @@ impl HalfEdgeMesh {
 /// `Curve3::project(pt) -> t` operation will be needed for insertion; this registry
 /// design is forward-compatible with that extension.
 pub struct EdgeVertexRegistry {
+    /// Interior edge samples: keyed by (EdgeId, quantized t).
+    /// Used for `MeshVertexRef::OnEdge` vertices only.
     entries: std::collections::HashMap<EdgeId, std::collections::BTreeMap<i64, MeshVertexId>>,
+    /// Corner vertices: keyed by B-rep `VertexId`.
+    /// A corner is the shared endpoint of multiple edges; it must be registered
+    /// once by B-rep vertex identity, not by (EdgeId, t), because the same 3-D
+    /// vertex appears as the *start* of different edges on different faces.
+    corners: std::collections::HashMap<VertexId, MeshVertexId>,
     /// t is quantized as `(t * quant).round() as i64`.  Default 1e12 gives
     /// sub-picometer resolution — well below the 10 µm modeling accuracy target
     /// while safely above f64 floating-point noise (~1e-15 for typical t ranges).
@@ -239,14 +246,33 @@ impl EdgeVertexRegistry {
     pub fn new() -> Self {
         Self {
             entries: std::collections::HashMap::new(),
+            corners: std::collections::HashMap::new(),
             quant:   Self::DEFAULT_QUANT,
+        }
+    }
+
+    /// Return the `MeshVertexId` for B-rep corner `vertex_id`, creating it on
+    /// first call.  Use this for `MeshVertexRef::Corner` vertices.
+    pub fn get_or_insert_corner(
+        &mut self,
+        vertex_id: VertexId,
+        mesh: &mut HalfEdgeMesh,
+        make_vertex: impl FnOnce() -> MeshVertex,
+    ) -> MeshVertexId {
+        if let Some(&vid) = self.corners.get(&vertex_id) {
+            vid
+        } else {
+            let vid = mesh.push_vertex(make_vertex());
+            self.corners.insert(vertex_id, vid);
+            vid
         }
     }
 
     /// Return the `MeshVertexId` already registered for `(edge_id, t)`, or create
     /// a new vertex via `make_vertex`, push it into `mesh`, register it, and return
-    /// the new id.  `make_vertex` is only called on first insertion.
-    pub fn get_or_insert(
+    /// the new id.  Use this for `MeshVertexRef::OnEdge` vertices.
+    /// `make_vertex` is only called on first insertion.
+    pub fn get_or_insert_edge(
         &mut self,
         edge_id: EdgeId,
         t: f64,
@@ -264,15 +290,19 @@ impl EdgeVertexRegistry {
         }
     }
 
-    /// Number of distinct edges that have at least one registered vertex.
+    /// Number of distinct edges that have at least one registered interior vertex.
     #[cfg(test)]
     pub fn edge_count(&self) -> usize { self.entries.len() }
 
-    /// Number of vertices registered for `edge_id`.
+    /// Number of interior (OnEdge) vertices registered for `edge_id`.
     #[cfg(test)]
     pub fn vertex_count_for(&self, edge_id: EdgeId) -> usize {
         self.entries.get(&edge_id).map_or(0, |m| m.len())
     }
+
+    /// Number of registered B-rep corner vertices.
+    #[cfg(test)]
+    pub fn corner_count(&self) -> usize { self.corners.len() }
 }
 
 // ── stitch_twins ──────────────────────────────────────────────────────────────
@@ -563,412 +593,403 @@ pub fn merge_vertices(mesh: &TriMesh, epsilon: f64) -> TriMesh {
     }
 }
 
+// ── merge_dcel_vertices ───────────────────────────────────────────────────────
+
+/// Merge [`MeshVertex`] entries whose positions are within `epsilon` of each
+/// other, remapping vertex IDs in all half-edges.
+///
+/// This is the DCEL-level equivalent of [`merge_vertices`]: it must run *before*
+/// [`stitch_twins`] so that coincident boundary vertices (created independently
+/// by adjacent face tessellators) end up with the same [`MeshVertexId`], enabling
+/// correct twin linking.
+///
+/// If `epsilon` is ≤ 0 the mesh is returned unmodified.
+pub fn merge_dcel_vertices(dcel: &mut HalfEdgeMesh, epsilon: f64) {
+    if epsilon <= 0.0 { return; }
+
+    use std::collections::HashMap;
+    let inv_eps = 1.0 / epsilon;
+    let quantize = |x: f64| -> i64 { (x * inv_eps).round() as i64 };
+    let key = |v: &[f64; 3]| -> (i64, i64, i64) {
+        (quantize(v[0]), quantize(v[1]), quantize(v[2]))
+    };
+
+    let mut map: HashMap<(i64, i64, i64), MeshVertexId> = HashMap::new();
+    let mut new_verts: Vec<MeshVertex> = Vec::new();
+    let mut remap: Vec<MeshVertexId>   = Vec::with_capacity(dcel.vertices.len());
+
+    for v in &dcel.vertices {
+        let new_id = *map.entry(key(&v.pos)).or_insert_with(|| {
+            let id = MeshVertexId(new_verts.len());
+            new_verts.push(v.clone());
+            id
+        });
+        remap.push(new_id);
+    }
+
+    for he in &mut dcel.half_edges {
+        he.vertex = remap[he.vertex.0];
+    }
+    dcel.vertices = new_verts;
+}
+
 // ── mesh_solid ────────────────────────────────────────────────────────────────
 
 /// Tessellate all faces of solid `sid` and return a combined [`TriMesh`].
 ///
-/// Each face is tessellated independently by the internal `mesh_face` function.
-/// The resulting per-face meshes are concatenated with triangle indices adjusted
-/// to the global vertex offset, then [`merge_vertices`] is applied to produce a
-/// watertight mesh (controlled by [`MeshOptions::epsilon`]).
+/// Each face tessellator appends vertices and half-edges to a shared
+/// [`HalfEdgeMesh`].  After all faces are meshed, [`merge_dcel_vertices`]
+/// collapses coincident boundary duplicates so that [`stitch_twins`] can link
+/// all interior half-edge pairs.  The final [`TriMesh`] is produced by
+/// [`HalfEdgeMesh::to_trimesh`].
 pub fn mesh_solid(ctx: &SolidModelingContext, sid: SolidId, opts: &MeshOptions) -> TriMesh {
     let shell_id = ctx.get_solid(sid).outer;
     let face_ids: Vec<FaceId> = ctx.get_shell(shell_id).faces.clone();
 
-    let mut out = TriMesh::default();
+    let mut dcel = HalfEdgeMesh::new();
 
     for face_id in face_ids {
-        let offset = out.vertices.len() as u32;
-        let face_mesh = mesh_face(ctx, face_id, opts);
-
-        out.vertices.extend_from_slice(&face_mesh.vertices);
-        out.tri_normals.extend_from_slice(&face_mesh.tri_normals);
-        out.tri_uvs.extend_from_slice(&face_mesh.tri_uvs);
-
-        for tri in &face_mesh.triangles {
-            out.triangles.push([tri[0] + offset, tri[1] + offset, tri[2] + offset]);
-        }
+        mesh_face(ctx, face_id, opts, &mut dcel);
     }
 
-    merge_vertices(&out, opts.epsilon)
+    merge_dcel_vertices(&mut dcel, opts.epsilon);
+    stitch_twins(&mut dcel);
+    dcel.to_trimesh()
 }
 
 // ── mesh_face ─────────────────────────────────────────────────────────────────
 
-/// Tessellate a single face, returning a local [`TriMesh`] with indices starting
-/// at 0.  [`mesh_solid`] adjusts the indices to the global vertex offset.
-fn mesh_face(ctx: &SolidModelingContext, face_id: FaceId, opts: &MeshOptions) -> TriMesh {
-    let face = ctx.get_face(face_id);
-    let surf_id = face.surface;
+/// Tessellate a single B-rep face, appending vertices and half-edges to `dcel`.
+///
+/// Each tessellator creates vertices independently; [`merge_dcel_vertices`] in
+/// [`mesh_solid`] collapses boundary duplicates before twin stitching.
+fn mesh_face(
+    ctx: &SolidModelingContext,
+    face_id: FaceId,
+    opts: &MeshOptions,
+    dcel: &mut HalfEdgeMesh,
+) {
+    let surf_id = ctx.get_face(face_id).surface;
     match ctx.get_surface(surf_id) {
-        SurfaceKind::Plane(plane)    => mesh_plane_face(ctx, face_id, *plane, opts),
-        SurfaceKind::Cylinder(cyl)   => mesh_cylindrical_face(ctx, face_id, *cyl, opts),
-        SurfaceKind::Cone(cone)      => mesh_conical_face(ctx, face_id, *cone, opts),
-        SurfaceKind::Sphere(sph)     => mesh_spherical_face(ctx, face_id, *sph, opts),
-        _ => TriMesh::default(), // other surface types: stub until Step 2 continues
+        SurfaceKind::Plane(plane)  => mesh_plane_face(ctx, face_id, *plane, opts, dcel),
+        SurfaceKind::Cylinder(cyl) => mesh_cylindrical_face(ctx, face_id, *cyl, opts, dcel),
+        SurfaceKind::Cone(cone)    => mesh_conical_face(ctx, face_id, *cone, opts, dcel),
+        SurfaceKind::Sphere(sph)   => mesh_spherical_face(ctx, face_id, *sph, opts, dcel),
+        _ => {}
     }
+}
+
+// ── sample_loop_into_dcel ─────────────────────────────────────────────────────
+// NOTE: sample_loop_into_dcel and the EdgeVertexRegistry are reserved for the
+// future Delaunay refinement step (Phase 5+), when per-edge vertex sharing must
+// be exact.  The current tessellators push vertices independently and rely on
+// merge_dcel_vertices for deduplication.
+
+/// Walk the coedges of `loop_id`, register each boundary sample in `registry`,
+/// and return `(MeshVertexId, [u, v])` pairs in coedge-walk order.
+///
+/// `make_vertex(uv, brep_ref)` is called only on first insertion for each
+/// `(EdgeId, quantized_t)` key; subsequent calls for the same key return the
+/// already-registered id without invoking the closure.
+///
+/// Vertex classification:
+/// - The start of each coedge (first sample) → `MeshVertexRef::Corner(VertexId)`
+/// - Interior samples on curved coedges (`CircularArc2`) → `MeshVertexRef::OnEdge(EdgeId)`
+/// - Interior mesh points (e.g. sphere latitude rings) are not handled here;
+///   callers push those directly with [`HalfEdgeMesh::push_vertex`].
+fn sample_loop_into_dcel<F>(
+    ctx: &SolidModelingContext,
+    loop_id: LoopId,
+    opts: &MeshOptions,
+    dcel: &mut HalfEdgeMesh,
+    registry: &mut EdgeVertexRegistry,
+    make_vertex: F,
+) -> Vec<(MeshVertexId, [f64; 2])>
+where
+    F: Fn([f64; 2], MeshVertexRef) -> MeshVertex,
+{
+    let coedge_ids = ctx.get_loop(loop_id).coedges.clone();
+    let mut result = Vec::new();
+
+    for ce_id in coedge_ids {
+        let ce      = ctx.get_coedge(ce_id);
+        let edge    = ctx.get_edge(ce.edge);
+        let edge_id = ce.edge;
+        let (t_start, t_end) = match ce.orientation {
+            Orientation::Forward => (edge.t0, edge.t1),
+            Orientation::Reverse => (edge.t1, edge.t0),
+        };
+        let corner_vid = match ce.orientation {
+            Orientation::Forward => edge.v0,
+            Orientation::Reverse => edge.v1,
+        };
+        let pcurve = ctx.get_curve2(ce.pcurve);
+
+        match pcurve {
+            Curve2Kind::Line2(_) => {
+                // Straight edge: one sample at t_start — always a B-rep corner.
+                // Use corner registry (keyed by VertexId, not EdgeId+t) so the
+                // same corner shared by multiple edges gets the same MeshVertexId.
+                let p  = pcurve.eval(t_start);
+                let uv = [p.u, p.v];
+                let vid = registry.get_or_insert_corner(corner_vid, dcel, || {
+                    make_vertex(uv, MeshVertexRef::Corner(corner_vid))
+                });
+                result.push((vid, uv));
+            }
+            Curve2Kind::CircularArc2(_) => {
+                // Curved edge: `resolution` samples, endpoint excluded.
+                // k=0 is a corner (use corner registry); k>0 is OnEdge (use edge registry).
+                let n  = opts.resolution as usize;
+                let dt = (t_end - t_start) / n as f64;
+                for k in 0..n {
+                    let t   = t_start + k as f64 * dt;
+                    let p   = pcurve.eval(t);
+                    let uv  = [p.u, p.v];
+                    let vid = if k == 0 {
+                        registry.get_or_insert_corner(corner_vid, dcel, || {
+                            make_vertex(uv, MeshVertexRef::Corner(corner_vid))
+                        })
+                    } else {
+                        registry.get_or_insert_edge(edge_id, t, dcel, || {
+                            make_vertex(uv, MeshVertexRef::OnEdge(edge_id))
+                        })
+                    };
+                    result.push((vid, uv));
+                }
+            }
+            Curve2Kind::Polyline2(_) => todo!("UV sampling for Polyline2 not yet implemented"),
+            Curve2Kind::Nurbs(_)     => todo!("UV sampling for NurbsCurve2 not yet implemented"),
+        }
+    }
+
+    result
 }
 
 // ── Plane tessellation ────────────────────────────────────────────────────────
 
 /// Tessellate a face whose surface is a [`Plane`].
 ///
-/// Samples the outer loop's coedge pcurves to get UV boundary points, then
-/// triangulates with a fan from `boundary[0]` (correct for all convex polygons —
-/// rectangles and circles are both convex).
-///
-/// Normals are taken from [`Plane::eval_n`] and negated for [`FaceSense::AntiAligned`]
-/// faces.  The same constant normal is stored at every triangle corner (flat shading).
+/// Samples the outer loop's coedge pcurves to get UV boundary points, pushes a
+/// [`MeshVertex`] per sample into `dcel`, then fan-triangulates from vertex 0
+/// (correct for all convex polygons).
 fn mesh_plane_face(
     ctx: &SolidModelingContext,
     face_id: FaceId,
     plane: Plane,
     opts: &MeshOptions,
-) -> TriMesh {
-    let face = ctx.get_face(face_id);
-    let sense = face.sense;
+    dcel: &mut HalfEdgeMesh,
+) {
+    let face    = ctx.get_face(face_id);
     let loop_id = face.outer;
 
-    // Sample boundary in UV space
-    let uvs = sample_loop_uvs(ctx, loop_id, opts);
-    let n = uvs.len();
-    if n < 3 {
-        return TriMesh::default();
-    }
-
-    // Outward-facing normal (constant over the plane)
     let raw_n = plane.eval_n(0.0, 0.0).unwrap();
-    let out_n = if sense == FaceSense::AntiAligned {
-        Point3::new(-raw_n.x, -raw_n.y, -raw_n.z)
+    let normal = if face.sense == FaceSense::AntiAligned {
+        [-raw_n.x, -raw_n.y, -raw_n.z]
     } else {
-        raw_n
+        [raw_n.x, raw_n.y, raw_n.z]
     };
-    let normal = [out_n.x, out_n.y, out_n.z];
 
-    // 3-D vertex positions from surface eval
-    let vertices: Vec<[f64; 3]> = uvs.iter().map(|&[u, v]| {
+    let uvs = sample_loop_uvs(ctx, loop_id, opts);
+    let n   = uvs.len();
+    if n < 3 { return; }
+
+    let vids: Vec<MeshVertexId> = uvs.iter().map(|&[u, v]| {
         let p = plane.eval(u, v);
-        [p.x, p.y, p.z]
+        dcel.push_vertex(MeshVertex {
+            pos: [p.x, p.y, p.z], uv: [u, v], normal,
+            brep_ref: MeshVertexRef::OnFace(face_id),
+        })
     }).collect();
 
-    // Fan triangulation from vertex 0: triangles (0, i, i+1) for i in 1..n-1
-    let mut triangles  = Vec::with_capacity(n - 2);
-    let mut tri_normals = Vec::with_capacity((n - 2) * 3);
-    let mut tri_uvs    = Vec::with_capacity((n - 2) * 3);
-
+    let v0 = vids[0];
     for i in 1..=(n - 2) {
-        triangles.push([0u32, i as u32, (i + 1) as u32]);
-        for &corner in &[0, i, i + 1] {
-            tri_normals.push(normal);
-            tri_uvs.push([uvs[corner][0], uvs[corner][1]]);
-        }
+        dcel.push_triangle(v0, vids[i], vids[i + 1]);
     }
-
-    TriMesh { vertices, triangles, tri_normals, tri_uvs }
 }
 
 // ── CylindricalSurface tessellation ──────────────────────────────────────────
 
 /// Tessellate the lateral face of a [`CylindricalSurface`].
 ///
-/// Builds a `(resolution+1) × 2` UV grid (u sweeps 0→2π in `resolution` steps,
-/// two v rows at v_min and v_max derived from the face loop).  Each column strip
-/// becomes two triangles.  Normals are the analytic radial normal at each vertex.
-///
-/// The first and last columns share the same 3-D positions (the seam) but carry
-/// different UV values (u=0 vs u=2π) — consistent with the documented seam
-/// limitation.
+/// Builds a `(resolution+1) × 2` UV grid — same geometry as the previous
+/// [`TriMesh`]-based tessellator.  Duplicate seam vertices at `u = 2π` are
+/// collapsed by [`merge_dcel_vertices`] in [`mesh_solid`].
 fn mesh_cylindrical_face(
     ctx: &SolidModelingContext,
     face_id: FaceId,
     cyl: CylindricalSurface,
     opts: &MeshOptions,
-) -> TriMesh {
+    dcel: &mut HalfEdgeMesh,
+) {
     use std::f64::consts::TAU;
 
-    // Derive v range from the boundary UV samples.
-    let loop_id = ctx.get_face(face_id).outer;
+    let loop_id  = ctx.get_face(face_id).outer;
     let boundary = sample_loop_uvs(ctx, loop_id, opts);
-    let v_min = boundary.iter().map(|uv| uv[1]).fold(f64::INFINITY,  f64::min);
-    let v_max = boundary.iter().map(|uv| uv[1]).fold(f64::NEG_INFINITY, f64::max);
+    let v_min    = boundary.iter().map(|uv| uv[1]).fold(f64::INFINITY,    f64::min);
+    let v_max    = boundary.iter().map(|uv| uv[1]).fold(f64::NEG_INFINITY, f64::max);
 
     let res = opts.resolution as usize;
-    let nu  = res + 1;      // columns: u = 0 … 2π (inclusive)
-    let nv  = 2usize;       // rows:    v_min, v_max
-    let v_vals = [v_min, v_max];
+    let nu  = res + 1;
 
-    // Build vertices, normals, UVs
-    let mut vertices    = Vec::with_capacity(nu * nv);
-    let mut vert_norms  = Vec::with_capacity(nu * nv); // one normal per vertex (reused per corner)
-    let mut vert_uvs    = Vec::with_capacity(nu * nv);
-
-    for vi in 0..nv {
-        let v = v_vals[vi];
+    let mut vert_ids: Vec<MeshVertexId> = Vec::with_capacity(nu * 2);
+    for &v in &[v_min, v_max] {
         for ui in 0..nu {
             let u = ui as f64 * TAU / res as f64;
             let p = cyl.eval(u, v);
-            vertices.push([p.x, p.y, p.z]);
-            let n = cyl.eval_n(u, v).expect("CylindricalSurface normal is always defined");
-            vert_norms.push([n.x, n.y, n.z]);
-            vert_uvs.push([u, v]);
+            let n = cyl.eval_n(u, v).expect("CylindricalSurface normal always defined");
+            vert_ids.push(dcel.push_vertex(MeshVertex {
+                pos: [p.x, p.y, p.z], uv: [u, v], normal: [n.x, n.y, n.z],
+                brep_ref: MeshVertexRef::OnFace(face_id),
+            }));
         }
     }
 
-    // Triangulate: res strips, each split into 2 triangles
-    //   BL = vi=0, ui=col     BR = vi=0, ui=col+1
-    //   TL = vi=1, ui=col     TR = vi=1, ui=col+1
-    //   Triangles: (BL, BR, TR) and (BL, TR, TL)  — outward winding verified
-    let mut triangles   = Vec::with_capacity(res * 2);
-    let mut tri_normals = Vec::with_capacity(res * 2 * 3);
-    let mut tri_uvs     = Vec::with_capacity(res * 2 * 3);
-
-    let idx = |vi: usize, ui: usize| (vi * nu + ui) as u32;
-
+    let idx = |row: usize, col: usize| vert_ids[row * nu + col];
     for col in 0..res {
-        let bl = idx(0, col);
-        let br = idx(0, col + 1);
-        let tl = idx(1, col);
-        let tr = idx(1, col + 1);
-
-        for &tri in &[[bl, br, tr], [bl, tr, tl]] {
-            triangles.push(tri);
-            for &c in &tri {
-                tri_normals.push(vert_norms[c as usize]);
-                tri_uvs.push(vert_uvs[c as usize]);
-            }
-        }
+        let (bl, br, tl, tr) = (idx(0,col), idx(0,col+1), idx(1,col), idx(1,col+1));
+        dcel.push_triangle(bl, br, tr);
+        dcel.push_triangle(bl, tr, tl);
     }
-
-    TriMesh { vertices, triangles, tri_normals, tri_uvs }
 }
 
 // ── ConicalSurface tessellation ───────────────────────────────────────────────
 
 /// Tessellate the lateral face of a [`ConicalSurface`].
 ///
-/// Uses an apex-fan: 1 apex vertex + `resolution` base-circle vertices forming
-/// `resolution` triangles.
-///
-/// **Normals (hybrid):**
-/// - Base-circle corners: analytic `eval_n(u, v_max)` — smooth shading around
-///   the circumference.
-/// - Apex corner: flat cross-product normal for that triangle — the apex is a
-///   geometric singularity where no single outward normal is definable, so the
-///   per-face normal is the most honest representation.
-///
-/// Triangle winding: `(apex, base_next, base_curr)` produces an outward-facing
-/// cross product for [`FaceSense::Aligned`] faces.  The face sense is respected by
-/// negating normals for [`FaceSense::AntiAligned`].
-///
-/// UV at each corner: apex → `(u_j, 0)`, base_next → `(u_{j+1}, v_max)`,
-/// base_curr → `(u_j, v_max)`.  The last triangle uses `u = TAU` for base_next
-/// instead of `0` to avoid a UV discontinuity at the seam.
+/// Apex-fan with hybrid normals (same logic as the previous [`TriMesh`] version).
 fn mesh_conical_face(
     ctx: &SolidModelingContext,
     face_id: FaceId,
     cone: ConicalSurface,
     opts: &MeshOptions,
-) -> TriMesh {
+    dcel: &mut HalfEdgeMesh,
+) {
     use std::f64::consts::TAU;
 
-    let face = ctx.get_face(face_id);
-    let sense = face.sense;
+    let face    = ctx.get_face(face_id);
+    let sense   = face.sense;
     let loop_id = face.outer;
 
-    // v_max = slant distance from apex to base circle
     let boundary = sample_loop_uvs(ctx, loop_id, opts);
-    let v_max = boundary.iter().map(|uv| uv[1]).fold(f64::NEG_INFINITY, f64::max);
+    let v_max    = boundary.iter().map(|uv| uv[1]).fold(f64::NEG_INFINITY, f64::max);
+    let res      = opts.resolution as usize;
 
-    let res = opts.resolution as usize;
-
-    // Vertices: index 0 = apex, indices 1..=res = base circle
+    // Apex vertex (index 0)
     let apex_pos = cone.eval(0.0, 0.0);
-    let mut vertices = Vec::with_capacity(res + 1);
-    vertices.push([apex_pos.x, apex_pos.y, apex_pos.z]);
+    let apex_vid = dcel.push_vertex(MeshVertex {
+        pos: [apex_pos.x, apex_pos.y, apex_pos.z], uv: [0.0, 0.0],
+        normal: [0.0, 0.0, 1.0], // placeholder; overwritten per-triangle below
+        brep_ref: MeshVertexRef::OnFace(face_id),
+    });
 
-    let mut base_u = Vec::with_capacity(res);
+    // Base circle vertices (indices 1..=res)
+    let mut base_vids = Vec::with_capacity(res);
+    let mut base_u    = Vec::with_capacity(res);
     for j in 0..res {
         let u = j as f64 * TAU / res as f64;
         let p = cone.eval(u, v_max);
-        vertices.push([p.x, p.y, p.z]);
+        let n = cone.eval_n(u, v_max).map_or([0.0, 0.0, 1.0], |n| [n.x, n.y, n.z]);
+        base_vids.push(dcel.push_vertex(MeshVertex {
+            pos: [p.x, p.y, p.z], uv: [u, v_max], normal: n,
+            brep_ref: MeshVertexRef::OnFace(face_id),
+        }));
         base_u.push(u);
     }
 
-    // Fan triangulation from apex
-    let mut triangles   = Vec::with_capacity(res);
-    let mut tri_normals = Vec::with_capacity(res * 3);
-    let mut tri_uvs     = Vec::with_capacity(res * 3);
+    let flip = sense == FaceSense::AntiAligned;
 
     for j in 0..res {
-        let curr_idx = (j + 1) as u32;
-        let next_idx = ((j + 1) % res + 1) as u32;
+        let curr_vid = base_vids[j];
+        let next_vid = base_vids[(j + 1) % res];
+        let u_curr   = base_u[j];
+        let u_next   = if j + 1 < res { base_u[j + 1] } else { TAU };
 
-        let u_curr = base_u[j];
-        let u_next = if j + 1 < res { base_u[j + 1] } else { TAU };
+        // Flat cross-product apex normal
+        let bv_next = dcel.vertices[next_vid.0].pos;
+        let bv_curr = dcel.vertices[curr_vid.0].pos;
+        let ap      = dcel.vertices[apex_vid.0].pos;
+        let v1 = Point3::new(bv_next[0]-ap[0], bv_next[1]-ap[1], bv_next[2]-ap[2]);
+        let v2 = Point3::new(bv_curr[0]-ap[0], bv_curr[1]-ap[1], bv_curr[2]-ap[2]);
+        let raw = v1.cross(v2);
+        let len = (raw.x*raw.x + raw.y*raw.y + raw.z*raw.z).sqrt();
+        let flat = if len > 1e-15 { [raw.x/len, raw.y/len, raw.z/len] } else { [0.0,0.0,1.0] };
+        let apex_n = if flip { [-flat[0],-flat[1],-flat[2]] } else { flat };
 
-        // Apex normal: flat cross-product for this triangle
-        //   (base_next - apex) × (base_curr - apex)
-        let bv_next = vertices[next_idx as usize];
-        let bv_curr = vertices[curr_idx as usize];
-        let v1 = Point3::new(
-            bv_next[0] - apex_pos.x,
-            bv_next[1] - apex_pos.y,
-            bv_next[2] - apex_pos.z,
-        );
-        let v2 = Point3::new(
-            bv_curr[0] - apex_pos.x,
-            bv_curr[1] - apex_pos.y,
-            bv_curr[2] - apex_pos.z,
-        );
-        let raw_n = v1.cross(v2);
-        let len = (raw_n.x*raw_n.x + raw_n.y*raw_n.y + raw_n.z*raw_n.z).sqrt();
-        let flat_n = if len > 1e-15 {
-            [raw_n.x/len, raw_n.y/len, raw_n.z/len]
-        } else {
-            [0.0, 0.0, 1.0] // degenerate fallback
-        };
+        let an_curr = cone.eval_n(u_curr, v_max).expect("eval_n defined for v > 0");
+        let an_next = cone.eval_n(u_next, v_max).expect("eval_n defined for v > 0");
+        let base_curr_n = if flip { [-an_curr.x,-an_curr.y,-an_curr.z] } else { [an_curr.x,an_curr.y,an_curr.z] };
+        let base_next_n = if flip { [-an_next.x,-an_next.y,-an_next.z] } else { [an_next.x,an_next.y,an_next.z] };
 
-        // Base-circle corners: analytic normals (smooth around circumference)
-        let an_next = cone.eval_n(u_next, v_max)
-            .expect("eval_n is defined for v > 0");
-        let an_curr = cone.eval_n(u_curr, v_max)
-            .expect("eval_n is defined for v > 0");
+        // Write normals; apex gets last-write-wins (acceptable)
+        dcel.vertices[apex_vid.0].normal  = apex_n;
+        dcel.vertices[curr_vid.0].normal  = base_curr_n;
+        dcel.vertices[next_vid.0].normal  = base_next_n;
 
-        let flip = sense == FaceSense::AntiAligned;
-        let sign = |n: [f64; 3]| -> [f64; 3] {
-            if flip { [-n[0], -n[1], -n[2]] } else { n }
-        };
-        let apex_n      = sign(flat_n);
-        let base_next_n = sign([an_next.x, an_next.y, an_next.z]);
-        let base_curr_n = sign([an_curr.x, an_curr.y, an_curr.z]);
-
-        // Triangle: (apex, base_next, base_curr)
-        triangles.push([0u32, next_idx, curr_idx]);
-        tri_uvs.push([u_curr, 0.0]);
-        tri_uvs.push([u_next, v_max]);
-        tri_uvs.push([u_curr, v_max]);
-        tri_normals.push(apex_n);
-        tri_normals.push(base_next_n);
-        tri_normals.push(base_curr_n);
+        // Triangle: (apex, base_next, base_curr) — outward winding for Aligned
+        dcel.push_triangle(apex_vid, next_vid, curr_vid);
     }
-
-    TriMesh { vertices, triangles, tri_normals, tri_uvs }
 }
 
 // ── SphericalSurface tessellation ────────────────────────────────────────────
 
 /// Tessellate a [`SphericalSurface`] face.
 ///
-/// Builds a `(n_lon+1) × (n_lat+1)` latitude/longitude UV grid where
-/// `n_lon = resolution` and `n_lat = max(2, resolution/2)`.  The two pole rows
-/// collapse to single vertices; all interior rings have `n_lon+1` vertices
-/// (including a seam-duplicate at `u = 2π`).
-///
-/// Triangulation:
-/// - **South fan**: `n_lon` triangles connecting the south pole to the first ring.
-/// - **Middle bands**: `n_lat-2` bands of `2·n_lon` triangles each (same strip
-///   winding as [`mesh_cylindrical_face`]).
-/// - **North fan**: `n_lon` triangles connecting the last ring to the north pole.
-///
-/// Normals are analytic via [`SphericalSurface::eval_n`], which is defined everywhere
-/// including the poles — smooth shading with no special-casing required.
+/// Same `(n_lon+1) × (n_lat-1)` grid as the previous [`TriMesh`] version.
+/// Seam duplicates at `u = 2π` are collapsed by [`merge_dcel_vertices`].
 fn mesh_spherical_face(
     ctx: &SolidModelingContext,
     face_id: FaceId,
     sph: SphericalSurface,
     opts: &MeshOptions,
-) -> TriMesh {
+    dcel: &mut HalfEdgeMesh,
+) {
     use std::f64::consts::{FRAC_PI_2, TAU};
 
     let sense = ctx.get_face(face_id).sense;
+    let flip  = sense == FaceSense::AntiAligned;
 
-    let n_lon = opts.resolution as usize;
-    let n_lat = (opts.resolution as usize / 2).max(2);
-
+    let n_lon  = opts.resolution as usize;
+    let n_lat  = (opts.resolution as usize / 2).max(2);
     let v_step = std::f64::consts::PI / n_lat as f64;
     let u_step = TAU / n_lon as f64;
 
-    // ── Vertices ──────────────────────────────────────────────────────────────
-    // Index 0         : south pole
-    // Index 1 + (i-1)*(n_lon+1) + j : ring i (1 ≤ i ≤ n_lat-1), column j (0 ≤ j ≤ n_lon)
-    // Index 1 + (n_lat-1)*(n_lon+1) : north pole
-    let n_verts = 2 + (n_lat - 1) * (n_lon + 1);
-    let mut vertices    = Vec::with_capacity(n_verts);
-    let mut vert_norms  = Vec::with_capacity(n_verts);
-    let mut vert_uvs    = Vec::with_capacity(n_verts);
-
-    let push_vert = |verts: &mut Vec<[f64; 3]>,
-                     norms: &mut Vec<[f64; 3]>,
-                     uvs:   &mut Vec<[f64; 2]>,
-                     u: f64, v: f64| {
+    let push = |dcel: &mut HalfEdgeMesh, u: f64, v: f64| -> MeshVertexId {
         let p = sph.eval(u, v);
-        verts.push([p.x, p.y, p.z]);
-        let n = sph.eval_n(u, v).expect("SphericalSurface::eval_n is always Some");
-        let out_n = if sense == FaceSense::AntiAligned { [-n.x, -n.y, -n.z] } else { [n.x, n.y, n.z] };
-        norms.push(out_n);
-        uvs.push([u, v]);
+        let n = sph.eval_n(u, v).expect("SphericalSurface::eval_n always Some");
+        let normal = if flip { [-n.x,-n.y,-n.z] } else { [n.x,n.y,n.z] };
+        dcel.push_vertex(MeshVertex {
+            pos: [p.x,p.y,p.z], uv: [u,v], normal,
+            brep_ref: MeshVertexRef::OnFace(face_id),
+        })
     };
 
-    // South pole (u=0 is arbitrary; position and normal are u-independent)
-    push_vert(&mut vertices, &mut vert_norms, &mut vert_uvs, 0.0, -FRAC_PI_2);
+    let south = push(dcel, 0.0, -FRAC_PI_2);
 
-    // Interior rings
+    let mut ring: Vec<Vec<MeshVertexId>> = Vec::with_capacity(n_lat - 1);
     for i in 1..n_lat {
-        let v = -FRAC_PI_2 + i as f64 * v_step;
-        for j in 0..=n_lon {
-            let u = j as f64 * u_step;
-            push_vert(&mut vertices, &mut vert_norms, &mut vert_uvs, u, v);
-        }
+        let v   = -FRAC_PI_2 + i as f64 * v_step;
+        let row = (0..=n_lon).map(|j| push(dcel, j as f64 * u_step, v)).collect();
+        ring.push(row);
     }
 
-    // North pole
-    push_vert(&mut vertices, &mut vert_norms, &mut vert_uvs, 0.0, FRAC_PI_2);
+    let north = push(dcel, 0.0, FRAC_PI_2);
 
-    // ── Index helpers ─────────────────────────────────────────────────────────
-    let south_pole = 0u32;
-    let north_pole = (1 + (n_lat - 1) * (n_lon + 1)) as u32;
-    // ring i (1-indexed), column j
-    let ring = |i: usize, j: usize| (1 + (i - 1) * (n_lon + 1) + j) as u32;
+    let rv = |i: usize, j: usize| ring[i - 1][j]; // i is 1-indexed
 
-    let n_tris = 2 * n_lon * (n_lat - 1);
-    let mut triangles   = Vec::with_capacity(n_tris);
-    let mut tri_normals = Vec::with_capacity(n_tris * 3);
-    let mut tri_uvs     = Vec::with_capacity(n_tris * 3);
+    // South fan
+    for j in 0..n_lon { dcel.push_triangle(south, rv(1, j+1), rv(1, j)); }
 
-    let mut push_tri = |tri: [u32; 3]| {
-        triangles.push(tri);
-        for &c in &tri {
-            tri_normals.push(vert_norms[c as usize]);
-            tri_uvs.push(vert_uvs[c as usize]);
-        }
-    };
-
-    // ── South fan ─────────────────────────────────────────────────────────────
-    // Winding: (south_pole, ring1[j+1], ring1[j]) — CCW in UV ✓
-    for j in 0..n_lon {
-        push_tri([south_pole, ring(1, j + 1), ring(1, j)]);
-    }
-
-    // ── Middle bands ──────────────────────────────────────────────────────────
-    // Band between ring i and ring i+1 (for i in 1..n_lat-1)
+    // Middle bands
     for i in 1..n_lat - 1 {
         for j in 0..n_lon {
-            let bl = ring(i,     j);
-            let br = ring(i,     j + 1);
-            let tl = ring(i + 1, j);
-            let tr = ring(i + 1, j + 1);
-            push_tri([bl, br, tr]);
-            push_tri([bl, tr, tl]);
+            dcel.push_triangle(rv(i, j),   rv(i, j+1),   rv(i+1, j+1));
+            dcel.push_triangle(rv(i, j),   rv(i+1, j+1), rv(i+1, j));
         }
     }
 
-    // ── North fan ─────────────────────────────────────────────────────────────
-    // Winding: (north_pole, ring_last[j], ring_last[j+1]) — CCW in UV ✓
-    for j in 0..n_lon {
-        push_tri([north_pole, ring(n_lat - 1, j), ring(n_lat - 1, j + 1)]);
-    }
-
-    TriMesh { vertices, triangles, tri_normals, tri_uvs }
+    // North fan
+    for j in 0..n_lon { dcel.push_triangle(north, rv(n_lat-1, j), rv(n_lat-1, j+1)); }
 }
 
 // ── sample_loop_uvs ───────────────────────────────────────────────────────────
@@ -1243,11 +1264,43 @@ mod test {
     }
 
     #[test]
-    fn registry_first_insert_creates_vertex() {
+    fn registry_corner_first_insert_creates_vertex() {
+        let mut mesh = HalfEdgeMesh::new();
+        let mut reg  = EdgeVertexRegistry::new();
+        let vid_id = VertexId(0);
+        let vid = reg.get_or_insert_corner(vid_id, &mut mesh, || dummy_vertex(1.0));
+        assert_eq!(mesh.vertices.len(), 1);
+        assert_eq!(vid, MeshVertexId(0));
+        assert_eq!(reg.corner_count(), 1);
+    }
+
+    #[test]
+    fn registry_corner_same_vertex_id_returns_same_mesh_vertex() {
+        let mut mesh = HalfEdgeMesh::new();
+        let mut reg  = EdgeVertexRegistry::new();
+        let vid_id = VertexId(5);
+        let v0 = reg.get_or_insert_corner(vid_id, &mut mesh, || dummy_vertex(1.0));
+        let v1 = reg.get_or_insert_corner(vid_id, &mut mesh, || dummy_vertex(2.0)); // not called
+        assert_eq!(v0, v1);
+        assert_eq!(mesh.vertices.len(), 1, "second call must not create a vertex");
+    }
+
+    #[test]
+    fn registry_corner_different_vertex_ids_are_independent() {
+        let mut mesh = HalfEdgeMesh::new();
+        let mut reg  = EdgeVertexRegistry::new();
+        let v0 = reg.get_or_insert_corner(VertexId(0), &mut mesh, || dummy_vertex(0.0));
+        let v1 = reg.get_or_insert_corner(VertexId(1), &mut mesh, || dummy_vertex(1.0));
+        assert_ne!(v0, v1);
+        assert_eq!(reg.corner_count(), 2);
+    }
+
+    #[test]
+    fn registry_edge_first_insert_creates_vertex() {
         let mut mesh = HalfEdgeMesh::new();
         let mut reg  = EdgeVertexRegistry::new();
         let eid = EdgeId(0);
-        let vid = reg.get_or_insert(eid, 0.0, &mut mesh, || dummy_vertex(1.0));
+        let vid = reg.get_or_insert_edge(eid, 0.5, &mut mesh, || dummy_vertex(1.0));
         assert_eq!(mesh.vertices.len(), 1);
         assert_eq!(vid, MeshVertexId(0));
         assert_eq!(reg.edge_count(), 1);
@@ -1255,34 +1308,34 @@ mod test {
     }
 
     #[test]
-    fn registry_same_edge_same_t_returns_same_id() {
+    fn registry_edge_same_t_returns_same_id() {
         let mut mesh = HalfEdgeMesh::new();
         let mut reg  = EdgeVertexRegistry::new();
         let eid = EdgeId(0);
-        let v0 = reg.get_or_insert(eid, 0.5, &mut mesh, || dummy_vertex(1.0));
-        let v1 = reg.get_or_insert(eid, 0.5, &mut mesh, || dummy_vertex(2.0)); // closure not called
+        let v0 = reg.get_or_insert_edge(eid, 0.5, &mut mesh, || dummy_vertex(1.0));
+        let v1 = reg.get_or_insert_edge(eid, 0.5, &mut mesh, || dummy_vertex(2.0));
         assert_eq!(v0, v1);
         assert_eq!(mesh.vertices.len(), 1, "second insert must not create a vertex");
     }
 
     #[test]
-    fn registry_same_edge_different_t_creates_new_vertex() {
+    fn registry_edge_different_t_creates_new_vertex() {
         let mut mesh = HalfEdgeMesh::new();
         let mut reg  = EdgeVertexRegistry::new();
         let eid = EdgeId(0);
-        let v0 = reg.get_or_insert(eid, 0.0, &mut mesh, || dummy_vertex(0.0));
-        let v1 = reg.get_or_insert(eid, 1.0, &mut mesh, || dummy_vertex(1.0));
+        let v0 = reg.get_or_insert_edge(eid, 0.0, &mut mesh, || dummy_vertex(0.0));
+        let v1 = reg.get_or_insert_edge(eid, 1.0, &mut mesh, || dummy_vertex(1.0));
         assert_ne!(v0, v1);
         assert_eq!(mesh.vertices.len(), 2);
         assert_eq!(reg.vertex_count_for(eid), 2);
     }
 
     #[test]
-    fn registry_different_edges_independent() {
+    fn registry_edge_different_edges_independent() {
         let mut mesh = HalfEdgeMesh::new();
         let mut reg  = EdgeVertexRegistry::new();
-        let v0 = reg.get_or_insert(EdgeId(0), 0.5, &mut mesh, || dummy_vertex(0.0));
-        let v1 = reg.get_or_insert(EdgeId(1), 0.5, &mut mesh, || dummy_vertex(1.0));
+        let v0 = reg.get_or_insert_edge(EdgeId(0), 0.5, &mut mesh, || dummy_vertex(0.0));
+        let v1 = reg.get_or_insert_edge(EdgeId(1), 0.5, &mut mesh, || dummy_vertex(1.0));
         assert_ne!(v0, v1);
         assert_eq!(reg.edge_count(), 2);
     }
@@ -1295,9 +1348,9 @@ mod test {
         let mut reg  = EdgeVertexRegistry::new();
         let eid = EdgeId(0);
         let t0 = 1.0_f64;
-        let t1 = t0 + 1e-13; // delta << 5e-13 (half-bin width)
-        let v0 = reg.get_or_insert(eid, t0, &mut mesh, || dummy_vertex(0.0));
-        let v1 = reg.get_or_insert(eid, t1, &mut mesh, || dummy_vertex(1.0));
+        let t1 = t0 + 1e-13;
+        let v0 = reg.get_or_insert_edge(eid, t0, &mut mesh, || dummy_vertex(0.0));
+        let v1 = reg.get_or_insert_edge(eid, t1, &mut mesh, || dummy_vertex(1.0));
         assert_eq!(v0, v1, "t-values within quantization tolerance must return the same vertex");
     }
 
@@ -1307,9 +1360,9 @@ mod test {
         let mut reg  = EdgeVertexRegistry::new();
         let eid = EdgeId(0);
         let t0 = 1.0_f64;
-        let t1 = t0 + 2e-12; // delta > 1e-12
-        let v0 = reg.get_or_insert(eid, t0, &mut mesh, || dummy_vertex(0.0));
-        let v1 = reg.get_or_insert(eid, t1, &mut mesh, || dummy_vertex(1.0));
+        let t1 = t0 + 2e-12;
+        let v0 = reg.get_or_insert_edge(eid, t0, &mut mesh, || dummy_vertex(0.0));
+        let v1 = reg.get_or_insert_edge(eid, t1, &mut mesh, || dummy_vertex(1.0));
         assert_ne!(v0, v1, "t-values outside quantization tolerance must be distinct");
     }
 
