@@ -513,19 +513,151 @@ Each segment becomes its own face in the B-rep (one surface per segment).
   - 19 tests, all passing
   - All lateral faces: FaceSense::Aligned (RevolutionSurface natural normal is outward for
     standard profiles). End cap: Fwd circle + Aligned (outward +Z). Start cap: Rev + AntiAligned.
-- [ ] Add `CsgPrim::Extrude { path, height }` and `CsgPrim::Revolve { path }` variants
-- [ ] Python `Path2D` wrapper with `extrude(height) -> Node` and `revolve() -> Node`
+- [x] Add `CsgPrim::Extrude { path, height }` and `CsgPrim::Revolve { path }` variants
+  - `hash_path2d` helper for bit-pattern hashing of Path2D in `hash_primitive`
+  - `compile_primitive` dispatch for both via `build_extrusion`/`build_revolution`
+- [x] Python `Path2D` wrapper with `extrude(height) -> Node` and `revolve() -> Node`
+  - `PyPath2D` class with `line_to`, `arc_to`, `close`, `line_to_close` builder methods
+  - `extrude(height)` and `revolve()` do eager validation via temp context
+  - `__str__` (tree-style Display) and `__repr__` (Rust Debug)
+  - Module-level `path2d(u, v)` constructor function
+- [x] `fmt::Display` for `Path2D` — tree-style output matching `CsgNode` style
+
+---
+
+### Phase 4.5 → Phase 5 prerequisite — flat_transform refactor (COMPLETE 2026-04-12)
+
+**Decision**: refactored `flat_transform` from `[f64; 16]` to `FlintArray<f64, 16>` before
+Phase 5 work begins (as noted in Phase 2 decision record).
+
+**Changes to `flint` crate** (commits dfc6b25, 4f57ea1):
+- `FlintArray.lb` / `.ub` made `pub` (enables const struct-literal construction)
+- `pub const IDENTITY_4X4: FlintArray<f64, 16>` added to `linalg.rs`, re-exported from crate root
+- `FlintArray<T,16>::det2()` — upper-left 2×2 determinant (for x-y isotropy checks in revolution)
+- `FlintArray<T,N>::midpoint() -> [T; N]` — elementwise (lb+ub)/2 for extracting best-estimate f64
+- `FlintArray::<f64,N>::from_f64(arr)` — 1-ULP-widening constructor from plain f64 array;
+  correct for non-representable values like trig outputs (vs. zero-width `lb==ub` struct literal)
+
+**Changes to `jefscad` crate** (commit 4f57ea1):
+- `flint` added as a Cargo dependency
+- `CsgNode::flat_transform`: `[f64;16]` → `FlintArray<f64,16>`
+- Local `IDENTITY_4X4` and `mat_mul` removed; use `flint::IDENTITY_4X4` and `FlintArray::mat_mul`
+- `mat_translation`/`mat_scale`/`mat_rot_aa` return `FlintArray` via `from_f64` (correct ULP
+  widening for all inputs, including trig values in `mat_rot_aa`)
+- `quantize_matrix` and `is_identity_transform` operate on `FlintArray.lb`
+- `compile_primitive` takes `&FlintArray<f64,16>`; extracts `.midpoint()` once for all f64
+  geometry operations; `is_identity` uses midpoint comparison
+
+---
+
+### Phase 4.6 — DCEL / Half-Edge mesh refactor
+
+**Motivation:** The current `TriMesh` is an unstructured triangle soup — adequate for STL/OBJ
+output but insufficient for the meshing pipeline that Phase 5 boolean ops will require.
+Delaunay refinement, edge-flipping, point insertion, and constraint-edge preservation all need
+local connectivity. The wiki (`kb/wiki/Mesh-Representations.md`) specifies the target structure.
+
+**Architecture:** Two-layer design:
+- **`HalfEdgeMesh`** — internal DCEL, used during construction and refinement. All coordinates
+  are `f64`. Each vertex carries a back-reference to the B-rep entity it was projected from.
+- **`TriMesh`** — output/export format; unchanged in shape, but `f64 → f32` narrowing now
+  happens only here. Generated from `HalfEdgeMesh` at the end of the pipeline.
+
+**Precision rule:** All `MeshVertex` fields (`pos`, `uv`, `normal`) are `f64` internally.
+Conversion to `f32` happens only inside `HalfEdgeMesh::to_trimesh()` (and the export writers).
+The existing `merge_vertices` epsilon logic moves into the DCEL assembly step.
+
+**B-rep back-reference (full three-way from the start):**
+`SphericalSurface` meshing generates interior latitude/longitude grid vertices that have no
+corresponding B-rep edge or corner — `OnFace` is required immediately.
+```rust
+pub enum MeshVertexRef {
+    Corner(VertexId),   // projected from a B-rep topological vertex; position is fixed
+    OnEdge(EdgeId),     // lies on a coedge; this half-edge pair is a constraint — never flip/cut
+    OnFace(FaceId),     // interior point sampled on a face (e.g. sphere grid, refinement insert)
+}
+```
+
+**Edge vertex registry — concept (needs design before implementation):**
+Each face is meshed independently in its own parametric UV domain, then assembled into a
+single solid `HalfEdgeMesh`. The problem is that two faces sharing a B-rep edge must
+reference the *same* `MeshVertexId`s along that boundary so that twin half-edges can be
+stitched. The proposed mechanism is a per-solid registry:
+
+```
+EdgeVertexRegistry: one entry per B-rep EdgeId
+    BTreeMap<t_val, MeshVertexId>   ← ordered by edge parameter
+```
+
+As each face is meshed, it looks up or inserts into the registry for each coedge it borders.
+Adjacent faces sharing an edge retrieve the same `MeshVertexId`s, enabling twin stitching
+after all faces are assembled. Open design questions to resolve before coding:
+
+- **Key type for t_val:** `OrderedFloat<f64>` (requires `ordered-float` dep) vs. quantized
+  `i64` (avoids dep but needs a stable epsilon strategy)?
+- **Vertex pool scope:** Global-to-solid during construction (IDs directly comparable across
+  faces) vs. per-face with a remapping pass on assembly? Global pool is simpler for stitching.
+- **Refinement interaction:** Refinement inserts new edge vertices after initial triangulation.
+  Those new vertices must be added back into the registry. When is the registry "finalized"?
+- **Coedge orientation:** The registry is keyed on the B-rep edge's own t-parameter (not the
+  coedge's), so Forward and Reverse coedges on the same edge look up the same entries correctly.
+
+#### Tasks
+
+- [_] **Design step**: resolve the four open edge-registry questions above; sketch the
+      assembly/stitching algorithm on paper before writing any code.
+
+##### Core types
+- [_] Define `MeshVertexRef { Corner(VertexId), OnEdge(EdgeId), OnFace(FaceId) }` in `mesher.rs`
+- [_] Define `MeshVertex { pos: [f64;3], uv: [f64;2], normal: [f64;3], brep_ref: MeshVertexRef }`
+- [_] Define half-edge newtypes: `HalfEdgeId`, `DcelFaceId`, `MeshVertexId`
+- [_] Define `HalfEdge { twin: Option<HalfEdgeId>, next: HalfEdgeId, vertex: MeshVertexId,
+      face: DcelFaceId, is_constraint: bool }`
+      (`twin` is `Option` during construction; all twins filled before `to_trimesh` is called)
+- [_] Define `DcelFace { half_edge: HalfEdgeId }` (one representative half-edge per triangle)
+- [_] Define `HalfEdgeMesh { vertices: Vec<MeshVertex>, half_edges: Vec<HalfEdge>,
+      faces: Vec<DcelFace> }` with arena-style push helpers
+
+##### Conversion and navigation
+- [_] Implement `HalfEdgeMesh::to_trimesh(&self) -> TriMesh`
+      — narrows `f64 → f32` for positions/normals/UVs; replaces current `merge_vertices` step
+- [_] Implement `HalfEdgeMesh` navigation helpers:
+  - `face_vertices(id) -> [MeshVertexId; 3]` — via next-chain
+  - `face_half_edges(id) -> [HalfEdgeId; 3]`
+  - `vertex_one_ring(id) -> impl Iterator<HalfEdgeId>` — orbit via twin+next
+
+##### Edge vertex registry
+- [_] Define `EdgeVertexRegistry` — structure TBD pending design step above
+- [_] Implement registry lookup/insert used by `mesh_face` when sampling coedge boundaries
+- [_] Implement twin-stitching pass in `mesh_solid` using the registry after all faces are meshed
+
+##### Pipeline refactor
+- [_] Refactor `mesh_face` to return `HalfEdgeMesh` (per-face, using global vertex pool)
+      — each surface type (`Plane`, `Cylindrical`, `Conical`, `Spherical`, `LinearExtrusion`,
+        `RevolutionSurface`) builds DCEL directly; coedge-derived edges get `is_constraint=true`;
+        vertices classified into `Corner`/`OnEdge`/`OnFace` at creation time
+- [_] Update `mesh_solid` to:
+      1. Create shared `EdgeVertexRegistry` for the solid
+      2. Mesh each face via `mesh_face`, accumulating into a global vertex/half-edge pool
+      3. Run twin-stitching pass
+      4. Call `to_trimesh()` for output
+
+##### Validation
+- [_] Verify all existing meshing tests pass after pipeline swap (output should be
+      geometrically equivalent; exact f32 values may shift slightly due to f64 intermediate)
+- [_] Add DCEL invariant tests: `face_vertices` round-trip, twin symmetry
+      (`he.twin.twin == he`), every boundary half-edge has a twin after stitching,
+      constraint-edge flag preserved through assembly
+
+**Deliverable:** `mesh_solid` pipeline passes through DCEL internally; STL/OBJ output is
+geometrically equivalent to current output; constraint edges are tagged; B-rep back-references
+are populated for all vertex types including `OnFace`.
 
 ---
 
 ### Phase 5 — Add boolean ops gradually
-#### Prerequisite — flat_transform refactor
-- [ ] Refactor `CsgNode` to use `FlintArray<f64, 16>` for `flat_transform`
-  - Replace `[f64; 16]` with `FlintArray<f64, 16>`
-  - Compose transforms via Flint mat_mul so accumulated rounding is tracked outward
-  - Extract midpoint of each entry for quantization/hashing (geom_id logic unchanged)
-  - This is the prerequisite for correct inside/outside classification at coincident
-    surfaces and under near-singular transform chains (see Phase 2 decision record)
+
+⏸ *Paused — completing Phase 4.6 (DCEL mesh refactor) first.*
 
 #### Predicate infrastructure
 - [ ] Implement point-in-primitive predicates using Flint transforms:

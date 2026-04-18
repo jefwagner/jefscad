@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `jefscad` is an early-stage Rust solid modeler. The two crates are:
 - **`flint/`** — Rounded floating-point interval arithmetic library (active development). Core types: `Flint<T>`, `FlintRef<'a,T>`, `FlintArray<T,N>`, `FlintVec<T>`, `FlintView<'a,T>`, all generic over `T = f32 | f64`.
 - **`jefscad/`** — Top-level application crate (stub; awaits `flint` foundation).
-- **`kb/`** — Personal knowledge-base symlink; **do not modify**.
+- **`kb/`** — Personal knowledge-base symlink; see [Knowledge Base](#knowledge-base) below for usage.
 
 ## Nightly Rust Required
 
@@ -52,6 +52,24 @@ Key invariant: after every operation the bounds are rounded outward by 1 ULP so 
 - Macros: prefer `macro_rules!` with `${count(...)}` / `${index()}` over proc-macros for repetitive `impl` blocks.
 - No `unwrap()` in library code; use `.expect("reason")`. No `Result` in public API yet — use `Option<T>` for domain-level non-representable cases.
 - `NaN` in `PartialOrd`: always return `None` from `partial_cmp` when either bound is NaN.
+
+## Knowledge Base
+
+`kb/` is a symlink to a personal knowledge base with the following structure (governed by `kb/AGENTS.md`):
+- **`kb/wiki/`** — Compiled knowledge: structured, interlinked markdown pages. The LLM may create and update files here.
+- **`kb/notes/`** — Raw source material. **Read-only** — never modify or delete files here.
+
+### When to consult the KB
+Before starting significant work, check relevant wiki pages for prior decisions and context:
+- Architecture or design questions → `kb/wiki/JefSCAD.md`, `kb/wiki/Flint.md`
+- B-rep / CSG concepts → `kb/wiki/Boundary-Representation-BRep.md`, `kb/wiki/Constructive-Solid-Geometry.md`
+- Mesh / NURBS topics → `kb/wiki/Mesh-Representations.md`, `kb/wiki/NURBS.md`
+
+### When to update the KB
+After making a significant architecture or design decision in this project, update the relevant wiki page(s) in `kb/wiki/`. Follow the conventions in `kb/AGENTS.md`:
+- Kebab-Case filenames, standard Markdown links for cross-references.
+- Log the change in `kb/wiki/log.md` using format `## [YYYY-MM-DD] action | Description`.
+- Always propose the update to the user before writing it.
 
 ## TODO Tracking
 

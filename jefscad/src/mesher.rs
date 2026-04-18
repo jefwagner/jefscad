@@ -1,7 +1,213 @@
 //! Tessellation: converts B-rep solids into triangle meshes.
 
-use crate::brep_kernel::{FaceId, FaceSense, LoopId, Orientation, SolidId, SolidModelingContext};
+use crate::brep_kernel::{EdgeId, FaceId, FaceSense, LoopId, Orientation, SolidId, SolidModelingContext, VertexId};
 use crate::geom::{ConicalSurface, Curve2, Curve2Kind, CylindricalSurface, Plane, Point3, SphericalSurface, Surface, SurfaceKind};
+
+// ── DCEL / Half-Edge mesh ─────────────────────────────────────────────────────
+
+/// Which B-rep entity a mesh vertex was projected from.
+///
+/// Used to classify vertices for constraint-edge enforcement and future
+/// Delaunay refinement: `Corner` and `OnEdge` vertices sit on B-rep boundaries
+/// and must not be moved; `OnFace` vertices are interior and may be relocated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshVertexRef {
+    /// Projected from a B-rep topological vertex; position is fixed.
+    Corner(VertexId),
+    /// Lies on a B-rep coedge boundary; the half-edge pair touching this vertex
+    /// is a constraint edge — never flip or cut.
+    OnEdge(EdgeId),
+    /// Interior point sampled on a B-rep face (e.g. sphere grid, refinement insert).
+    OnFace(FaceId),
+}
+
+/// An internal mesh vertex. All fields are `f64`; narrowing to `f32` happens only
+/// at export time (binary STL writer).
+#[derive(Debug, Clone)]
+pub struct MeshVertex {
+    /// 3-D position in world space.
+    pub pos:      [f64; 3],
+    /// Surface UV parameter at this vertex.
+    pub uv:       [f64; 2],
+    /// Outward surface normal at this vertex (unit vector).
+    pub normal:   [f64; 3],
+    /// Which B-rep entity this vertex was projected from.
+    pub brep_ref: MeshVertexRef,
+}
+
+/// Index into [`HalfEdgeMesh::vertices`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MeshVertexId(pub usize);
+
+/// Index into [`HalfEdgeMesh::half_edges`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HalfEdgeId(pub usize);
+
+/// Index into [`HalfEdgeMesh::faces`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DcelFaceId(pub usize);
+
+/// A directed half-edge belonging to exactly one face.
+///
+/// Convention: `vertex` is the *start* vertex of this half-edge; `next.vertex`
+/// is the end vertex.  For a CCW triangle (v0, v1, v2) the three half-edges
+/// are he0(v0→v1), he1(v1→v2), he2(v2→v0) with he0.next=he1, he1.next=he2,
+/// he2.next=he0.
+#[derive(Debug, Clone)]
+pub struct HalfEdge {
+    /// The opposing half-edge on the adjacent face, if any.
+    /// `None` during construction; all twins must be filled before [`HalfEdgeMesh::to_trimesh`].
+    pub twin:          Option<HalfEdgeId>,
+    /// Next half-edge around this face (CCW).
+    pub next:          HalfEdgeId,
+    /// Start vertex of this half-edge.
+    pub vertex:        MeshVertexId,
+    /// Face this half-edge belongs to.
+    pub face:          DcelFaceId,
+    /// `true` if this edge was derived from a B-rep coedge and must not be flipped or cut.
+    pub is_constraint: bool,
+}
+
+/// A triangular face in the DCEL; stores one representative half-edge.
+#[derive(Debug, Clone)]
+pub struct DcelFace {
+    /// Any one of the three half-edges bounding this face.
+    pub half_edge: HalfEdgeId,
+}
+
+/// Internal half-edge (DCEL) mesh used during tessellation and future refinement.
+///
+/// All coordinates are `f64`.  Call [`HalfEdgeMesh::to_trimesh`] to produce the
+/// [`TriMesh`] used for export.
+#[derive(Debug, Default, Clone)]
+pub struct HalfEdgeMesh {
+    pub vertices:   Vec<MeshVertex>,
+    pub half_edges: Vec<HalfEdge>,
+    pub faces:      Vec<DcelFace>,
+}
+
+impl HalfEdgeMesh {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a vertex and return its ID.
+    pub fn push_vertex(&mut self, v: MeshVertex) -> MeshVertexId {
+        let id = MeshVertexId(self.vertices.len());
+        self.vertices.push(v);
+        id
+    }
+
+    /// Append a CCW triangle defined by three vertex IDs.
+    ///
+    /// Creates three half-edges with `next` linked in CCW order and `twin = None`.
+    /// Returns `(face_id, [he0, he1, he2])` where `he_i` starts at `v_i`.
+    pub fn push_triangle(
+        &mut self,
+        v0: MeshVertexId,
+        v1: MeshVertexId,
+        v2: MeshVertexId,
+    ) -> (DcelFaceId, [HalfEdgeId; 3]) {
+        let face_id = DcelFaceId(self.faces.len());
+        let he0 = HalfEdgeId(self.half_edges.len());
+        let he1 = HalfEdgeId(self.half_edges.len() + 1);
+        let he2 = HalfEdgeId(self.half_edges.len() + 2);
+
+        self.half_edges.push(HalfEdge { twin: None, next: he1, vertex: v0, face: face_id, is_constraint: false });
+        self.half_edges.push(HalfEdge { twin: None, next: he2, vertex: v1, face: face_id, is_constraint: false });
+        self.half_edges.push(HalfEdge { twin: None, next: he0, vertex: v2, face: face_id, is_constraint: false });
+        self.faces.push(DcelFace { half_edge: he0 });
+
+        (face_id, [he0, he1, he2])
+    }
+
+    /// Link two half-edges as twins of each other.
+    pub fn set_twin(&mut self, a: HalfEdgeId, b: HalfEdgeId) {
+        self.half_edges[a.0].twin = Some(b);
+        self.half_edges[b.0].twin = Some(a);
+    }
+
+    /// Return the three vertex IDs of `face_id` in CCW order.
+    pub fn face_vertices(&self, face_id: DcelFaceId) -> [MeshVertexId; 3] {
+        let [he0, he1, he2] = self.face_half_edges(face_id);
+        [
+            self.half_edges[he0.0].vertex,
+            self.half_edges[he1.0].vertex,
+            self.half_edges[he2.0].vertex,
+        ]
+    }
+
+    /// Return the three half-edge IDs bounding `face_id` in CCW order.
+    pub fn face_half_edges(&self, face_id: DcelFaceId) -> [HalfEdgeId; 3] {
+        let he0 = self.faces[face_id.0].half_edge;
+        let he1 = self.half_edges[he0.0].next;
+        let he2 = self.half_edges[he1.0].next;
+        [he0, he1, he2]
+    }
+
+    /// Iterate over all half-edges leaving `vertex_id` (the one-ring).
+    ///
+    /// Traversal uses `twin.next` to walk around the vertex.  Stops if any
+    /// half-edge in the ring has `twin = None` (open boundary).
+    pub fn vertex_one_ring(&self, vertex_id: MeshVertexId) -> impl Iterator<Item = HalfEdgeId> + '_ {
+        // Find the first outgoing half-edge for this vertex
+        let start = self.half_edges.iter().position(|he| he.vertex == vertex_id)
+            .map(HalfEdgeId);
+
+        struct OneRing<'a> {
+            mesh:    &'a HalfEdgeMesh,
+            start:   Option<HalfEdgeId>,
+            current: Option<HalfEdgeId>,
+            done:    bool,
+        }
+        impl<'a> Iterator for OneRing<'a> {
+            type Item = HalfEdgeId;
+            fn next(&mut self) -> Option<HalfEdgeId> {
+                if self.done { return None; }
+                let cur = self.current?;
+                // Advance: twin of current, then .next twice to get the next outgoing
+                // half-edge from the same vertex.  Pattern: cur.twin.next.next
+                let twin = self.mesh.half_edges[cur.0].twin?;
+                let nxt_outgoing = {
+                    let n1 = self.mesh.half_edges[twin.0].next;
+                    self.mesh.half_edges[n1.0].next
+                };
+                if Some(nxt_outgoing) == self.start {
+                    self.done = true;
+                } else {
+                    self.current = Some(nxt_outgoing);
+                }
+                Some(cur)
+            }
+        }
+
+        OneRing { mesh: self, start, current: start, done: false }
+    }
+
+    /// Convert to a [`TriMesh`] for export.
+    ///
+    /// One `TriMesh` vertex is emitted per `MeshVertex` (no deduplication — shared
+    /// positions are guaranteed by the edge registry during assembly).  All values
+    /// remain `f64`; the binary STL writer narrows to `f32`.
+    pub fn to_trimesh(&self) -> TriMesh {
+        let vertices: Vec<[f64; 3]> = self.vertices.iter().map(|v| v.pos).collect();
+
+        let mut triangles   = Vec::with_capacity(self.faces.len());
+        let mut tri_normals = Vec::with_capacity(self.faces.len() * 3);
+        let mut tri_uvs     = Vec::with_capacity(self.faces.len() * 3);
+
+        for fi in 0..self.faces.len() {
+            let [v0, v1, v2] = self.face_vertices(DcelFaceId(fi));
+            triangles.push([v0.0 as u32, v1.0 as u32, v2.0 as u32]);
+            for &vi in &[v0, v1, v2] {
+                tri_normals.push(self.vertices[vi.0].normal);
+                tri_uvs.push(self.vertices[vi.0].uv);
+            }
+        }
+
+        TriMesh { vertices, triangles, tri_normals, tri_uvs }
+    }
+}
 
 // ── TriMesh ───────────────────────────────────────────────────────────────────
 
@@ -741,6 +947,175 @@ mod test {
                     "triangle index {idx} out of range (vertices.len() = {nv})");
             }
         }
+    }
+
+    // ── DCEL / HalfEdgeMesh ──────────────────────────────────────────────────
+
+    /// Build a single flat CCW triangle: (0,0,0), (1,0,0), (0,1,0), normal +Z.
+    fn single_triangle_dcel() -> HalfEdgeMesh {
+        let mut m = HalfEdgeMesh::new();
+        let vref = MeshVertexRef::OnFace(FaceId(0));
+        let v0 = m.push_vertex(MeshVertex { pos: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let v1 = m.push_vertex(MeshVertex { pos: [1.0, 0.0, 0.0], uv: [1.0, 0.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let v2 = m.push_vertex(MeshVertex { pos: [0.0, 1.0, 0.0], uv: [0.0, 1.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        m.push_triangle(v0, v1, v2);
+        m
+    }
+
+    /// Build two triangles sharing edge v1–v2 (a simple quad split):
+    ///   T0: v0(0,0,0), v1(1,0,0), v2(0,1,0) — top-left
+    ///   T1: v3(1,1,0), v2(0,1,0), v1(1,0,0) — bottom-right
+    /// The shared edge is v1→v2 in T0 (he1 of T0) and v2→v1 in T1 (he1 of T1).
+    fn two_triangle_dcel() -> (HalfEdgeMesh, [HalfEdgeId; 6]) {
+        let mut m = HalfEdgeMesh::new();
+        let vref = MeshVertexRef::OnFace(FaceId(0));
+        let v0 = m.push_vertex(MeshVertex { pos: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let v1 = m.push_vertex(MeshVertex { pos: [1.0, 0.0, 0.0], uv: [1.0, 0.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let v2 = m.push_vertex(MeshVertex { pos: [0.0, 1.0, 0.0], uv: [0.0, 1.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let v3 = m.push_vertex(MeshVertex { pos: [1.0, 1.0, 0.0], uv: [1.0, 1.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let (_, [he00, he01, he02]) = m.push_triangle(v0, v1, v2);
+        let (_, [he10, he11, he12]) = m.push_triangle(v3, v2, v1);
+        // he01: v1→v2 and he11: v2→v1 are twins
+        m.set_twin(he01, he11);
+        (m, [he00, he01, he02, he10, he11, he12])
+    }
+
+    #[test]
+    fn dcel_default_is_empty() {
+        let m = HalfEdgeMesh::default();
+        assert_eq!(m.vertices.len(), 0);
+        assert_eq!(m.half_edges.len(), 0);
+        assert_eq!(m.faces.len(), 0);
+    }
+
+    #[test]
+    fn dcel_push_vertex_increments_count() {
+        let mut m = HalfEdgeMesh::new();
+        let vref = MeshVertexRef::OnFace(FaceId(0));
+        let id = m.push_vertex(MeshVertex { pos: [1.0, 2.0, 3.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        assert_eq!(m.vertices.len(), 1);
+        assert_eq!(id, MeshVertexId(0));
+    }
+
+    #[test]
+    fn dcel_push_triangle_creates_face_and_half_edges() {
+        let m = single_triangle_dcel();
+        assert_eq!(m.faces.len(), 1);
+        assert_eq!(m.half_edges.len(), 3);
+        assert_eq!(m.vertices.len(), 3);
+    }
+
+    #[test]
+    fn dcel_next_chain_closes_in_three_steps() {
+        let m = single_triangle_dcel();
+        let he0 = m.faces[0].half_edge;
+        let he1 = m.half_edges[he0.0].next;
+        let he2 = m.half_edges[he1.0].next;
+        let back = m.half_edges[he2.0].next;
+        assert_eq!(back, he0, "next-chain must close: he0→he1→he2→he0");
+    }
+
+    #[test]
+    fn dcel_face_vertices_single_triangle() {
+        let m = single_triangle_dcel();
+        let [v0, v1, v2] = m.face_vertices(DcelFaceId(0));
+        assert_eq!(m.vertices[v0.0].pos, [0.0, 0.0, 0.0]);
+        assert_eq!(m.vertices[v1.0].pos, [1.0, 0.0, 0.0]);
+        assert_eq!(m.vertices[v2.0].pos, [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn dcel_face_half_edges_belong_to_face() {
+        let m = single_triangle_dcel();
+        for he_id in m.face_half_edges(DcelFaceId(0)) {
+            assert_eq!(m.half_edges[he_id.0].face, DcelFaceId(0));
+        }
+    }
+
+    #[test]
+    fn dcel_new_half_edges_have_no_twin() {
+        let m = single_triangle_dcel();
+        for he in &m.half_edges {
+            assert!(he.twin.is_none(), "newly created half-edges must have twin = None");
+        }
+    }
+
+    #[test]
+    fn dcel_set_twin_is_symmetric() {
+        let (m, [_, he01, _, _, he11, _]) = two_triangle_dcel();
+        assert_eq!(m.half_edges[he01.0].twin, Some(he11));
+        assert_eq!(m.half_edges[he11.0].twin, Some(he01));
+    }
+
+    #[test]
+    fn dcel_set_twin_twin_twin_is_self() {
+        let (m, [_, he01, _, _, he11, _]) = two_triangle_dcel();
+        let twin_of_twin = m.half_edges[m.half_edges[he01.0].twin.unwrap().0].twin.unwrap();
+        assert_eq!(twin_of_twin, he01, "he.twin.twin must equal he");
+    }
+
+    #[test]
+    fn dcel_unstitched_edges_still_none_after_partial_stitch() {
+        let (m, [he00, _, he02, he10, _, he12]) = two_triangle_dcel();
+        // Only the shared edge was stitched; boundary half-edges remain None
+        for he_id in [he00, he02, he10, he12] {
+            assert!(m.half_edges[he_id.0].twin.is_none(),
+                "boundary half-edge {he_id:?} should still have twin = None");
+        }
+    }
+
+    // ── to_trimesh ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn dcel_to_trimesh_single_triangle_counts() {
+        let mesh = single_triangle_dcel().to_trimesh();
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.triangles.len(), 1);
+        assert_eq!(mesh.tri_normals.len(), 3);
+        assert_eq!(mesh.tri_uvs.len(), 3);
+    }
+
+    #[test]
+    fn dcel_to_trimesh_single_triangle_positions() {
+        let mesh = single_triangle_dcel().to_trimesh();
+        assert_eq!(mesh.vertices[0], [0.0, 0.0, 0.0]);
+        assert_eq!(mesh.vertices[1], [1.0, 0.0, 0.0]);
+        assert_eq!(mesh.vertices[2], [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn dcel_to_trimesh_single_triangle_normals_are_z() {
+        let mesh = single_triangle_dcel().to_trimesh();
+        for n in &mesh.tri_normals {
+            assert_eq!(*n, [0.0, 0.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn dcel_to_trimesh_indices_in_range() {
+        let (dcel, _) = two_triangle_dcel();
+        let mesh = dcel.to_trimesh();
+        let nv = mesh.vertices.len();
+        for tri in &mesh.triangles {
+            for &idx in tri {
+                assert!((idx as usize) < nv, "triangle index {idx} out of range");
+            }
+        }
+    }
+
+    #[test]
+    fn dcel_to_trimesh_invariants_two_triangles() {
+        let (dcel, _) = two_triangle_dcel();
+        let mesh = dcel.to_trimesh();
+        check_invariants(&mesh);
+    }
+
+    #[test]
+    fn dcel_to_trimesh_uv_preserved() {
+        let mesh = single_triangle_dcel().to_trimesh();
+        assert_eq!(mesh.tri_uvs[0], [0.0, 0.0]);
+        assert_eq!(mesh.tri_uvs[1], [1.0, 0.0]);
+        assert_eq!(mesh.tri_uvs[2], [0.0, 1.0]);
     }
 
     // ── merge_vertices ───────────────────────────────────────────────────────

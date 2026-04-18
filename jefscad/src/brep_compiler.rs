@@ -4,6 +4,7 @@
 //! populates the arena with all geometry and topology, and returns the [`SolidId`] of
 //! the resulting solid.
 
+use flint::{FlintArray, IDENTITY_4X4};
 use crate::brep_kernel::{
     CoEdge, Edge, Face, FaceSense, Loop, LoopId, Orientation, ProvenanceData,
     Shell, Solid, SolidId, SolidModelingContext, Vertex,
@@ -1179,7 +1180,7 @@ pub fn build_revolution(
 pub fn compile_primitive(
     ctx: &mut SolidModelingContext,
     prim: &crate::csg_lang::CsgPrimitive,
-    transform: &[f64; 16],
+    transform: &FlintArray<f64, 16>,
     prov_id: u64,
     geom_id: u64,
 ) -> SolidId {
@@ -1212,7 +1213,9 @@ pub fn compile_primitive(
     // ── Extract linear part and translation ───────────────────────────────────
     // Row-major layout: row i, col j → index i*4 + j.
     // Linear part M (3×3) is the top-left block; translation d is column 3, rows 0-2.
-    let m = |r: usize, c: usize| transform[r * 4 + c];
+    // Use midpoint of each interval element for geometry operations.
+    let mat = transform.midpoint();
+    let m = |r: usize, c: usize| mat[r * 4 + c];
     let d = Point3::new(m(0, 3), m(1, 3), m(2, 3));
 
     // Apply M to a vector (w=0): only the linear part.
@@ -1362,15 +1365,9 @@ fn scale_lateral_pcurves(
 }
 
 /// Returns `true` if `transform` is the 4×4 identity matrix (within 1e-12).
-fn is_identity(transform: &[f64; 16]) -> bool {
-    #[rustfmt::skip]
-    const ID: [f64; 16] = [
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
-    ];
-    transform.iter().zip(ID.iter()).all(|(a, b)| (a - b).abs() < 1e-12)
+fn is_identity(transform: &FlintArray<f64, 16>) -> bool {
+    let mid = transform.midpoint();
+    mid.iter().zip(IDENTITY_4X4.lb.iter()).all(|(a, b)| (a - b).abs() < 1e-12)
 }
 
 // ── compile_csg_node ──────────────────────────────────────────────────────────
@@ -2094,14 +2091,6 @@ mod test {
     use crate::csg_lang::CsgPrimitive;
     use crate::geom::SurfaceKind;
 
-    #[rustfmt::skip]
-    const ID: [f64; 16] = [
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
-    ];
-
     fn approx(a: f64, b: f64) -> bool { (a - b).abs() < 1e-10 }
     fn pt_approx(p: Point3, x: f64, y: f64, z: f64) -> bool {
         approx(p.x, x) && approx(p.y, y) && approx(p.z, z)
@@ -2110,14 +2099,15 @@ mod test {
     /// Compile with identity transform, forwarding prov/geom ids.
     fn compile(prim: CsgPrimitive) -> (SolidModelingContext, SolidId) {
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_primitive(&mut ctx, &prim, &ID, 7, 42);
+        let sid = compile_primitive(&mut ctx, &prim, &IDENTITY_4X4, 7, 42);
         (ctx, sid)
     }
 
-    /// Compile with an explicit transform; prov/geom ids are zeroed.
+    /// Compile with an explicit transform given as a plain [f64;16]; prov/geom ids are zeroed.
     fn compile_with(prim: CsgPrimitive, transform: [f64; 16]) -> (SolidModelingContext, SolidId) {
+        let t = FlintArray { lb: transform, ub: transform };
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_primitive(&mut ctx, &prim, &transform, 0, 0);
+        let sid = compile_primitive(&mut ctx, &prim, &t, 0, 0);
         (ctx, sid)
     }
 
