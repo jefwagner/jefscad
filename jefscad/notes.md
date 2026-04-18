@@ -652,15 +652,24 @@ after all faces are assembled. Open design questions to resolve before coding:
 
 ##### Validation
 - [x] All 467 existing meshing tests pass after pipeline swap (commit 4eadd17)
-- [_] Add targeted DCEL invariant tests: `face_vertices` round-trip, twin symmetry
-      (`he.twin.twin == he`), every interior half-edge has a twin after stitching on a cuboid,
-      constraint-edge flag preserved through assembly
-- [_] Full vertex classification (`Corner`/`OnEdge`/`OnFace`) — currently all `OnFace`;
-      requires tessellators to consult registry for boundary vertices (deferred to Delaunay phase)
+- [x] Targeted DCEL invariant tests added: `face_vertices` round-trip, twin symmetry
+      (`he.twin.twin == he`), every half-edge has a twin after stitching on a cuboid.
+      Constraint-edge flag test deferred (flag is always false until vertex classification lands).
+- [x] Full vertex classification (`Corner`/`OnEdge`/`OnFace`) — all four tessellators updated:
+      - `mesh_plane_face`: uses `sample_loop_into_dcel` + `EdgeVertexRegistry`; all vertices
+        are `Corner` or `OnEdge`; cuboid pre-merge count drops 24→8 (registry deduplicates corners)
+      - `mesh_conical_face`: loop scan finds apex (degenerate edge) and base circle edge;
+        apex → `Corner`, base seam j=0 → `Corner`, base ring j>0 → `OnEdge`
+      - `mesh_cylindrical_face`: loop scan finds seam (v0≠v1) and two circle edges;
+        seam corners → `Corner`, circle interior → `OnEdge`
+      - `mesh_spherical_face`: loop scan finds south/north pole edges (by pcurve v-sign) and
+        seam edge; poles → `Corner`, seam columns → `OnEdge`, interior grid → `OnFace`
+      - 4 classification tests added (cuboid all-Corner, cylinder/cone no-OnFace,
+        sphere all-three-types); 474 tests total
 
 **Deliverable:** `mesh_solid` pipeline passes through DCEL internally; STL/OBJ output is
-geometrically equivalent to current output; B-rep back-references populated (`OnFace` for all
-vertices in Phase 4.6; full classification in Delaunay refinement phase).
+geometrically equivalent to current output; B-rep back-references fully classified
+(`Corner`/`OnEdge`/`OnFace`) for all four primitive tessellators.
 
 ---
 

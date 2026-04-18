@@ -1,7 +1,7 @@
 //! Tessellation: converts B-rep solids into triangle meshes.
 
 use crate::brep_kernel::{EdgeId, FaceId, FaceSense, LoopId, Orientation, SolidId, SolidModelingContext, VertexId};
-use crate::geom::{ConicalSurface, Curve2, Curve2Kind, CylindricalSurface, Plane, Point3, SphericalSurface, Surface, SurfaceKind};
+use crate::geom::{ConicalSurface, Curve2, Curve2Kind, Curve3Kind, CylindricalSurface, Plane, Point3, SphericalSurface, Surface, SurfaceKind};
 
 // ── DCEL / Half-Edge mesh ─────────────────────────────────────────────────────
 
@@ -646,10 +646,11 @@ pub fn mesh_solid(ctx: &SolidModelingContext, sid: SolidId, opts: &MeshOptions) 
     let shell_id = ctx.get_solid(sid).outer;
     let face_ids: Vec<FaceId> = ctx.get_shell(shell_id).faces.clone();
 
-    let mut dcel = HalfEdgeMesh::new();
+    let mut dcel     = HalfEdgeMesh::new();
+    let mut registry = EdgeVertexRegistry::new();
 
     for face_id in face_ids {
-        mesh_face(ctx, face_id, opts, &mut dcel);
+        mesh_face(ctx, face_id, opts, &mut dcel, &mut registry);
     }
 
     merge_dcel_vertices(&mut dcel, opts.epsilon);
@@ -668,13 +669,14 @@ fn mesh_face(
     face_id: FaceId,
     opts: &MeshOptions,
     dcel: &mut HalfEdgeMesh,
+    registry: &mut EdgeVertexRegistry,
 ) {
     let surf_id = ctx.get_face(face_id).surface;
     match ctx.get_surface(surf_id) {
-        SurfaceKind::Plane(plane)  => mesh_plane_face(ctx, face_id, *plane, opts, dcel),
-        SurfaceKind::Cylinder(cyl) => mesh_cylindrical_face(ctx, face_id, *cyl, opts, dcel),
-        SurfaceKind::Cone(cone)    => mesh_conical_face(ctx, face_id, *cone, opts, dcel),
-        SurfaceKind::Sphere(sph)   => mesh_spherical_face(ctx, face_id, *sph, opts, dcel),
+        SurfaceKind::Plane(plane)  => mesh_plane_face(ctx, face_id, *plane, opts, dcel, registry),
+        SurfaceKind::Cylinder(cyl) => mesh_cylindrical_face(ctx, face_id, *cyl, opts, dcel, registry),
+        SurfaceKind::Cone(cone)    => mesh_conical_face(ctx, face_id, *cone, opts, dcel, registry),
+        SurfaceKind::Sphere(sph)   => mesh_spherical_face(ctx, face_id, *sph, opts, dcel, registry),
         _ => {}
     }
 }
@@ -779,6 +781,7 @@ fn mesh_plane_face(
     plane: Plane,
     opts: &MeshOptions,
     dcel: &mut HalfEdgeMesh,
+    registry: &mut EdgeVertexRegistry,
 ) {
     let face    = ctx.get_face(face_id);
     let loop_id = face.outer;
@@ -790,18 +793,14 @@ fn mesh_plane_face(
         [raw_n.x, raw_n.y, raw_n.z]
     };
 
-    let uvs = sample_loop_uvs(ctx, loop_id, opts);
-    let n   = uvs.len();
+    let boundary = sample_loop_into_dcel(ctx, loop_id, opts, dcel, registry, |[u, v], brep_ref| {
+        let p = plane.eval(u, v);
+        MeshVertex { pos: [p.x, p.y, p.z], uv: [u, v], normal, brep_ref }
+    });
+    let n = boundary.len();
     if n < 3 { return; }
 
-    let vids: Vec<MeshVertexId> = uvs.iter().map(|&[u, v]| {
-        let p = plane.eval(u, v);
-        dcel.push_vertex(MeshVertex {
-            pos: [p.x, p.y, p.z], uv: [u, v], normal,
-            brep_ref: MeshVertexRef::OnFace(face_id),
-        })
-    }).collect();
-
+    let vids: Vec<MeshVertexId> = boundary.iter().map(|&(vid, _)| vid).collect();
     let v0 = vids[0];
     for i in 1..=(n - 2) {
         dcel.push_triangle(v0, vids[i], vids[i + 1]);
@@ -821,6 +820,7 @@ fn mesh_cylindrical_face(
     cyl: CylindricalSurface,
     opts: &MeshOptions,
     dcel: &mut HalfEdgeMesh,
+    _registry: &mut EdgeVertexRegistry,
 ) {
     use std::f64::consts::TAU;
 
@@ -829,18 +829,59 @@ fn mesh_cylindrical_face(
     let v_min    = boundary.iter().map(|uv| uv[1]).fold(f64::INFINITY,    f64::min);
     let v_max    = boundary.iter().map(|uv| uv[1]).fold(f64::NEG_INFINITY, f64::max);
 
+    // Scan the loop to find the seam edge (v0 ≠ v1) and the two circle edges
+    // (v0 == v1, CircularArc3).  The seam edge gives bottom/top corners directly.
+    let (bot_corner_id, top_corner_id, bot_edge_id, top_edge_id) = {
+        let mut seam_eid: Option<EdgeId>   = None;
+        let mut circle_eids: Vec<EdgeId>   = Vec::new();
+        for &ce_id in &ctx.get_loop(loop_id).coedges.clone() {
+            let ce   = ctx.get_coedge(ce_id);
+            let edge = ctx.get_edge(ce.edge);
+            if edge.v0 == edge.v1 {
+                if !circle_eids.contains(&ce.edge) { circle_eids.push(ce.edge); }
+            } else {
+                seam_eid = Some(ce.edge);
+            }
+        }
+        let seam_eid  = seam_eid.expect("cylinder lateral loop must have a seam edge");
+        let seam_edge = ctx.get_edge(seam_eid);
+        let v_bot_vid = seam_edge.v0; // seam Fwd: t=0 → UV=(TAU,0) → v=v_min
+        let v_top_vid = seam_edge.v1;
+        let (mut bot_eid, mut top_eid) = (None, None);
+        for &ceid in &circle_eids {
+            if ctx.get_edge(ceid).v0 == v_bot_vid { bot_eid = Some(ceid); }
+            else                                   { top_eid = Some(ceid); }
+        }
+        (
+            v_bot_vid,
+            v_top_vid,
+            bot_eid.expect("cylinder lateral loop must have a bottom circle edge"),
+            top_eid.expect("cylinder lateral loop must have a top circle edge"),
+        )
+    };
+
     let res = opts.resolution as usize;
     let nu  = res + 1;
 
     let mut vert_ids: Vec<MeshVertexId> = Vec::with_capacity(nu * 2);
-    for &v in &[v_min, v_max] {
+    for (row, &v) in [v_min, v_max].iter().enumerate() {
+        let (corner_id, circle_edge_id) = if row == 0 {
+            (bot_corner_id, bot_edge_id)
+        } else {
+            (top_corner_id, top_edge_id)
+        };
         for ui in 0..nu {
-            let u = ui as f64 * TAU / res as f64;
-            let p = cyl.eval(u, v);
-            let n = cyl.eval_n(u, v).expect("CylindricalSurface normal always defined");
+            let u        = ui as f64 * TAU / res as f64;
+            let p        = cyl.eval(u, v);
+            let n        = cyl.eval_n(u, v).expect("CylindricalSurface normal always defined");
+            let brep_ref = if ui == 0 || ui == res {
+                MeshVertexRef::Corner(corner_id)
+            } else {
+                MeshVertexRef::OnEdge(circle_edge_id)
+            };
             vert_ids.push(dcel.push_vertex(MeshVertex {
                 pos: [p.x, p.y, p.z], uv: [u, v], normal: [n.x, n.y, n.z],
-                brep_ref: MeshVertexRef::OnFace(face_id),
+                brep_ref,
             }));
         }
     }
@@ -864,6 +905,7 @@ fn mesh_conical_face(
     cone: ConicalSurface,
     opts: &MeshOptions,
     dcel: &mut HalfEdgeMesh,
+    _registry: &mut EdgeVertexRegistry,
 ) {
     use std::f64::consts::TAU;
 
@@ -875,24 +917,52 @@ fn mesh_conical_face(
     let v_max    = boundary.iter().map(|uv| uv[1]).fold(f64::NEG_INFINITY, f64::max);
     let res      = opts.resolution as usize;
 
+    // Scan the loop to find the apex vertex and the base circle edge.
+    // The apex is the closed edge whose 3D curve is degenerate (Line3, v0==v1).
+    // The base is the closed edge whose 3D curve is a CircularArc3.
+    let (apex_vertex_id, base_edge_id) = {
+        let mut apex_vid: Option<VertexId> = None;
+        let mut base_eid: Option<EdgeId>   = None;
+        for &ce_id in &ctx.get_loop(loop_id).coedges.clone() {
+            let ce   = ctx.get_coedge(ce_id);
+            let edge = ctx.get_edge(ce.edge);
+            if edge.v0 == edge.v1 {
+                match ctx.get_curve3(edge.curve3) {
+                    Curve3Kind::CircularArc3(_) => base_eid = Some(ce.edge),
+                    _                           => apex_vid = Some(edge.v0),
+                }
+            }
+        }
+        (
+            apex_vid.expect("cone lateral loop must have a degenerate apex edge"),
+            base_eid.expect("cone lateral loop must have a base circle edge"),
+        )
+    };
+    let base_corner_id = ctx.get_edge(base_edge_id).v0;
+
     // Apex vertex (index 0)
     let apex_pos = cone.eval(0.0, 0.0);
     let apex_vid = dcel.push_vertex(MeshVertex {
         pos: [apex_pos.x, apex_pos.y, apex_pos.z], uv: [0.0, 0.0],
         normal: [0.0, 0.0, 1.0], // placeholder; overwritten per-triangle below
-        brep_ref: MeshVertexRef::OnFace(face_id),
+        brep_ref: MeshVertexRef::Corner(apex_vertex_id),
     });
 
     // Base circle vertices (indices 1..=res)
     let mut base_vids = Vec::with_capacity(res);
     let mut base_u    = Vec::with_capacity(res);
     for j in 0..res {
-        let u = j as f64 * TAU / res as f64;
-        let p = cone.eval(u, v_max);
-        let n = cone.eval_n(u, v_max).map_or([0.0, 0.0, 1.0], |n| [n.x, n.y, n.z]);
+        let u       = j as f64 * TAU / res as f64;
+        let p       = cone.eval(u, v_max);
+        let n       = cone.eval_n(u, v_max).map_or([0.0, 0.0, 1.0], |n| [n.x, n.y, n.z]);
+        let brep_ref = if j == 0 {
+            MeshVertexRef::Corner(base_corner_id)
+        } else {
+            MeshVertexRef::OnEdge(base_edge_id)
+        };
         base_vids.push(dcel.push_vertex(MeshVertex {
             pos: [p.x, p.y, p.z], uv: [u, v_max], normal: n,
-            brep_ref: MeshVertexRef::OnFace(face_id),
+            brep_ref,
         }));
         base_u.push(u);
     }
@@ -943,37 +1013,72 @@ fn mesh_spherical_face(
     sph: SphericalSurface,
     opts: &MeshOptions,
     dcel: &mut HalfEdgeMesh,
+    _registry: &mut EdgeVertexRegistry,
 ) {
     use std::f64::consts::{FRAC_PI_2, TAU};
 
-    let sense = ctx.get_face(face_id).sense;
-    let flip  = sense == FaceSense::AntiAligned;
+    let sense   = ctx.get_face(face_id).sense;
+    let flip    = sense == FaceSense::AntiAligned;
+    let loop_id = ctx.get_face(face_id).outer;
+
+    // Scan the loop to find: south/north pole vertex IDs and the seam edge ID.
+    // The two degenerate edges (v0==v1, Line3) are the poles; distinguish them
+    // by checking their pcurve v-coordinate (south < 0, north > 0).
+    let (south_vertex_id, north_vertex_id, seam_edge_id) = {
+        let mut south_vid: Option<VertexId> = None;
+        let mut north_vid: Option<VertexId> = None;
+        let mut seam_eid:  Option<EdgeId>   = None;
+        for &ce_id in &ctx.get_loop(loop_id).coedges.clone() {
+            let ce   = ctx.get_coedge(ce_id);
+            let edge = ctx.get_edge(ce.edge);
+            if edge.v0 == edge.v1 {
+                let t_start = match ce.orientation {
+                    Orientation::Forward => edge.t0,
+                    Orientation::Reverse => edge.t1,
+                };
+                let v_coord = ctx.get_curve2(ce.pcurve).eval(t_start).v;
+                if v_coord < 0.0 { south_vid = Some(edge.v0); }
+                else              { north_vid = Some(edge.v0); }
+            } else {
+                seam_eid = Some(ce.edge);
+            }
+        }
+        (
+            south_vid.expect("sphere loop must have a south pole edge"),
+            north_vid.expect("sphere loop must have a north pole edge"),
+            seam_eid.expect("sphere loop must have a seam edge"),
+        )
+    };
 
     let n_lon  = opts.resolution as usize;
     let n_lat  = (opts.resolution as usize / 2).max(2);
     let v_step = std::f64::consts::PI / n_lat as f64;
     let u_step = TAU / n_lon as f64;
 
-    let push = |dcel: &mut HalfEdgeMesh, u: f64, v: f64| -> MeshVertexId {
+    let push = |dcel: &mut HalfEdgeMesh, u: f64, v: f64, brep_ref: MeshVertexRef| -> MeshVertexId {
         let p = sph.eval(u, v);
         let n = sph.eval_n(u, v).expect("SphericalSurface::eval_n always Some");
         let normal = if flip { [-n.x,-n.y,-n.z] } else { [n.x,n.y,n.z] };
-        dcel.push_vertex(MeshVertex {
-            pos: [p.x,p.y,p.z], uv: [u,v], normal,
-            brep_ref: MeshVertexRef::OnFace(face_id),
-        })
+        dcel.push_vertex(MeshVertex { pos: [p.x,p.y,p.z], uv: [u,v], normal, brep_ref })
     };
 
-    let south = push(dcel, 0.0, -FRAC_PI_2);
+    let south = push(dcel, 0.0, -FRAC_PI_2, MeshVertexRef::Corner(south_vertex_id));
 
     let mut ring: Vec<Vec<MeshVertexId>> = Vec::with_capacity(n_lat - 1);
     for i in 1..n_lat {
         let v   = -FRAC_PI_2 + i as f64 * v_step;
-        let row = (0..=n_lon).map(|j| push(dcel, j as f64 * u_step, v)).collect();
+        let row = (0..=n_lon).map(|j| {
+            let brep_ref = if j == 0 || j == n_lon {
+                MeshVertexRef::OnEdge(seam_edge_id)
+            } else {
+                MeshVertexRef::OnFace(face_id)
+            };
+            push(dcel, j as f64 * u_step, v, brep_ref)
+        }).collect();
         ring.push(row);
     }
 
-    let north = push(dcel, 0.0, FRAC_PI_2);
+    let north = push(dcel, 0.0, FRAC_PI_2, MeshVertexRef::Corner(north_vertex_id));
 
     let rv = |i: usize, j: usize| ring[i - 1][j]; // i is 1-indexed
 
@@ -1442,6 +1547,98 @@ mod test {
         }
     }
 
+    // ── DCEL invariants (full pipeline) ─────────────────────────────────────
+
+    /// Run the full DCEL pipeline for a primitive and return the assembled
+    /// `HalfEdgeMesh` before `to_trimesh` discards connectivity.
+    fn dcel_prim(node: &CsgNode) -> HalfEdgeMesh {
+        let mut ctx = SolidModelingContext::new();
+        let sid = compile_csg_node(&mut ctx, node);
+        let shell_id = ctx.get_solid(sid).outer;
+        let face_ids: Vec<FaceId> = ctx.get_shell(shell_id).faces.clone();
+        let mut dcel     = HalfEdgeMesh::new();
+        let mut registry = EdgeVertexRegistry::new();
+        for face_id in face_ids {
+            mesh_face(&ctx, face_id, &MeshOptions::default(), &mut dcel, &mut registry);
+        }
+        merge_dcel_vertices(&mut dcel, MeshOptions::default().epsilon);
+        stitch_twins(&mut dcel);
+        dcel
+    }
+
+    #[test]
+    fn dcel_face_vertices_round_trip() {
+        let mut m = HalfEdgeMesh::new();
+        let vref = MeshVertexRef::OnFace(FaceId(0));
+        let v0 = m.push_vertex(MeshVertex { pos: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let v1 = m.push_vertex(MeshVertex { pos: [1.0, 0.0, 0.0], uv: [1.0, 0.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let v2 = m.push_vertex(MeshVertex { pos: [0.0, 1.0, 0.0], uv: [0.0, 1.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let (fid, _) = m.push_triangle(v0, v1, v2);
+        let [r0, r1, r2] = m.face_vertices(fid);
+        assert_eq!([r0, r1, r2], [v0, v1, v2], "face_vertices must return vertices in push order");
+    }
+
+    #[test]
+    fn dcel_twin_symmetry_after_stitch_cuboid() {
+        let dcel = dcel_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
+        for (i, he) in dcel.half_edges.iter().enumerate() {
+            if let Some(twin_id) = he.twin {
+                let back = dcel.half_edges[twin_id.0].twin;
+                assert_eq!(back, Some(HalfEdgeId(i)), "he.twin.twin must equal he (failed at HalfEdgeId({i}))");
+            }
+        }
+    }
+
+    #[test]
+    fn dcel_all_half_edges_have_twin_after_stitch_cuboid() {
+        let dcel = dcel_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
+        for (i, he) in dcel.half_edges.iter().enumerate() {
+            assert!(he.twin.is_some(),
+                "HalfEdgeId({i}) has no twin — cuboid is closed so every half-edge must be interior");
+        }
+    }
+
+    // ── vertex classification (brep_ref) ─────────────────────────────────────
+
+    #[test]
+    fn vertex_classification_cuboid_all_corner() {
+        let dcel = dcel_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
+        for (i, v) in dcel.vertices.iter().enumerate() {
+            assert!(matches!(v.brep_ref, MeshVertexRef::Corner(_)),
+                "cuboid vertex {i} must be Corner (all vertices are B-rep corners)");
+        }
+    }
+
+    #[test]
+    fn vertex_classification_cylinder_no_on_face() {
+        let dcel = dcel_prim(&CsgNode::cylinder(1.0, 2.0));
+        for (i, v) in dcel.vertices.iter().enumerate() {
+            assert!(!matches!(v.brep_ref, MeshVertexRef::OnFace(_)),
+                "cylinder vertex {i} is OnFace — should be Corner (seam) or OnEdge (circle)");
+        }
+    }
+
+    #[test]
+    fn vertex_classification_cone_no_on_face() {
+        let dcel = dcel_prim(&CsgNode::cone(1.0, 2.0));
+        for (i, v) in dcel.vertices.iter().enumerate() {
+            assert!(!matches!(v.brep_ref, MeshVertexRef::OnFace(_)),
+                "cone vertex {i} is OnFace — should be Corner (apex/seam) or OnEdge (base circle)");
+        }
+    }
+
+    #[test]
+    fn vertex_classification_sphere_all_three_types() {
+        let dcel = dcel_prim(&CsgNode::sphere(1.0));
+        let corners  = dcel.vertices.iter().filter(|v| matches!(v.brep_ref, MeshVertexRef::Corner(_))).count();
+        let on_edges = dcel.vertices.iter().filter(|v| matches!(v.brep_ref, MeshVertexRef::OnEdge(_))).count();
+        let on_faces = dcel.vertices.iter().filter(|v| matches!(v.brep_ref, MeshVertexRef::OnFace(_))).count();
+        // 2 poles (south + north), seam-column vertices per latitude ring, interior grid points
+        assert_eq!(corners, 2, "sphere must have exactly 2 Corner vertices (south and north poles)");
+        assert!(on_edges > 0, "sphere must have OnEdge vertices (seam column)");
+        assert!(on_faces > 0, "sphere must have OnFace vertices (interior latitude-grid points)");
+    }
+
     // ── merge_vertices ───────────────────────────────────────────────────────
 
     fn unmerged_prim(node: &CsgNode) -> TriMesh {
@@ -1460,8 +1657,10 @@ mod test {
 
     #[test]
     fn merge_vertices_cuboid_collapses_to_8() {
+        // The registry deduplicates corners across faces during tessellation,
+        // so pre-merge is already 8 for plane-only solids.
         let mesh = unmerged_prim(&CsgNode::cuboid(1.0, 1.0, 1.0));
-        assert_eq!(mesh.vertices.len(), 24, "pre-merge should be 24");
+        assert_eq!(mesh.vertices.len(), 8, "registry deduplicates plane-face corners; pre-merge is already 8");
         let merged = merge_vertices(&mesh, 1e-8);
         assert_eq!(merged.vertices.len(), 8);
     }
