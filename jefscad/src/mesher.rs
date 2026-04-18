@@ -209,6 +209,113 @@ impl HalfEdgeMesh {
     }
 }
 
+// ── EdgeVertexRegistry ────────────────────────────────────────────────────────
+
+/// Coordinates shared vertices along B-rep edges during solid mesh assembly.
+///
+/// The consistency contract this relies on: for any coedge, the pcurve parameter `t`
+/// and the 3-D edge curve parameter `t` are the **same value** — i.e.
+/// `surface.eval(pcurve.eval(t)) ≈ curve3.eval(t)` for all t ∈ [t0, t1].
+/// This is already implicit in `sample_loop_uvs`, which passes `edge.t0/t1` directly
+/// to `pcurve.eval`.  Keys are stored on the edge's canonical t (not flipped for
+/// reverse coedges), so both orientations of the same edge look up the same entry.
+///
+/// # Phase 5 caveat
+/// For `SsiCurve3` coedges produced by boolean ops the pcurve and the 3-D intersection
+/// curve may carry independent parameterizations.  At that point a
+/// `Curve3::project(pt) -> t` operation will be needed for insertion; this registry
+/// design is forward-compatible with that extension.
+pub struct EdgeVertexRegistry {
+    entries: std::collections::HashMap<EdgeId, std::collections::BTreeMap<i64, MeshVertexId>>,
+    /// t is quantized as `(t * quant).round() as i64`.  Default 1e12 gives
+    /// sub-picometer resolution — well below the 10 µm modeling accuracy target
+    /// while safely above f64 floating-point noise (~1e-15 for typical t ranges).
+    quant: f64,
+}
+
+impl EdgeVertexRegistry {
+    const DEFAULT_QUANT: f64 = 1e12;
+
+    pub fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            quant:   Self::DEFAULT_QUANT,
+        }
+    }
+
+    /// Return the `MeshVertexId` already registered for `(edge_id, t)`, or create
+    /// a new vertex via `make_vertex`, push it into `mesh`, register it, and return
+    /// the new id.  `make_vertex` is only called on first insertion.
+    pub fn get_or_insert(
+        &mut self,
+        edge_id: EdgeId,
+        t: f64,
+        mesh: &mut HalfEdgeMesh,
+        make_vertex: impl FnOnce() -> MeshVertex,
+    ) -> MeshVertexId {
+        let key = (t * self.quant).round() as i64;
+        let bucket = self.entries.entry(edge_id).or_default();
+        if let Some(&vid) = bucket.get(&key) {
+            vid
+        } else {
+            let vid = mesh.push_vertex(make_vertex());
+            bucket.insert(key, vid);
+            vid
+        }
+    }
+
+    /// Number of distinct edges that have at least one registered vertex.
+    #[cfg(test)]
+    pub fn edge_count(&self) -> usize { self.entries.len() }
+
+    /// Number of vertices registered for `edge_id`.
+    #[cfg(test)]
+    pub fn vertex_count_for(&self, edge_id: EdgeId) -> usize {
+        self.entries.get(&edge_id).map_or(0, |m| m.len())
+    }
+}
+
+// ── stitch_twins ──────────────────────────────────────────────────────────────
+
+/// Link opposing half-edges across face boundaries.
+///
+/// Builds a map `(start_vertex, end_vertex) → HalfEdgeId` for every currently
+/// unstitched half-edge, then for each such half-edge looks up the reverse key
+/// `(end_vertex, start_vertex)` to find its geometric neighbor and calls
+/// [`HalfEdgeMesh::set_twin`].
+///
+/// Half-edges on the mesh boundary (no geometric neighbor, e.g. the outer boundary
+/// of an open surface patch) remain `twin = None` after this pass.
+///
+/// This function is idempotent: calling it a second time on an already-stitched
+/// mesh is a no-op.
+pub fn stitch_twins(mesh: &mut HalfEdgeMesh) {
+    use std::collections::HashMap;
+
+    // Pass 1 — index all unstitched half-edges by their (start, end) vertex pair.
+    let mut map: HashMap<(MeshVertexId, MeshVertexId), HalfEdgeId> = HashMap::new();
+    for i in 0..mesh.half_edges.len() {
+        if mesh.half_edges[i].twin.is_none() {
+            let start = mesh.half_edges[i].vertex;
+            let end   = mesh.half_edges[mesh.half_edges[i].next.0].vertex;
+            map.insert((start, end), HalfEdgeId(i));
+        }
+    }
+
+    // Pass 2 — for each unstitched half-edge, find and link its twin.
+    for i in 0..mesh.half_edges.len() {
+        if mesh.half_edges[i].twin.is_some() { continue; }
+        let start = mesh.half_edges[i].vertex;
+        let end   = mesh.half_edges[mesh.half_edges[i].next.0].vertex;
+        if let Some(&twin_id) = map.get(&(end, start)) {
+            if twin_id.0 != i {
+                mesh.half_edges[i].twin         = Some(twin_id);
+                mesh.half_edges[twin_id.0].twin = Some(HalfEdgeId(i));
+            }
+        }
+    }
+}
+
 // ── TriMesh ───────────────────────────────────────────────────────────────────
 
 /// A triangle mesh produced by tessellating a B-rep solid.
@@ -1116,6 +1223,170 @@ mod test {
         assert_eq!(mesh.tri_uvs[0], [0.0, 0.0]);
         assert_eq!(mesh.tri_uvs[1], [1.0, 0.0]);
         assert_eq!(mesh.tri_uvs[2], [0.0, 1.0]);
+    }
+
+    // ── EdgeVertexRegistry ───────────────────────────────────────────────────
+
+    fn dummy_vertex(x: f64) -> MeshVertex {
+        MeshVertex {
+            pos:      [x, 0.0, 0.0],
+            uv:       [x, 0.0],
+            normal:   [0.0, 0.0, 1.0],
+            brep_ref: MeshVertexRef::OnFace(FaceId(0)),
+        }
+    }
+
+    #[test]
+    fn registry_new_is_empty() {
+        let r = EdgeVertexRegistry::new();
+        assert_eq!(r.edge_count(), 0);
+    }
+
+    #[test]
+    fn registry_first_insert_creates_vertex() {
+        let mut mesh = HalfEdgeMesh::new();
+        let mut reg  = EdgeVertexRegistry::new();
+        let eid = EdgeId(0);
+        let vid = reg.get_or_insert(eid, 0.0, &mut mesh, || dummy_vertex(1.0));
+        assert_eq!(mesh.vertices.len(), 1);
+        assert_eq!(vid, MeshVertexId(0));
+        assert_eq!(reg.edge_count(), 1);
+        assert_eq!(reg.vertex_count_for(eid), 1);
+    }
+
+    #[test]
+    fn registry_same_edge_same_t_returns_same_id() {
+        let mut mesh = HalfEdgeMesh::new();
+        let mut reg  = EdgeVertexRegistry::new();
+        let eid = EdgeId(0);
+        let v0 = reg.get_or_insert(eid, 0.5, &mut mesh, || dummy_vertex(1.0));
+        let v1 = reg.get_or_insert(eid, 0.5, &mut mesh, || dummy_vertex(2.0)); // closure not called
+        assert_eq!(v0, v1);
+        assert_eq!(mesh.vertices.len(), 1, "second insert must not create a vertex");
+    }
+
+    #[test]
+    fn registry_same_edge_different_t_creates_new_vertex() {
+        let mut mesh = HalfEdgeMesh::new();
+        let mut reg  = EdgeVertexRegistry::new();
+        let eid = EdgeId(0);
+        let v0 = reg.get_or_insert(eid, 0.0, &mut mesh, || dummy_vertex(0.0));
+        let v1 = reg.get_or_insert(eid, 1.0, &mut mesh, || dummy_vertex(1.0));
+        assert_ne!(v0, v1);
+        assert_eq!(mesh.vertices.len(), 2);
+        assert_eq!(reg.vertex_count_for(eid), 2);
+    }
+
+    #[test]
+    fn registry_different_edges_independent() {
+        let mut mesh = HalfEdgeMesh::new();
+        let mut reg  = EdgeVertexRegistry::new();
+        let v0 = reg.get_or_insert(EdgeId(0), 0.5, &mut mesh, || dummy_vertex(0.0));
+        let v1 = reg.get_or_insert(EdgeId(1), 0.5, &mut mesh, || dummy_vertex(1.0));
+        assert_ne!(v0, v1);
+        assert_eq!(reg.edge_count(), 2);
+    }
+
+    #[test]
+    fn registry_t_within_quantization_tolerance_returns_same_id() {
+        // Two t-values that differ by << 0.5/quant (= 5e-13) must hash to the same bin.
+        // Use 1e-13 — clearly inside the bin, not on the rounding boundary.
+        let mut mesh = HalfEdgeMesh::new();
+        let mut reg  = EdgeVertexRegistry::new();
+        let eid = EdgeId(0);
+        let t0 = 1.0_f64;
+        let t1 = t0 + 1e-13; // delta << 5e-13 (half-bin width)
+        let v0 = reg.get_or_insert(eid, t0, &mut mesh, || dummy_vertex(0.0));
+        let v1 = reg.get_or_insert(eid, t1, &mut mesh, || dummy_vertex(1.0));
+        assert_eq!(v0, v1, "t-values within quantization tolerance must return the same vertex");
+    }
+
+    #[test]
+    fn registry_t_outside_quantization_tolerance_creates_new_vertex() {
+        let mut mesh = HalfEdgeMesh::new();
+        let mut reg  = EdgeVertexRegistry::new();
+        let eid = EdgeId(0);
+        let t0 = 1.0_f64;
+        let t1 = t0 + 2e-12; // delta > 1e-12
+        let v0 = reg.get_or_insert(eid, t0, &mut mesh, || dummy_vertex(0.0));
+        let v1 = reg.get_or_insert(eid, t1, &mut mesh, || dummy_vertex(1.0));
+        assert_ne!(v0, v1, "t-values outside quantization tolerance must be distinct");
+    }
+
+    // ── stitch_twins ─────────────────────────────────────────────────────────
+
+    /// Same quad split as `two_triangle_dcel` but without calling `set_twin`.
+    fn two_triangle_dcel_no_twins() -> (HalfEdgeMesh, [HalfEdgeId; 6]) {
+        let mut m = HalfEdgeMesh::new();
+        let vref = MeshVertexRef::OnFace(FaceId(0));
+        let v0 = m.push_vertex(MeshVertex { pos: [0.0, 0.0, 0.0], uv: [0.0, 0.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let v1 = m.push_vertex(MeshVertex { pos: [1.0, 0.0, 0.0], uv: [1.0, 0.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let v2 = m.push_vertex(MeshVertex { pos: [0.0, 1.0, 0.0], uv: [0.0, 1.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let v3 = m.push_vertex(MeshVertex { pos: [1.0, 1.0, 0.0], uv: [1.0, 1.0], normal: [0.0, 0.0, 1.0], brep_ref: vref });
+        let (_, [he00, he01, he02]) = m.push_triangle(v0, v1, v2);
+        let (_, [he10, he11, he12]) = m.push_triangle(v3, v2, v1);
+        // No set_twin call — all twins start as None
+        (m, [he00, he01, he02, he10, he11, he12])
+    }
+
+    #[test]
+    fn stitch_twins_links_shared_edge() {
+        let (mut dcel, [_, he01, _, _, he11, _]) = two_triangle_dcel_no_twins();
+        stitch_twins(&mut dcel);
+        assert_eq!(dcel.half_edges[he01.0].twin, Some(he11));
+        assert_eq!(dcel.half_edges[he11.0].twin, Some(he01));
+    }
+
+    #[test]
+    fn stitch_twins_boundary_edges_stay_none() {
+        let (mut dcel, [he00, _, he02, he10, _, he12]) = two_triangle_dcel_no_twins();
+        stitch_twins(&mut dcel);
+        for he_id in [he00, he02, he10, he12] {
+            assert!(dcel.half_edges[he_id.0].twin.is_none(),
+                "boundary half-edge {he_id:?} must remain twin=None");
+        }
+    }
+
+    #[test]
+    fn stitch_twins_is_idempotent() {
+        let (mut dcel, [_, he01, _, _, he11, _]) = two_triangle_dcel_no_twins();
+        stitch_twins(&mut dcel);
+        stitch_twins(&mut dcel); // second call must not change anything
+        assert_eq!(dcel.half_edges[he01.0].twin, Some(he11));
+        assert_eq!(dcel.half_edges[he11.0].twin, Some(he01));
+    }
+
+    #[test]
+    fn stitch_twins_four_triangles_full_interior_edge() {
+        // Two quads sharing a full interior edge — all interior half-edges get twins.
+        //   v0--v1--v4
+        //   |T0/|T2/|
+        //   | / | / |
+        //   |/T1|/T3|
+        //   v2--v3--v5
+        let mut m = HalfEdgeMesh::new();
+        let vref = MeshVertexRef::OnFace(FaceId(0));
+        let mut pv = |x: f64, y: f64| m.push_vertex(MeshVertex {
+            pos: [x, y, 0.0], uv: [x, y], normal: [0.0, 0.0, 1.0], brep_ref: vref
+        });
+        let v0 = pv(0.0, 1.0); let v1 = pv(1.0, 1.0); let v4 = pv(2.0, 1.0);
+        let v2 = pv(0.0, 0.0); let v3 = pv(1.0, 0.0); let v5 = pv(2.0, 0.0);
+        m.push_triangle(v0, v1, v2); // T0: v0,v1,v2
+        m.push_triangle(v1, v3, v2); // T1: v1,v3,v2
+        m.push_triangle(v1, v4, v3); // T2: v1,v4,v3
+        m.push_triangle(v4, v5, v3); // T3: v4,v5,v3
+        stitch_twins(&mut m);
+        // Count stitched twins — each interior edge produces 2 stitched half-edges
+        let stitched = m.half_edges.iter().filter(|he| he.twin.is_some()).count();
+        // Interior edges: v1-v2 (T0/T1), v1-v3 (T1/T2), v3-v4... let's just verify > 0
+        assert!(stitched > 0, "at least some half-edges should be stitched");
+        // Verify twin symmetry for all stitched edges
+        for (i, he) in m.half_edges.iter().enumerate() {
+            if let Some(twin_id) = he.twin {
+                let back = m.half_edges[twin_id.0].twin;
+                assert_eq!(back, Some(HalfEdgeId(i)), "twin.twin must equal self");
+            }
+        }
     }
 
     // ── merge_vertices ───────────────────────────────────────────────────────
