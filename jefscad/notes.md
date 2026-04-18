@@ -675,20 +675,21 @@ geometrically equivalent to current output; B-rep back-references fully classifi
 
 ### Phase 5 — Add boolean ops gradually
 
-⏸ *Paused — completing Phase 4.6 (DCEL mesh refactor) first.*
-
-#### Predicate infrastructure
-- [ ] Implement point-in-primitive predicates using Flint transforms:
-  - `classify(p: FlintArray<f64,4>, node: &CsgNode) -> Classification`
-    where `Classification` is `Inside | Outside | Indeterminate`
-  - For each primitive: transform query point to local frame via Flint mat_mul,
-    then evaluate the primitive's implicit function with outward rounding
-  - Sphere: `||T⁻¹p||² < r²` (with Flint arithmetic)
-  - Cuboid: AABB test in local frame
-  - Cylinder/Cone: analytic implicit in local frame
-- [ ] Implement tolerance/indeterminate-zone policy:
-  - When Flint interval straddles the boundary, return `Indeterminate`
-  - Caller decides: refine, fallback to subdivision, or treat as on-surface
+#### Predicate infrastructure (COMPLETE 2026-04-18)
+- [x] Implement point-in-primitive predicates using Flint transforms (`jefscad/src/predicates.rs`):
+  - `Classification { Inside, Outside, Indeterminate }` enum
+  - `classify_sphere_local`, `classify_cuboid_local`, `classify_cylinder_local`, `classify_cone_local`
+    — each evaluates the primitive's implicit function with Flint outward rounding
+  - `classify_primitive_local` — dispatcher over `CsgPrimitive` variants
+  - `mat4_inv_f64` — affine 4×4 inverse via 3×3 cofactor (valid for bottom row `[0,0,0,1]`)
+  - `classify_node(p_world: [f64;3], node: &CsgNode) -> Classification` — top-level entry point:
+    inverts `flat_transform`, transforms query point to local frame (midpoint extraction), dispatches
+    to primitive classifier; 55 tests passing
+  - Known approximation: midpoint of Flint-transformed local point is passed to primitive classifiers
+    (interval width from transform not propagated through implicit); acceptable for Phase 5 start
+- [x] Tolerance/indeterminate-zone policy:
+  - Flint `PartialOrd`: `Some(Less)` = Inside, `Some(Greater)` = Outside, `None`/`Some(Equal)` = Indeterminate
+  - `Outside` dominates `Indeterminate` when combining sub-tests (lateral × axial for cylinder/cone)
 
 #### Start with restricted subset
 - [ ] Implement boolean scaffolding:
