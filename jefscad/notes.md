@@ -604,54 +604,63 @@ after all faces are assembled. Open design questions to resolve before coding:
 
 #### Tasks
 
-- [_] **Design step**: resolve the four open edge-registry questions above; sketch the
-      assembly/stitching algorithm on paper before writing any code.
+- [x] **Design step**: resolved four open edge-registry questions:
+      - Key type: quantized `i64` (quant=1e12, bin width=1e-12); no external dep
+      - Vertex pool: global-to-solid; IDs directly comparable across faces
+      - Corner vertices: separate `corners: HashMap<VertexId, MeshVertexId>` — same B-rep corner
+        appears under different (EdgeId, t) pairs from different faces, so must key by VertexId
+      - Phase 4.6 tessellators push directly to global DCEL; registry reserved for Delaunay refinement
+      - Assembly: `merge_dcel_vertices(epsilon)` deduplicates coincident boundary vertices BEFORE
+        `stitch_twins`; two-pass twin linking via `HashMap<(start,end), HalfEdgeId>`
 
 ##### Core types
-- [_] Define `MeshVertexRef { Corner(VertexId), OnEdge(EdgeId), OnFace(FaceId) }` in `mesher.rs`
-- [_] Define `MeshVertex { pos: [f64;3], uv: [f64;2], normal: [f64;3], brep_ref: MeshVertexRef }`
-- [_] Define half-edge newtypes: `HalfEdgeId`, `DcelFaceId`, `MeshVertexId`
-- [_] Define `HalfEdge { twin: Option<HalfEdgeId>, next: HalfEdgeId, vertex: MeshVertexId,
+- [x] Define `MeshVertexRef { Corner(VertexId), OnEdge(EdgeId), OnFace(FaceId) }` in `mesher.rs`
+- [x] Define `MeshVertex { pos: [f64;3], uv: [f64;2], normal: [f64;3], brep_ref: MeshVertexRef }`
+- [x] Define half-edge newtypes: `HalfEdgeId`, `DcelFaceId`, `MeshVertexId`
+- [x] Define `HalfEdge { twin: Option<HalfEdgeId>, next: HalfEdgeId, vertex: MeshVertexId,
       face: DcelFaceId, is_constraint: bool }`
       (`twin` is `Option` during construction; all twins filled before `to_trimesh` is called)
-- [_] Define `DcelFace { half_edge: HalfEdgeId }` (one representative half-edge per triangle)
-- [_] Define `HalfEdgeMesh { vertices: Vec<MeshVertex>, half_edges: Vec<HalfEdge>,
+- [x] Define `DcelFace { half_edge: HalfEdgeId }` (one representative half-edge per triangle)
+- [x] Define `HalfEdgeMesh { vertices: Vec<MeshVertex>, half_edges: Vec<HalfEdge>,
       faces: Vec<DcelFace> }` with arena-style push helpers
 
 ##### Conversion and navigation
-- [_] Implement `HalfEdgeMesh::to_trimesh(&self) -> TriMesh`
-      — narrows `f64 → f32` for positions/normals/UVs; replaces current `merge_vertices` step
-- [_] Implement `HalfEdgeMesh` navigation helpers:
+- [x] Implement `HalfEdgeMesh::to_trimesh(&self) -> TriMesh`
+      — narrows `f64 → f32` for positions/normals/UVs
+- [x] Implement `HalfEdgeMesh` navigation helpers:
   - `face_vertices(id) -> [MeshVertexId; 3]` — via next-chain
   - `face_half_edges(id) -> [HalfEdgeId; 3]`
   - `vertex_one_ring(id) -> impl Iterator<HalfEdgeId>` — orbit via twin+next
 
 ##### Edge vertex registry
-- [_] Define `EdgeVertexRegistry` — structure TBD pending design step above
-- [_] Implement registry lookup/insert used by `mesh_face` when sampling coedge boundaries
-- [_] Implement twin-stitching pass in `mesh_solid` using the registry after all faces are meshed
+- [x] Define `EdgeVertexRegistry` — split-key: `corners: HashMap<VertexId, MeshVertexId>` +
+      `entries: HashMap<EdgeId, BTreeMap<i64, MeshVertexId>>`; quant=1e12
+- [x] Implement `get_or_insert_corner` and `get_or_insert_edge` registry methods with tests
+
+##### Twin stitching and vertex merging
+- [x] Implement `stitch_twins(mesh)` — two-pass: build `HashMap<(start,end), HalfEdgeId>`,
+      then link twins; idempotent; boundary edges stay `twin = None`
+- [x] Implement `merge_dcel_vertices(dcel, epsilon)` — quantized position hash deduplication;
+      must run BEFORE `stitch_twins` so coincident boundary vertices get same `MeshVertexId`
 
 ##### Pipeline refactor
-- [_] Refactor `mesh_face` to return `HalfEdgeMesh` (per-face, using global vertex pool)
-      — each surface type (`Plane`, `Cylindrical`, `Conical`, `Spherical`, `LinearExtrusion`,
-        `RevolutionSurface`) builds DCEL directly; coedge-derived edges get `is_constraint=true`;
-        vertices classified into `Corner`/`OnEdge`/`OnFace` at creation time
-- [_] Update `mesh_solid` to:
-      1. Create shared `EdgeVertexRegistry` for the solid
-      2. Mesh each face via `mesh_face`, accumulating into a global vertex/half-edge pool
-      3. Run twin-stitching pass
-      4. Call `to_trimesh()` for output
+- [x] Refactor all four tessellators (`Plane`, `Cylindrical`, `Conical`, `Spherical`) to push
+      vertices directly into global DCEL via `dcel.push_vertex` / `dcel.push_triangle`;
+      all vertices currently classified as `OnFace` (full classification deferred to Delaunay phase)
+- [x] Update `mesh_solid` to: build global DCEL per face → `merge_dcel_vertices` → `stitch_twins`
+      → `to_trimesh()`
 
 ##### Validation
-- [_] Verify all existing meshing tests pass after pipeline swap (output should be
-      geometrically equivalent; exact f32 values may shift slightly due to f64 intermediate)
-- [_] Add DCEL invariant tests: `face_vertices` round-trip, twin symmetry
-      (`he.twin.twin == he`), every boundary half-edge has a twin after stitching,
+- [x] All 467 existing meshing tests pass after pipeline swap (commit 4eadd17)
+- [_] Add targeted DCEL invariant tests: `face_vertices` round-trip, twin symmetry
+      (`he.twin.twin == he`), every interior half-edge has a twin after stitching on a cuboid,
       constraint-edge flag preserved through assembly
+- [_] Full vertex classification (`Corner`/`OnEdge`/`OnFace`) — currently all `OnFace`;
+      requires tessellators to consult registry for boundary vertices (deferred to Delaunay phase)
 
 **Deliverable:** `mesh_solid` pipeline passes through DCEL internally; STL/OBJ output is
-geometrically equivalent to current output; constraint edges are tagged; B-rep back-references
-are populated for all vertex types including `OnFace`.
+geometrically equivalent to current output; B-rep back-references populated (`OnFace` for all
+vertices in Phase 4.6; full classification in Delaunay refinement phase).
 
 ---
 
