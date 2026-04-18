@@ -9,6 +9,7 @@ pub(crate) mod brep_compiler;
 pub mod csg_lang;
 mod geom;
 pub mod mesher;
+pub mod predicates;
 mod py_bindings;
 
 pub use csg_lang::{CsgNode, NodeRef, SelectPolicy};
