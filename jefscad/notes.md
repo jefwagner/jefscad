@@ -692,11 +692,31 @@ geometrically equivalent to current output; B-rep back-references fully classifi
   - `Outside` dominates `Indeterminate` when combining sub-tests (lateral × axial for cylinder/cone)
 
 #### Start with restricted subset
-- [ ] Implement boolean scaffolding:
-  - surface/surface intersection infrastructure
-  - face splitting + trimming update machinery
-  - classification (inside/outside) framework using Flint predicates above
-  - sewing/healing basics + snapping with tolerances
+
+#### Boolean topology scaffolding — planar polyhedra (COMPLETE 2026-04-19)
+Scope: all faces `Plane`, all edges `Line3`, all pcurves `Line2`.  Lives in `jefscad/src/bool_ops.rs`.
+
+- [x] `split_edge(ctx, edge_id, t_split) -> (VertexId, EdgeId, EdgeId)`
+  - Inserts vertex at t_split; two sub-edges share original `Line3` curve (t-range differs)
+  - Sub-pcurves (`Line2`) share original p0/p1; t_min/t_max updated — correct because `eval(t)` uses raw t
+  - Every loop referencing the original coedge is updated in place (splice)
+  - Forward/Reverse orientation handled: for Reverse, first sub-coedge → edge_b, second → edge_a
+  - 6 tests
+- [x] `split_face(ctx, face_id, entry_edge, t_entry, exit_edge, t_exit) -> (FaceId, FaceId)`
+  - Gets UV coords at split points from pcurves BEFORE splitting
+  - Calls split_edge twice; reads updated outer loop; finds i_ef / i_xf by end-vertex identity
+  - Arc A: from (i_xf+1) wrapping to i_ef inclusive; Arc B: from (i_ef+1) to i_xf inclusive
+  - Creates split Line3 edge + two coedges (Forward for face A, Reverse for face B)
+  - Updates all arc coedges' face back-references; updates shell face list
+  - 8 tests including adjacent-edge case (triangle + pentagon), off-center split, coedge face refs
+  - Total: 543 tests passing
+
+- [x] `face_centroid(ctx, face_id) -> Point3` — average of outer-loop start-vertices; correct for convex faces
+- [x] `classify_face_wrt_node(ctx, face_id, node) -> Classification` — delegates to `classify_node`;
+  Indeterminate for coincident faces; 8 tests (outside sphere, inside sphere, outside shifted cuboid,
+  inside large cuboid, on-surface indeterminate, fragment after split); 551 tests total
+
+- [ ] Next: plane-plane SSI (surface-surface intersection) → find the intersection line between two planar faces
 - [ ] First boolean targets:
   - [ ] either: planar-only polyhedra subset
   - [ ] or: analytic pairs (plane/cyl/sphere) before full NURBS
