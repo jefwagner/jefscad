@@ -12,7 +12,7 @@ use crate::brep_kernel::{
     CoEdge, CoEdgeId, Curve2Id, Edge, EdgeId, FaceId, Loop, LoopId,
     Orientation, ShellId, SolidModelingContext, Vertex, VertexId,
 };
-use crate::geom::{Curve2, Curve2Kind, Curve3, Curve3Kind, Line2, Line3, Point2};
+use crate::geom::{Curve2, Curve2Kind, Curve3, Curve3Kind, Line2, Line3, Point2, Point3, SurfaceKind};
 
 // ── Private helpers ────────────────────────────────────────────────────────────
 
@@ -309,6 +309,195 @@ pub fn classify_face_wrt_node(
 ) -> crate::predicates::Classification {
     let c = face_centroid(ctx, face_id);
     crate::predicates::classify_node([c.x, c.y, c.z], node)
+}
+
+// ── Plane-plane SSI ────────────────────────────────────────────────────────────
+
+/// One intersection between the plane-plane line and a face boundary edge.
+#[derive(Debug, Clone)]
+pub struct BoundaryHit {
+    pub edge_id: EdgeId,
+    /// Parameter in `[0, 1]` on the B-rep edge (maps linearly to `[edge.t0, edge.t1]`).
+    pub t_edge: f64,
+    /// Parameter on the infinite intersection line: `origin + t_line * dir`.
+    pub t_line: f64,
+    pub point: Point3,
+}
+
+/// Result of intersecting two planar faces.
+///
+/// Each face contributes exactly two boundary hits — the entry and exit of the
+/// intersection line through that face's polygon.  The two faces may differ in which
+/// portion of the line they cover; the overlap is the segment that actually needs to be
+/// introduced into both B-reps.
+#[derive(Debug, Clone)]
+pub struct FaceFaceIntersection {
+    pub hits_a: [BoundaryHit; 2],
+    pub hits_b: [BoundaryHit; 2],
+}
+
+/// Extract the outward unit normal and a point on a planar face's surface.
+///
+/// Returns `None` for non-planar surfaces (Phase 5 restriction).
+fn plane_of_face(ctx: &SolidModelingContext, face_id: FaceId) -> Option<(Point3, Point3)> {
+    match ctx.get_surface(ctx.get_face(face_id).surface) {
+        SurfaceKind::Plane(p) => Some((p.u_dir.cross(p.v_dir).normalize(), p.p0)),
+        _ => None,
+    }
+}
+
+/// Compute the plane-plane intersection line as `(origin, direction)`.
+///
+/// `direction = n_a × n_b`.  `origin` is the minimum-norm point on the line, found by
+/// solving the 2×2 system `[n_a·n_a  n_a·n_b; n_a·n_b  n_b·n_b] [α; β] = [d_a; d_b]`
+/// and returning `α·n_a + β·n_b`.
+///
+/// Returns `None` when the planes are parallel (`|n_a × n_b| < 1e-10`).
+fn plane_plane_line(
+    n_a: Point3, p_a: Point3,
+    n_b: Point3, p_b: Point3,
+) -> Option<(Point3, Point3)> {
+    let dir = n_a.cross(n_b);
+    if dir.length() < 1e-10 { return None; }
+
+    let d_a = n_a.dot(p_a);
+    let d_b = n_b.dot(p_b);
+    let a = n_a.dot(n_a);
+    let b = n_a.dot(n_b);
+    let c = n_b.dot(n_b);
+    let det = a * c - b * b;
+    let alpha = (d_a * c - d_b * b) / det;
+    let beta  = (d_b * a - d_a * b) / det;
+    let origin = n_a * alpha + n_b * beta;
+    Some((origin, dir))
+}
+
+/// Intersect an infinite ray `origin + t * dir` with the line segment `[v0, v1]`.
+///
+/// Returns `(t_ray, t_seg)` where `t_seg ∈ [0, 1]`, or `None` if lines are parallel or
+/// the intersection lies outside the segment.  Uses the 2D Cramer's-rule projection onto
+/// the coordinate plane with the largest normal component (`dir × edge`), for numerical
+/// stability.
+fn intersect_ray_segment(
+    origin: Point3,
+    dir: Point3,
+    v0: Point3,
+    v1: Point3,
+) -> Option<(f64, f64)> {
+    let edge = v1 - v0;
+    let n = dir.cross(edge);
+    let nx = n.x.abs();
+    let ny = n.y.abs();
+    let nz = n.z.abs();
+    let rhs = v0 - origin;
+
+    // Solve  [dir.i  -edge.i] [t]   [rhs.i]
+    //        [dir.j  -edge.j] [s] = [rhs.j]
+    // via Cramer's rule, picking (i,j) as the rows with largest cross-product component.
+    let (det, t, s) = if nz >= nx && nz >= ny {
+        let d = dir.x * (-edge.y) - (-edge.x) * dir.y;
+        let t = (rhs.x * (-edge.y) - (-edge.x) * rhs.y) / d;
+        let s = (dir.x * rhs.y - dir.y * rhs.x) / d;
+        (d, t, s)
+    } else if ny >= nx {
+        let d = dir.x * (-edge.z) - (-edge.x) * dir.z;
+        let t = (rhs.x * (-edge.z) - (-edge.x) * rhs.z) / d;
+        let s = (dir.x * rhs.z - dir.z * rhs.x) / d;
+        (d, t, s)
+    } else {
+        let d = dir.y * (-edge.z) - (-edge.y) * dir.z;
+        let t = (rhs.y * (-edge.z) - (-edge.y) * rhs.z) / d;
+        let s = (dir.y * rhs.z - dir.z * rhs.y) / d;
+        (d, t, s)
+    };
+
+    if det.abs() < 1e-12 { return None; }
+    if s < -1e-9 || s > 1.0 + 1e-9 { return None; }
+    Some((t, s.clamp(0.0, 1.0)))
+}
+
+/// Clip the infinite intersection line to the polygon boundary of `face_id`.
+///
+/// Returns exactly two [`BoundaryHit`]s (entry, exit) ordered by `t_line`, or `None` if
+/// the line does not cross exactly two boundary edges.  For Phase 5 convex planar
+/// polyhedra this is always 0 or 2.
+///
+/// Vertex hits (line passes through a corner) are deduped: if two adjacent edges both
+/// report an intersection at the shared vertex (`t_seg ≈ 0` or `1`), only one is kept.
+fn clip_line_to_face(
+    ctx: &SolidModelingContext,
+    face_id: FaceId,
+    origin: Point3,
+    dir: Point3,
+) -> Option<[BoundaryHit; 2]> {
+    let ces: Vec<CoEdgeId> = ctx.get_loop(ctx.get_face(face_id).outer).coedges.clone();
+    let mut hits: Vec<BoundaryHit> = Vec::new();
+
+    for &ce_id in &ces {
+        let ce   = ctx.get_coedge(ce_id);
+        let edge = ctx.get_edge(ce.edge);
+        let v0   = ctx.get_vertex(edge.v0).point;
+        let v1   = ctx.get_vertex(edge.v1).point;
+
+        if let Some((t_line, t_seg)) = intersect_ray_segment(origin, dir, v0, v1) {
+            let t_edge = edge.t0 + (edge.t1 - edge.t0) * t_seg;
+            let point  = v0 + (v1 - v0) * t_seg;
+            // Deduplicate vertex hits: skip if this point is ≈ the last hit.
+            if let Some(prev) = hits.last() {
+                let dx = point.x - prev.point.x;
+                let dy = point.y - prev.point.y;
+                let dz = point.z - prev.point.z;
+                if (dx*dx + dy*dy + dz*dz).sqrt() < 1e-10 { continue; }
+            }
+            hits.push(BoundaryHit { edge_id: ce.edge, t_edge, t_line, point });
+        }
+    }
+
+    // Also deduplicate first vs last (loop wrap-around vertex hit).
+    if hits.len() >= 2 {
+        let last = hits.last().unwrap().point;
+        let first = hits[0].point;
+        let dx = last.x - first.x;
+        let dy = last.y - first.y;
+        let dz = last.z - first.z;
+        if (dx*dx + dy*dy + dz*dz).sqrt() < 1e-10 {
+            hits.pop();
+        }
+    }
+
+    if hits.len() != 2 { return None; }
+
+    if hits[0].t_line > hits[1].t_line { hits.swap(0, 1); }
+    Some([hits.remove(0), hits.remove(0)])
+}
+
+/// Find the intersection of two planar faces.
+///
+/// Returns `None` when:
+/// - either face is non-planar,
+/// - the planes are parallel (including coincident),
+/// - the intersection line does not cross both face polygons, or
+/// - the clipped segments do not overlap (faces are adjacent but not intersecting).
+///
+/// Otherwise returns two pairs of [`BoundaryHit`]s — one pair per face — representing
+/// where the intersection line enters and exits each face's boundary polygon.
+pub fn intersect_planar_faces(
+    ctx: &SolidModelingContext,
+    face_a: FaceId,
+    face_b: FaceId,
+) -> Option<FaceFaceIntersection> {
+    let (n_a, p_a) = plane_of_face(ctx, face_a)?;
+    let (n_b, p_b) = plane_of_face(ctx, face_b)?;
+    let (origin, dir) = plane_plane_line(n_a, p_a, n_b, p_b)?;
+    let hits_a = clip_line_to_face(ctx, face_a, origin, dir)?;
+    let hits_b = clip_line_to_face(ctx, face_b, origin, dir)?;
+
+    // Verify the clipped segments overlap on the shared line parameter.
+    let t_start = hits_a[0].t_line.max(hits_b[0].t_line);
+    let t_end   = hits_a[1].t_line.min(hits_b[1].t_line);
+    if t_end < t_start + 1e-10 { return None; }
+
+    Some(FaceFaceIntersection { hits_a, hits_b })
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -725,5 +914,197 @@ mod test {
             classify_face_wrt_node(&ctx, fb, &node),
             crate::predicates::Classification::Inside,
         );
+    }
+
+    // ── intersect_planar_faces tests ──────────────────────────────────────────
+    //
+    // Face A: unit square [0,1]×[0,1] at z=0   (make_square)
+    // Face B: unit square [0,1]×[-0.5,0.5] at y=0.5, standing vertically
+    //         plane: origin=(0,0.5,0), u_dir=(1,0,0), v_dir=(0,0,1)
+    //         normal = u_dir × v_dir = (0,-1,0)
+    //         The plane-plane intersection line is y=0.5, z=0, running in +x.
+    //
+    // Helper: build the vertical face in an existing ctx.
+    fn make_vertical_square(
+        ctx: &mut SolidModelingContext,
+    ) -> (crate::brep_kernel::SolidId, ShellId, FaceId, [EdgeId; 4]) {
+        let tol = ctx.tolerance.pos_tol;
+        let vb0 = ctx.push_vertex(Vertex::new(pt3(0.0, 0.5, -0.5), tol));
+        let vb1 = ctx.push_vertex(Vertex::new(pt3(1.0, 0.5, -0.5), tol));
+        let vb2 = ctx.push_vertex(Vertex::new(pt3(1.0, 0.5,  0.5), tol));
+        let vb3 = ctx.push_vertex(Vertex::new(pt3(0.0, 0.5,  0.5), tol));
+
+        let mk_e = |ctx: &mut SolidModelingContext, a: Point3, b: Point3, va: VertexId, vb: VertexId| {
+            let c = ctx.push_curve3(Curve3Kind::Line3(Line3::new(a, b)));
+            ctx.push_edge(Edge::new(c, va, vb, 0.0, 1.0))
+        };
+        let eb01 = mk_e(ctx, pt3(0.,0.5,-0.5), pt3(1.,0.5,-0.5), vb0, vb1);
+        let eb12 = mk_e(ctx, pt3(1.,0.5,-0.5), pt3(1.,0.5, 0.5), vb1, vb2);
+        let eb23 = mk_e(ctx, pt3(1.,0.5, 0.5), pt3(0.,0.5, 0.5), vb2, vb3);
+        let eb30 = mk_e(ctx, pt3(0.,0.5, 0.5), pt3(0.,0.5,-0.5), vb3, vb0);
+
+        let solid_id = ctx.push_solid(crate::brep_kernel::Solid::new(crate::brep_kernel::ShellId(usize::MAX)));
+        let shell_id = ctx.push_shell(crate::brep_kernel::Shell::new(solid_id, true));
+        ctx.get_mut_solid(solid_id).outer = shell_id;
+
+        let surf_id = ctx.push_surface(SurfaceKind::Plane(crate::geom::Plane::new(
+            pt3(0.,0.5,0.), pt3(1.,0.,0.), pt3(0.,0.,1.),
+        )));
+        let prov = crate::brep_kernel::ProvenanceData::primitive(2, 1);
+        let face_id = ctx.push_face(crate::brep_kernel::Face::new(
+            shell_id, surf_id, LoopId(usize::MAX), crate::brep_kernel::FaceSense::Aligned, prov,
+        ));
+        let loop_id = ctx.push_loop(Loop::new(face_id, true));
+        ctx.get_mut_face(face_id).outer = loop_id;
+
+        let mk_ce = |ctx: &mut SolidModelingContext, eid: EdgeId, uv0: Point2, uv1: Point2| {
+            let pc = ctx.push_curve2(Curve2Kind::Line2(Line2::new(uv0, uv1)));
+            let ce = ctx.push_coedge(CoEdge::new(eid, Orientation::Forward, face_id, pc));
+            ctx.get_mut_edge(eid).coedges.push(ce);
+            ctx.get_mut_loop(loop_id).coedges.push(ce);
+        };
+        mk_ce(ctx, eb01, pt2(0.,-0.5), pt2(1.,-0.5));
+        mk_ce(ctx, eb12, pt2(1.,-0.5), pt2(1., 0.5));
+        mk_ce(ctx, eb23, pt2(1., 0.5), pt2(0., 0.5));
+        mk_ce(ctx, eb30, pt2(0., 0.5), pt2(0.,-0.5));
+
+        ctx.get_mut_shell(shell_id).faces.push(face_id);
+        (solid_id, shell_id, face_id, [eb01, eb12, eb23, eb30])
+    }
+
+    #[test]
+    fn ssi_parallel_planes_returns_none() {
+        // Two parallel XY-plane faces → no intersection line.
+        let mut ctx = SolidModelingContext::new();
+        let (_, _, face_a, _, _) = make_square(&mut ctx);
+
+        // Second face: unit square at z=1.
+        let tol = ctx.tolerance.pos_tol;
+        let vb0 = ctx.push_vertex(Vertex::new(pt3(0.,0.,1.), tol));
+        let vb1 = ctx.push_vertex(Vertex::new(pt3(1.,0.,1.), tol));
+        let vb2 = ctx.push_vertex(Vertex::new(pt3(1.,1.,1.), tol));
+        let vb3 = ctx.push_vertex(Vertex::new(pt3(0.,1.,1.), tol));
+        let sol2 = ctx.push_solid(crate::brep_kernel::Solid::new(ShellId(usize::MAX)));
+        let sh2  = ctx.push_shell(crate::brep_kernel::Shell::new(sol2, true));
+        ctx.get_mut_solid(sol2).outer = sh2;
+        let surf2 = ctx.push_surface(SurfaceKind::Plane(crate::geom::Plane::new(
+            pt3(0.,0.,1.), pt3(1.,0.,0.), pt3(0.,1.,0.),
+        )));
+        let prov2 = crate::brep_kernel::ProvenanceData::primitive(2, 1);
+        let face_b = ctx.push_face(crate::brep_kernel::Face::new(
+            sh2, surf2, LoopId(usize::MAX), crate::brep_kernel::FaceSense::Aligned, prov2,
+        ));
+        let loop2 = ctx.push_loop(Loop::new(face_b, true));
+        ctx.get_mut_face(face_b).outer = loop2;
+        let mk = |ctx: &mut SolidModelingContext, a: VertexId, b: VertexId, pa: Point3, pb: Point3,
+                  uv0: Point2, uv1: Point2| {
+            let c3  = ctx.push_curve3(Curve3Kind::Line3(Line3::new(pa, pb)));
+            let eid = ctx.push_edge(Edge::new(c3, a, b, 0.0, 1.0));
+            let pc  = ctx.push_curve2(Curve2Kind::Line2(Line2::new(uv0, uv1)));
+            let ce  = ctx.push_coedge(CoEdge::new(eid, Orientation::Forward, face_b, pc));
+            ctx.get_mut_edge(eid).coedges.push(ce);
+            ctx.get_mut_loop(loop2).coedges.push(ce);
+        };
+        mk(&mut ctx, vb0, vb1, pt3(0.,0.,1.), pt3(1.,0.,1.), pt2(0.,0.), pt2(1.,0.));
+        mk(&mut ctx, vb1, vb2, pt3(1.,0.,1.), pt3(1.,1.,1.), pt2(1.,0.), pt2(1.,1.));
+        mk(&mut ctx, vb2, vb3, pt3(1.,1.,1.), pt3(0.,1.,1.), pt2(1.,1.), pt2(0.,1.));
+        mk(&mut ctx, vb3, vb0, pt3(0.,1.,1.), pt3(0.,0.,1.), pt2(0.,1.), pt2(0.,0.));
+
+        assert!(intersect_planar_faces(&ctx, face_a, face_b).is_none());
+    }
+
+    #[test]
+    fn ssi_crossing_faces_returns_some() {
+        // Face A (XY) × Face B (vertical at y=0.5): intersection line y=0.5, z=0.
+        let mut ctx = SolidModelingContext::new();
+        let (_, _, face_a, _, _) = make_square(&mut ctx);
+        let (_, _, face_b, _) = make_vertical_square(&mut ctx);
+
+        assert!(intersect_planar_faces(&ctx, face_a, face_b).is_some());
+    }
+
+    #[test]
+    fn ssi_crossing_faces_hits_on_correct_edges() {
+        // Face A clip: line enters via E30 (x=0 edge) and exits via E12 (x=1 edge).
+        // Face B clip: line enters via left edge (x=0) and exits via right edge (x=1).
+        let mut ctx = SolidModelingContext::new();
+        let (_, _, face_a, _, [_e01, e12, _e23, e30]) = make_square(&mut ctx);
+        let (_, _, face_b, [_eb01, eb12, _eb23, eb30]) = make_vertical_square(&mut ctx);
+
+        let result = intersect_planar_faces(&ctx, face_a, face_b)
+            .expect("crossing faces must intersect");
+
+        // hits_a: entry at E30 (x=0 edge) t_edge=0.5, exit at E12 (x=1 edge) t_edge=0.5
+        let ha = &result.hits_a;
+        let small_t = ha.iter().min_by(|a, b| a.t_line.partial_cmp(&b.t_line).unwrap()).unwrap();
+        let large_t = ha.iter().max_by(|a, b| a.t_line.partial_cmp(&b.t_line).unwrap()).unwrap();
+        assert_eq!(small_t.edge_id, e30, "entry hit should be on E30 (x=0 side)");
+        assert_eq!(large_t.edge_id, e12, "exit hit should be on E12 (x=1 side)");
+        assert!((small_t.t_edge - 0.5).abs() < 1e-10, "E30 t_edge should be 0.5");
+        assert!((large_t.t_edge - 0.5).abs() < 1e-10, "E12 t_edge should be 0.5");
+
+        // hits_b: entry on eb30 (left/x=0 edge), exit on eb12 (right/x=1 edge)
+        let hb = &result.hits_b;
+        let small_tb = hb.iter().min_by(|a, b| a.t_line.partial_cmp(&b.t_line).unwrap()).unwrap();
+        let large_tb = hb.iter().max_by(|a, b| a.t_line.partial_cmp(&b.t_line).unwrap()).unwrap();
+        assert_eq!(small_tb.edge_id, eb30, "entry hit on face B should be on eb30 (x=0 side)");
+        assert_eq!(large_tb.edge_id, eb12, "exit hit on face B should be on eb12 (x=1 side)");
+    }
+
+    #[test]
+    fn ssi_hit_points_lie_on_intersection_line() {
+        // All four hit points should have y=0.5, z=0 (the intersection line).
+        let mut ctx = SolidModelingContext::new();
+        let (_, _, face_a, _, _) = make_square(&mut ctx);
+        let (_, _, face_b, _) = make_vertical_square(&mut ctx);
+
+        let result = intersect_planar_faces(&ctx, face_a, face_b).unwrap();
+
+        for hit in result.hits_a.iter().chain(result.hits_b.iter()) {
+            assert!((hit.point.y - 0.5).abs() < 1e-10, "point.y = {}", hit.point.y);
+            assert!(hit.point.z.abs() < 1e-10,          "point.z = {}", hit.point.z);
+        }
+    }
+
+    #[test]
+    fn ssi_non_overlapping_faces_returns_none() {
+        // Face A: unit square at z=0, x∈[0,1].
+        // Face B: vertical square at y=0.5 but x∈[2,3] — no x-overlap.
+        let mut ctx = SolidModelingContext::new();
+        let (_, _, face_a, _, _) = make_square(&mut ctx);
+
+        let tol = ctx.tolerance.pos_tol;
+        let vb0 = ctx.push_vertex(Vertex::new(pt3(2.,0.5,-0.5), tol));
+        let vb1 = ctx.push_vertex(Vertex::new(pt3(3.,0.5,-0.5), tol));
+        let vb2 = ctx.push_vertex(Vertex::new(pt3(3.,0.5, 0.5), tol));
+        let vb3 = ctx.push_vertex(Vertex::new(pt3(2.,0.5, 0.5), tol));
+        let sol2 = ctx.push_solid(crate::brep_kernel::Solid::new(ShellId(usize::MAX)));
+        let sh2  = ctx.push_shell(crate::brep_kernel::Shell::new(sol2, true));
+        ctx.get_mut_solid(sol2).outer = sh2;
+        let surf2 = ctx.push_surface(SurfaceKind::Plane(crate::geom::Plane::new(
+            pt3(0.,0.5,0.), pt3(1.,0.,0.), pt3(0.,0.,1.),
+        )));
+        let prov2 = crate::brep_kernel::ProvenanceData::primitive(2, 1);
+        let face_b = ctx.push_face(crate::brep_kernel::Face::new(
+            sh2, surf2, LoopId(usize::MAX), crate::brep_kernel::FaceSense::Aligned, prov2,
+        ));
+        let loop2 = ctx.push_loop(Loop::new(face_b, true));
+        ctx.get_mut_face(face_b).outer = loop2;
+        let mk = |ctx: &mut SolidModelingContext, va: VertexId, vb: VertexId,
+                  pa: Point3, pb: Point3, uv0: Point2, uv1: Point2| {
+            let c3  = ctx.push_curve3(Curve3Kind::Line3(Line3::new(pa, pb)));
+            let eid = ctx.push_edge(Edge::new(c3, va, vb, 0.0, 1.0));
+            let pc  = ctx.push_curve2(Curve2Kind::Line2(Line2::new(uv0, uv1)));
+            let ce  = ctx.push_coedge(CoEdge::new(eid, Orientation::Forward, face_b, pc));
+            ctx.get_mut_edge(eid).coedges.push(ce);
+            ctx.get_mut_loop(loop2).coedges.push(ce);
+        };
+        mk(&mut ctx, vb0, vb1, pt3(2.,0.5,-0.5), pt3(3.,0.5,-0.5), pt2(2.,-0.5), pt2(3.,-0.5));
+        mk(&mut ctx, vb1, vb2, pt3(3.,0.5,-0.5), pt3(3.,0.5, 0.5), pt2(3.,-0.5), pt2(3., 0.5));
+        mk(&mut ctx, vb2, vb3, pt3(3.,0.5, 0.5), pt3(2.,0.5, 0.5), pt2(3., 0.5), pt2(2., 0.5));
+        mk(&mut ctx, vb3, vb0, pt3(2.,0.5, 0.5), pt3(2.,0.5,-0.5), pt2(2., 0.5), pt2(2.,-0.5));
+
+        assert!(intersect_planar_faces(&ctx, face_a, face_b).is_none(),
+            "x-separated faces must not intersect");
     }
 }

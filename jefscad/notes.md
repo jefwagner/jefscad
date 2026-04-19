@@ -716,7 +716,62 @@ Scope: all faces `Plane`, all edges `Line3`, all pcurves `Line2`.  Lives in `jef
   Indeterminate for coincident faces; 8 tests (outside sphere, inside sphere, outside shifted cuboid,
   inside large cuboid, on-surface indeterminate, fragment after split); 551 tests total
 
-- [ ] Next: plane-plane SSI (surface-surface intersection) → find the intersection line between two planar faces
+#### Design record — deferred topology cases (2026-04-19)
+
+Three splitting configurations were analyzed before proceeding to SSI:
+
+**Case 1 — P on face boundary** (edge of B crosses F_A's perimeter): L1 and L2 meet at
+a vertex already on F_A's boundary.  Each segment is an independent boundary-to-boundary
+split.  `split_face` handles each one independently. ✓ Already covered.
+
+**Case 2 — P in face interior** (edge of B passes through interior of F_A): L1 runs from
+boundary Q1 to interior P; L2 runs from P to boundary Q2.  Together they form a single
+connected polyline Q1→P→Q2.  This CAN be handled with sequential splits: split F_A with
+L1+L2 as a boundary-to-boundary segment (treating P as an interior waypoint on a
+`Polyline3` split edge), or by first splitting the face with the full-extent line that passes
+through P (see Case 2 reanalysis below), then splitting the resulting sub-face.
+
+**Reanalysis — "full-extent" approach resolves Case 2**:
+For each face-face pair (F_A, F_B), the SSI computes two independent clips:
+- S_A: the intersection line clipped to F_A's boundary (always boundary-to-boundary)
+- S_B: the intersection line clipped to F_B's boundary (always boundary-to-boundary)
+Both S_A and S_B are always boundary-to-boundary on their respective faces.  The
+interior-point issue only arises if we naively use the *overlap* of S_A and S_B as the
+split segment — the SSI must split each face with its OWN full clip (S_A for F_A, S_B
+for F_B), and then classify fragments.  This guarantees all splits are boundary-to-boundary.
+
+**Case 3 — B's cross-section entirely inside F_A** (B is a smaller solid fully contained
+within F_A's plane region): the intersection polygon has no edges touching F_A's boundary;
+all four corners are interior points.  This requires adding an **inner loop** to F_A (a
+hole), which the topology supports (`Face.inners`) but `split_face` does not create.
+Deferred: first Boolean test cases will use geometry where B partially overlaps A (no
+full-containment in any face plane).
+
+**Decision**: proceed with SSI using the "each face gets its own full clip" strategy.
+No new topology operation needed for Phase 5 test cases.
+
+#### Plane-plane SSI — `intersect_planar_faces` (COMPLETE 2026-04-19)
+
+`pub fn intersect_planar_faces(ctx, face_a, face_b) -> Option<FaceFaceIntersection>`
+
+Key types:
+- `BoundaryHit { edge_id, t_edge, t_line, point }` — one hit on a face boundary edge
+- `FaceFaceIntersection { hits_a: [BoundaryHit; 2], hits_b: [BoundaryHit; 2] }` — entry/exit per face
+
+Implementation steps:
+1. Extract `(normal, point)` from each face's `Plane` surface (`plane_of_face`).
+2. Compute intersection line direction `n_a × n_b`; if `|dir| < 1e-10` → parallel → `None`.
+3. Minimum-norm origin via 2×2 system in the {n_a, n_b} basis (`plane_plane_line`).
+4. Clip line to each face's polygon (`clip_line_to_face`): test each boundary edge via
+   Cramer's-rule 2D projection on the coordinate plane with largest `dir × edge` component
+   (`intersect_ray_segment`).  Deduplicates vertex hits (loop wrap-around).
+5. Verify t_line overlap between the two clips (`t_end > t_start + 1e-10`); return `None` if
+   faces project to disjoint line segments.
+
+5 tests:  parallel → None | crossing → Some | correct edge IDs | hit points on line |
+          non-overlapping (x-separated) → None.
+
+- [x] plane-plane SSI (surface-surface intersection) → find the intersection line between two planar faces
 - [ ] First boolean targets:
   - [ ] either: planar-only polyhedra subset
   - [ ] or: analytic pairs (plane/cyl/sphere) before full NURBS
