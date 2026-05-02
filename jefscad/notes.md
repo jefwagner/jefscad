@@ -715,9 +715,15 @@ Strategy doc: `kb/Boolean-Op-SSI-Strategy.md`
 - [x] `aabb_overlap(a, b) -> bool` — overlap on all three axes; `<=` so touching counts; 3 tests
 
 ##### Plane/plane SSI *(first concrete surface-pair implementation)*
-- [ ] `intersect_plane_plane(ctx, face_a, face_b) -> Option<FaceFaceIntersection>` — computes
-      intersection line, clips independently to each face, pushes `Vertex`/`Curve3`/`Curve2` into
-      context; called from `(Plane, Plane)` arm of `intersect_faces`
+- [x] `plane_of_face(ctx, face_id) -> &Plane` — unwraps `SurfaceKind::Plane`; tested via cuboid
+      (unit normal, perpendicular basis, offset within [0,1]); 1 test
+- [x] `plane_plane_line(n_a, d_a, n_b, d_b) -> Option<(Point3, Point3)>` — intersection line
+      of two planes in equation form; `dir = n_a × n_b`; parallel/antiparallel → None;
+      minimum-norm origin via Gram system (denominator = sin²θ = |dir|²); 4 tests
+- [ ] `clip_line_to_face(ctx, face_id, origin, dir) -> Option<[f64; 2]>` — clips intersection
+      line to face boundary; returns `[t_min, t_max]` on line or None
+- [ ] `intersect_plane_plane(ctx, face_a, face_b) -> Option<FaceFaceIntersection>` — orchestrates
+      the above; checks t-range overlap; pushes `Vertex`×2, `Line3`, `Line2`×2 into context
 
 ##### SSI table
 - [ ] `compute_ssi_table(ctx, solid_a, solid_b) -> SsiTable` — enumerate all face pairs, AABB

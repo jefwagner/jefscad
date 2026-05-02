@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::brep_kernel::{Curve2Id, Curve3Id, FaceId, SolidModelingContext, VertexId};
-use crate::geom::{Curve3Kind, SurfaceKind};
+use crate::geom::{Curve3Kind, Plane, Point3, SurfaceKind};
 
 #[derive(Debug, Clone)]
 pub struct FaceFaceIntersection {
@@ -62,6 +62,45 @@ pub fn intersect_faces(
         (SurfTag::Plane, SurfTag::Plane) => intersect_plane_plane(ctx, face_a, face_b),
         _ => None,
     }
+}
+
+// ── Plane geometry helpers ────────────────────────────────────────────────────
+
+/// Unwraps the `Plane` from a planar face. Only call after a `SurfTag::Plane` check.
+fn plane_of_face<'a>(ctx: &'a SolidModelingContext, face_id: FaceId) -> &'a Plane {
+    let surf_id = ctx.get_face(face_id).surface;
+    match ctx.get_surface(surf_id) {
+        SurfaceKind::Plane(p) => p,
+        _ => panic!("plane_of_face called on non-planar face"),
+    }
+}
+
+/// Intersection line of two planes given in equation form `n · p = d`.
+///
+/// Returns `(origin, unit_dir)` where `origin` is the minimum-norm point on the
+/// line (perpendicular to `dir`) and `dir = (n_a × n_b).normalize()`.
+/// Returns `None` if the planes are parallel (`|n_a × n_b| < 1e-10`).
+fn plane_plane_line(
+    n_a: Point3, d_a: f64,
+    n_b: Point3, d_b: f64,
+) -> Option<(Point3, Point3)> {
+    let cross = n_a.cross(n_b);
+    let len   = cross.length();
+    if len < 1e-10 {
+        return None;
+    }
+    let dir = cross * (1.0 / len);
+
+    // Minimum-norm origin: write P = λn_a + μn_b, substitute into both plane
+    // equations.  With unit normals the Gram matrix is [[1, c],[c, 1]] where
+    // c = n_a·n_b, and its determinant is 1 - c² = sin²θ = len².
+    let c    = n_a.dot(n_b);
+    let sin2 = len * len;
+    let lam  = (d_a - c * d_b) / sin2;
+    let mu   = (d_b - c * d_a) / sin2;
+    let origin = n_a * lam + n_b * mu;
+
+    Some((origin, dir))
 }
 
 fn intersect_plane_plane(
@@ -201,6 +240,63 @@ mod test {
         table.insert(fa, fb, None);
         assert!(matches!(table.get(fa, fb), Some(None))); // tested, no intersection
         assert!(matches!(table.get(fa, fc), None));        // not yet computed
+    }
+
+    // ── plane geometry helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn plane_plane_line_parallel_is_none() {
+        let n = Point3::new(0.0, 0.0, 1.0);
+        assert!(plane_plane_line(n, 0.0, n, 1.0).is_none());
+    }
+
+    #[test]
+    fn plane_plane_line_antiparallel_is_none() {
+        let n_a = Point3::new(0.0, 0.0,  1.0);
+        let n_b = Point3::new(0.0, 0.0, -1.0);
+        assert!(plane_plane_line(n_a, 0.0, n_b, 0.0).is_none());
+    }
+
+    #[test]
+    fn plane_plane_line_perpendicular_at_origin() {
+        let n_a = Point3::new(0.0, 0.0, 1.0);
+        let n_b = Point3::new(0.0, 1.0, 0.0);
+        let (origin, dir) = plane_plane_line(n_a, 0.0, n_b, 0.0).unwrap();
+        let eps = 1e-10;
+        assert!(origin.length() < eps, "origin should be (0,0,0), got {:?}", origin);
+        assert!((dir.length() - 1.0).abs() < eps, "dir should be unit, len={}", dir.length());
+    }
+
+    #[test]
+    fn plane_plane_line_offset_perpendicular() {
+        // x=1 plane crossed with y=2 plane: line along z, origin at (1,2,0)
+        let n_a = Point3::new(1.0, 0.0, 0.0);
+        let n_b = Point3::new(0.0, 1.0, 0.0);
+        let (origin, dir) = plane_plane_line(n_a, 1.0, n_b, 2.0).unwrap();
+        let eps = 1e-10;
+        assert!((n_a.dot(origin) - 1.0).abs() < eps, "origin not on plane A: {}", n_a.dot(origin));
+        assert!((n_b.dot(origin) - 2.0).abs() < eps, "origin not on plane B: {}", n_b.dot(origin));
+        assert!((dir.length() - 1.0).abs() < eps, "dir not unit: {}", dir.length());
+    }
+
+    #[test]
+    fn plane_of_face_returns_valid_plane() {
+        let mut ctx = SolidModelingContext::new();
+        let sid = build_cuboid(&mut ctx, 1.0, 1.0, 1.0, 0, 0);
+        let shell_id = ctx.get_solid(sid).outer;
+        let faces = ctx.get_shell(shell_id).faces.clone();
+        for &fid in &faces {
+            let p = plane_of_face(&ctx, fid);
+            let normal = p.u_dir.cross(p.v_dir);
+            let eps = 1e-10;
+            // Normal is unit
+            assert!((normal.length() - 1.0).abs() < eps, "normal not unit: {}", normal.length());
+            // u_dir and v_dir are perpendicular
+            assert!(p.u_dir.dot(p.v_dir).abs() < eps, "u_dir · v_dir = {}", p.u_dir.dot(p.v_dir));
+            // Plane offset d = n · p0 lies on the cuboid surface, so within [0, 1]
+            let d = normal.dot(p.p0);
+            assert!(d >= -eps && d <= 1.0 + eps, "face offset d={} outside [0,1]", d);
+        }
     }
 
     // ── intersect_faces dispatcher ────────────────────────────────────────────
