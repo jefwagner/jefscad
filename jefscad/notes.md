@@ -696,9 +696,10 @@ geometrically equivalent to current output; B-rep back-references fully classifi
 Strategy doc: `kb/Boolean-Op-SSI-Strategy.md`
 
 ##### Data structures *(define the API contract first)*
-- [ ] Define `FaceFaceIntersection { v_start: VertexId, v_end: VertexId, curve3: Curve3Id,
+- [x] Define `FaceFaceIntersection { v_start: VertexId, v_end: VertexId, curve3: Curve3Id,
       pcurve_a: Curve2Id, pcurve_b: Curve2Id }` — all arena IDs; strategy-doc canonical form
-- [ ] Define `SsiTable = HashMap<(FaceId, FaceId), Option<FaceFaceIntersection>>`
+- [x] Define `SsiTable` newtype wrapping `HashMap<(FaceId, FaceId), Option<FaceFaceIntersection>>`
+      with `insert`/`get` that canonicalize key as `(min_id, max_id)`; 2 tests
 
 ##### SSI dispatcher *(structural anchor — surface-type routing)*
 - [ ] `intersect_faces(ctx, face_a, face_b) -> Option<FaceFaceIntersection>` — dispatches on

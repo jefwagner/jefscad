@@ -6,6 +6,7 @@ use pyo3_stub_gen;
 
 mod brep_kernel;
 pub(crate) mod brep_compiler;
+mod bool_ops;
 pub mod csg_lang;
 mod geom;
 pub mod mesher;
