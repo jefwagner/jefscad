@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::brep_kernel::{Curve2Id, Curve3Id, FaceId, SolidModelingContext, VertexId};
-use crate::geom::SurfaceKind;
+use crate::geom::{Curve3Kind, SurfaceKind};
 
 #[derive(Debug, Clone)]
 pub struct FaceFaceIntersection {
@@ -72,6 +72,102 @@ fn intersect_plane_plane(
     None // stub — implemented in next step
 }
 
+// ── AABB ─────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+pub struct Aabb {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+
+impl Aabb {
+    pub fn new(min: [f64; 3], max: [f64; 3]) -> Self {
+        Self { min, max }
+    }
+
+    /// Conservative fallback: a box that overlaps everything.
+    pub fn unbounded() -> Self {
+        Self { min: [f64::NEG_INFINITY; 3], max: [f64::INFINITY; 3] }
+    }
+
+    fn empty() -> Self {
+        Self { min: [f64::INFINITY; 3], max: [f64::NEG_INFINITY; 3] }
+    }
+
+    fn expand(&mut self, p: [f64; 3]) {
+        for i in 0..3 {
+            if p[i] < self.min[i] { self.min[i] = p[i]; }
+            if p[i] > self.max[i] { self.max[i] = p[i]; }
+        }
+    }
+}
+
+/// Returns `true` if the two boxes share any point (touching boundaries count).
+pub fn aabb_overlap(a: &Aabb, b: &Aabb) -> bool {
+    (0..3).all(|i| a.min[i] <= b.max[i] && b.min[i] <= a.max[i])
+}
+
+pub fn face_aabb(ctx: &SolidModelingContext, face_id: FaceId) -> Aabb {
+    let sid = ctx.get_face(face_id).surface;
+    match surf_tag(ctx.get_surface(sid)) {
+        SurfTag::Plane => plane_face_aabb(ctx, face_id),
+        _ => Aabb::unbounded(),
+    }
+}
+
+fn plane_face_aabb(ctx: &SolidModelingContext, face_id: FaceId) -> Aabb {
+    use std::f64::consts::{PI, TAU};
+
+    let outer_id = ctx.get_face(face_id).outer;
+    let coedge_ids = ctx.get_loop(outer_id).coedges.clone();
+    let mut aabb = Aabb::empty();
+
+    for ceid in coedge_ids {
+        let edge_id = ctx.get_coedge(ceid).edge;
+        let (t0, t1, c3id) = {
+            let e = ctx.get_edge(edge_id);
+            (e.t0, e.t1, e.curve3)
+        };
+
+        match ctx.get_curve3(c3id) {
+            Curve3Kind::Line3(l) => {
+                let p0 = l.p0 + (l.p1 - l.p0) * t0;
+                let p1 = l.p0 + (l.p1 - l.p0) * t1;
+                aabb.expand([p0.x, p0.y, p0.z]);
+                aabb.expand([p1.x, p1.y, p1.z]);
+            }
+            Curve3Kind::CircularArc3(arc) => {
+                let arc = *arc;
+                let e2 = arc.normal.cross(arc.ref_dir);
+                let u = [arc.ref_dir.x, arc.ref_dir.y, arc.ref_dir.z];
+                let v = [e2.x, e2.y, e2.z];
+
+                // Arc endpoints
+                let eval = |t: f64| {
+                    let p = arc.center + (arc.ref_dir * t.cos() + e2 * t.sin()) * arc.radius;
+                    [p.x, p.y, p.z]
+                };
+                aabb.expand(eval(t0));
+                aabb.expand(eval(t1));
+
+                // Per-axis extrema: d/dt x_i = 0 at t = atan2(v_i, u_i) and t + π
+                let span = t1 - t0;
+                for i in 0..3 {
+                    let t_peak = f64::atan2(v[i], u[i]);
+                    for &t_cand in &[t_peak, t_peak + PI] {
+                        let t_rel = (t_cand - t0).rem_euclid(TAU);
+                        if t_rel <= span {
+                            aabb.expand(eval(t0 + t_rel));
+                        }
+                    }
+                }
+            }
+            _ => return Aabb::unbounded(),
+        }
+    }
+    aabb
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -125,6 +221,73 @@ mod test {
         }).unwrap();
         assert!(intersect_faces(&mut ctx, cyl_face, plane_face).is_none());
     }
+
+    // ── AABB ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn aabb_overlap_interior() {
+        let a = Aabb::new([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
+        let b = Aabb::new([1.0, 1.0, 1.0], [3.0, 3.0, 3.0]);
+        assert!(aabb_overlap(&a, &b));
+    }
+
+    #[test]
+    fn aabb_overlap_separated() {
+        let a = Aabb::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let b = Aabb::new([2.0, 0.0, 0.0], [3.0, 1.0, 1.0]);
+        assert!(!aabb_overlap(&a, &b));
+    }
+
+    #[test]
+    fn aabb_overlap_touching() {
+        // Boxes sharing exactly one face — conservative: touching counts as overlap.
+        let a = Aabb::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+        let b = Aabb::new([1.0, 0.0, 0.0], [2.0, 1.0, 1.0]);
+        assert!(aabb_overlap(&a, &b));
+    }
+
+    #[test]
+    fn face_aabb_planar_cuboid_faces() {
+        let mut ctx = SolidModelingContext::new();
+        let sid = build_cuboid(&mut ctx, 1.0, 1.0, 1.0, 0, 0);
+        let shell_id = ctx.get_solid(sid).outer;
+        let faces = ctx.get_shell(shell_id).faces.clone();
+        for &fid in &faces {
+            let aabb = face_aabb(&ctx, fid);
+            let eps = 1e-10;
+            // AABB is contained within the unit cube
+            for i in 0..3 {
+                assert!(aabb.min[i] >= -eps);
+                assert!(aabb.max[i] <= 1.0 + eps);
+            }
+            // Planar face: exactly one axis is flat (min == max)
+            let flat = (0..3).filter(|&i| (aabb.max[i] - aabb.min[i]).abs() < eps).count();
+            assert_eq!(flat, 1, "face {:?} should be flat on exactly one axis", fid);
+        }
+    }
+
+    #[test]
+    fn face_aabb_cylinder_cap_full_diameter() {
+        // Vertex-only logic would return a single point (the seam vertex).
+        // Correct logic uses the arc extrema and should span the full diameter.
+        let mut ctx = SolidModelingContext::new();
+        let sid = build_cylinder(&mut ctx, 1.0, 2.0, 0, 0);
+        let shell_id = ctx.get_solid(sid).outer;
+        let faces = ctx.get_shell(shell_id).faces.clone();
+        let cap_face = *faces.iter().find(|&&fid| {
+            let surf_id = ctx.get_face(fid).surface;
+            matches!(ctx.get_surface(surf_id), SurfaceKind::Plane(_))
+        }).unwrap();
+        let aabb = face_aabb(&ctx, cap_face);
+        let eps = 1e-10;
+        assert!((aabb.min[0] + 1.0).abs() < eps, "min x = {}", aabb.min[0]);
+        assert!((aabb.max[0] - 1.0).abs() < eps, "max x = {}", aabb.max[0]);
+        assert!((aabb.min[1] + 1.0).abs() < eps, "min y = {}", aabb.min[1]);
+        assert!((aabb.max[1] - 1.0).abs() < eps, "max y = {}", aabb.max[1]);
+        assert!((aabb.max[2] - aabb.min[2]).abs() < eps, "cap must be flat in z");
+    }
+
+    // ── intersect_faces dispatcher ────────────────────────────────────────────
 
     #[test]
     fn intersect_faces_planar_pair_dispatches_plane_plane() {

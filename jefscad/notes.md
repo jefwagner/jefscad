@@ -707,8 +707,12 @@ Strategy doc: `kb/Boolean-Op-SSI-Strategy.md`
       arms return `None`; `intersect_plane_plane` stub returns `None`; 2 tests
 
 ##### AABB fast-reject *(prerequisite for SSI table enumeration)*
-- [ ] `Aabb` type + `face_aabb(ctx, face_id) -> Aabb` — bounding box from outer-loop boundary vertices
-- [ ] `aabb_overlap(a: &Aabb, b: &Aabb) -> bool`
+- [x] `Aabb { min, max }` with `new`, `unbounded` (±∞ conservative fallback), `empty`, `expand`
+- [x] `face_aabb(ctx, face_id) -> Aabb` — SurfTag dispatch; Plane: walk outer-loop edges
+      by curve type: `Line3` uses endpoints; `CircularArc3` uses endpoints + per-axis extrema
+      (d/dt = 0 at atan2(v_i, u_i) ± π, checked against arc span via rem_euclid); other
+      curves → unbounded; non-Plane surfaces → unbounded; 2 tests
+- [x] `aabb_overlap(a, b) -> bool` — overlap on all three axes; `<=` so touching counts; 3 tests
 
 ##### Plane/plane SSI *(first concrete surface-pair implementation)*
 - [ ] `intersect_plane_plane(ctx, face_a, face_b) -> Option<FaceFaceIntersection>` — computes
