@@ -5,7 +5,6 @@ use pyo3::prelude::*;
 use pyo3_stub_gen;
 
 mod brep_kernel;
-pub(crate) mod bool_ops;
 pub(crate) mod brep_compiler;
 pub mod csg_lang;
 mod geom;

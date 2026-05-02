@@ -691,96 +691,77 @@ geometrically equivalent to current output; B-rep back-references fully classifi
   - Flint `PartialOrd`: `Some(Less)` = Inside, `Some(Greater)` = Outside, `None`/`Some(Equal)` = Indeterminate
   - `Outside` dominates `Indeterminate` when combining sub-tests (lateral × axial for cylinder/cone)
 
-#### Start with restricted subset
+#### Boolean ops — planar-polyhedra subset (`jefscad/src/bool_ops.rs`)
 
-#### Boolean topology scaffolding — planar polyhedra (COMPLETE 2026-04-19)
-Scope: all faces `Plane`, all edges `Line3`, all pcurves `Line2`.  Lives in `jefscad/src/bool_ops.rs`.
+Strategy doc: `kb/Boolean-Op-SSI-Strategy.md`
 
-- [x] `split_edge(ctx, edge_id, t_split) -> (VertexId, EdgeId, EdgeId)`
-  - Inserts vertex at t_split; two sub-edges share original `Line3` curve (t-range differs)
-  - Sub-pcurves (`Line2`) share original p0/p1; t_min/t_max updated — correct because `eval(t)` uses raw t
-  - Every loop referencing the original coedge is updated in place (splice)
-  - Forward/Reverse orientation handled: for Reverse, first sub-coedge → edge_b, second → edge_a
-  - 6 tests
-- [x] `split_face(ctx, face_id, entry_edge, t_entry, exit_edge, t_exit) -> (FaceId, FaceId)`
-  - Gets UV coords at split points from pcurves BEFORE splitting
-  - Calls split_edge twice; reads updated outer loop; finds i_ef / i_xf by end-vertex identity
-  - Arc A: from (i_xf+1) wrapping to i_ef inclusive; Arc B: from (i_ef+1) to i_xf inclusive
-  - Creates split Line3 edge + two coedges (Forward for face A, Reverse for face B)
-  - Updates all arc coedges' face back-references; updates shell face list
-  - 8 tests including adjacent-edge case (triangle + pentagon), off-center split, coedge face refs
-  - Total: 543 tests passing
+##### Data structures *(define the API contract first)*
+- [ ] Define `FaceFaceIntersection { v_start: VertexId, v_end: VertexId, curve3: Curve3Id,
+      pcurve_a: Curve2Id, pcurve_b: Curve2Id }` — all arena IDs; strategy-doc canonical form
+- [ ] Define `SsiTable = HashMap<(FaceId, FaceId), Option<FaceFaceIntersection>>`
 
-- [x] `face_centroid(ctx, face_id) -> Point3` — average of outer-loop start-vertices; correct for convex faces
-- [x] `classify_face_wrt_node(ctx, face_id, node) -> Classification` — delegates to `classify_node`;
-  Indeterminate for coincident faces; 8 tests (outside sphere, inside sphere, outside shifted cuboid,
-  inside large cuboid, on-surface indeterminate, fragment after split); 551 tests total
+##### SSI dispatcher *(structural anchor — surface-type routing)*
+- [ ] `intersect_faces(ctx, face_a, face_b) -> Option<FaceFaceIntersection>` — dispatches on
+      `(surface_kind_a, surface_kind_b)`, pushes vertices/curves into context; non-planar arms
+      return `None` for now
 
-#### Design record — deferred topology cases (2026-04-19)
+##### AABB fast-reject *(prerequisite for SSI table enumeration)*
+- [ ] `Aabb` type + `face_aabb(ctx, face_id) -> Aabb` — bounding box from outer-loop boundary vertices
+- [ ] `aabb_overlap(a: &Aabb, b: &Aabb) -> bool`
 
-Three splitting configurations were analyzed before proceeding to SSI:
+##### Plane/plane SSI *(first concrete surface-pair implementation)*
+- [ ] `intersect_plane_plane(ctx, face_a, face_b) -> Option<FaceFaceIntersection>` — computes
+      intersection line, clips independently to each face, pushes `Vertex`/`Curve3`/`Curve2` into
+      context; called from `(Plane, Plane)` arm of `intersect_faces`
 
-**Case 1 — P on face boundary** (edge of B crosses F_A's perimeter): L1 and L2 meet at
-a vertex already on F_A's boundary.  Each segment is an independent boundary-to-boundary
-split.  `split_face` handles each one independently. ✓ Already covered.
+##### SSI table
+- [ ] `compute_ssi_table(ctx, solid_a, solid_b) -> SsiTable` — enumerate all face pairs, AABB
+      reject first, then call `intersect_faces`; canonical key `(min_id, max_id)`
 
-**Case 2 — P in face interior** (edge of B passes through interior of F_A): L1 runs from
-boundary Q1 to interior P; L2 runs from P to boundary Q2.  Together they form a single
-connected polyline Q1→P→Q2.  This CAN be handled with sequential splits: split F_A with
-L1+L2 as a boundary-to-boundary segment (treating P as an interior waypoint on a
-`Polyline3` split edge), or by first splitting the face with the full-extent line that passes
-through P (see Case 2 reanalysis below), then splitting the resulting sub-face.
+##### Phase 2: Face subdivision
+- [ ] `EdgeChain` type — ordered list of `FaceFaceIntersection` refs, `v_start`/`v_end: VertexId`
+- [ ] `stitch_edge_chains(ssi_table, solid) -> HashMap<FaceId, SmallVec<EdgeChain>>` — adjacency
+      map per face, trace boundary-node → boundary-node paths
+- [ ] `split_edge(ctx, edge_id, t_split) -> (VertexId, EdgeId, EdgeId)` — insert vertex at t,
+      update every loop referencing the edge
+- [ ] `split_face(ctx, face_id, entry_edge, t_entry, exit_edge, t_exit) -> (FaceId, FaceId)` —
+      calls `split_edge` twice, creates cut coedge pair, rebinds loop coedges and shell
+- [ ] `apply_edge_chains_to_face(ctx, face_id, chains) -> SmallVec<FaceId>` — 0 chains: `[face_id]`;
+      1 chain: one `split_face`; multiple: sequential splits with fragment routing
+- [ ] `subdivide_faces(ctx, solid, edge_chains) -> FaceFragments`
+      — `HashMap<FaceId, SmallVec<FaceId>>`; unmodified face maps to `[face_id]`
 
-**Reanalysis — "full-extent" approach resolves Case 2**:
-For each face-face pair (F_A, F_B), the SSI computes two independent clips:
-- S_A: the intersection line clipped to F_A's boundary (always boundary-to-boundary)
-- S_B: the intersection line clipped to F_B's boundary (always boundary-to-boundary)
-Both S_A and S_B are always boundary-to-boundary on their respective faces.  The
-interior-point issue only arises if we naively use the *overlap* of S_A and S_B as the
-split segment — the SSI must split each face with its OWN full clip (S_A for F_A, S_B
-for F_B), and then classify fragments.  This guarantees all splits are boundary-to-boundary.
+##### Phase 3: Fragment classification
+- [ ] `uv_centroid_of_face(ctx, face_id) -> (f64, f64)` — average UV coords of outer-loop vertices
+- [ ] `sample_point_on_face(ctx, face_id) -> Point3` — `surface.eval` at UV centroid
+- [ ] `classify_all_fragments(ctx, face_fragments, opposing_node) -> HashMap<FaceId, Classification>`
 
-**Case 3 — B's cross-section entirely inside F_A** (B is a smaller solid fully contained
-within F_A's plane region): the intersection polygon has no edges touching F_A's boundary;
-all four corners are interior points.  This requires adding an **inner loop** to F_A (a
-hole), which the topology supports (`Face.inners`) but `split_face` does not create.
-Deferred: first Boolean test cases will use geometry where B partially overlaps A (no
-full-containment in any face plane).
+##### Phase 4: Assembly
+- [ ] `select_kept_fragments(classified_a, classified_b, op) -> Vec<FaceId>` — apply
+      Union/Difference/Intersection keep rules (Outside-B, Outside-A, Inside-B, Inside-A)
+- [ ] `sew_cut_edges(ctx, kept_faces)` — link cut coedge pairs sharing a `Curve3Id` as twins
+- [ ] `find_result_shells(ctx, kept_faces) -> SmallVec<SolidId>` — BFS over twin pointers;
+      one `Shell`/`Solid` per connected component
+- [ ] `boolean_op(ctx, op, solid_a, solid_b) -> SmallVec<SolidId>` — top-level entry point
+      wiring all 4 phases
 
-**Decision**: proceed with SSI using the "each face gets its own full clip" strategy.
-No new topology operation needed for Phase 5 test cases.
+##### Integration
+- [ ] Wire `compile_csg_node` Op branch to call `boolean_op` (replace `todo!()`)
 
-#### Plane-plane SSI — `intersect_planar_faces` (COMPLETE 2026-04-19)
+##### End-to-end tests *(one at a time)*
+- [ ] `union` of two partially-overlapping cuboids
+- [ ] `difference` of two partially-overlapping cuboids
+- [ ] `intersection` of two partially-overlapping cuboids
 
-`pub fn intersect_planar_faces(ctx, face_a, face_b) -> Option<FaceFaceIntersection>`
-
-Key types:
-- `BoundaryHit { edge_id, t_edge, t_line, point }` — one hit on a face boundary edge
-- `FaceFaceIntersection { hits_a: [BoundaryHit; 2], hits_b: [BoundaryHit; 2] }` — entry/exit per face
-
-Implementation steps:
-1. Extract `(normal, point)` from each face's `Plane` surface (`plane_of_face`).
-2. Compute intersection line direction `n_a × n_b`; if `|dir| < 1e-10` → parallel → `None`.
-3. Minimum-norm origin via 2×2 system in the {n_a, n_b} basis (`plane_plane_line`).
-4. Clip line to each face's polygon (`clip_line_to_face`): test each boundary edge via
-   Cramer's-rule 2D projection on the coordinate plane with largest `dir × edge` component
-   (`intersect_ray_segment`).  Deduplicates vertex hits (loop wrap-around).
-5. Verify t_line overlap between the two clips (`t_end > t_start + 1e-10`); return `None` if
-   faces project to disjoint line segments.
-
-5 tests:  parallel → None | crossing → Some | correct edge IDs | hit points on line |
-          non-overlapping (x-separated) → None.
-
-- [x] plane-plane SSI (surface-surface intersection) → find the intersection line between two planar faces
-- [ ] First boolean targets:
-  - [ ] either: planar-only polyhedra subset
-  - [ ] or: analytic pairs (plane/cyl/sphere) before full NURBS
-- [ ] Use interval arithmetic as a robustness filter:
-  - predicates + bounding checks using FlintArray<f64,16> transforms
-  - if uncertain (Indeterminate) -> subdivision/refinement/fallback path
+##### Deferred cases (from `kb/Boolean-Op-SSI-Strategy.md`)
+- Holes: closed SSI loop entirely interior to a face (requires inner-loop creation)
+- Coincident/coplanar faces
+- Degree-3 interior node (vertex of one solid projects inside a face of the other)
+- Curved surface pairs (cylinder, sphere, NURBS)
+- Indeterminate fragment classification (Flint interval refinement)
 
 Deliverable for Phase 5:
-- `Union/Difference/Intersection` works for a limited subset with stable output mesh.
+- `Union/Difference/Intersection` works for two overlapping planar polyhedra with stable output mesh.
 
 ---
 
