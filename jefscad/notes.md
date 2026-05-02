@@ -702,9 +702,9 @@ Strategy doc: `kb/Boolean-Op-SSI-Strategy.md`
       with `insert`/`get` that canonicalize key as `(min_id, max_id)`; 2 tests
 
 ##### SSI dispatcher *(structural anchor — surface-type routing)*
-- [ ] `intersect_faces(ctx, face_a, face_b) -> Option<FaceFaceIntersection>` — dispatches on
-      `(surface_kind_a, surface_kind_b)`, pushes vertices/curves into context; non-planar arms
-      return `None` for now
+- [x] `intersect_faces(ctx, face_a, face_b) -> Option<FaceFaceIntersection>` — dispatches on
+      `(tag_a, tag_b)` via `SurfTag` enum (Copy discriminant mirror of `SurfaceKind`); non-planar
+      arms return `None`; `intersect_plane_plane` stub returns `None`; 2 tests
 
 ##### AABB fast-reject *(prerequisite for SSI table enumeration)*
 - [ ] `Aabb` type + `face_aabb(ctx, face_id) -> Aabb` — bounding box from outer-loop boundary vertices

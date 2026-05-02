@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use crate::brep_kernel::{Curve2Id, Curve3Id, FaceId, VertexId};
+use crate::brep_kernel::{Curve2Id, Curve3Id, FaceId, SolidModelingContext, VertexId};
+use crate::geom::SurfaceKind;
 
 #[derive(Debug, Clone)]
 pub struct FaceFaceIntersection {
@@ -31,9 +32,53 @@ impl SsiTable {
     }
 }
 
+// ── SSI dispatcher ───────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum SurfTag { Plane, Cylinder, Cone, Sphere, Extrusion, Revolution, Nurbs }
+
+fn surf_tag(kind: &SurfaceKind) -> SurfTag {
+    match kind {
+        SurfaceKind::Plane(_)      => SurfTag::Plane,
+        SurfaceKind::Cylinder(_)   => SurfTag::Cylinder,
+        SurfaceKind::Cone(_)       => SurfTag::Cone,
+        SurfaceKind::Sphere(_)     => SurfTag::Sphere,
+        SurfaceKind::Extrusion(_)  => SurfTag::Extrusion,
+        SurfaceKind::Revolution(_) => SurfTag::Revolution,
+        SurfaceKind::Nurbs(_)      => SurfTag::Nurbs,
+    }
+}
+
+pub fn intersect_faces(
+    ctx: &mut SolidModelingContext,
+    face_a: FaceId,
+    face_b: FaceId,
+) -> Option<FaceFaceIntersection> {
+    let sid_a = ctx.get_face(face_a).surface;
+    let sid_b = ctx.get_face(face_b).surface;
+    let tag_a = surf_tag(ctx.get_surface(sid_a));
+    let tag_b = surf_tag(ctx.get_surface(sid_b));
+    match (tag_a, tag_b) {
+        (SurfTag::Plane, SurfTag::Plane) => intersect_plane_plane(ctx, face_a, face_b),
+        _ => None,
+    }
+}
+
+fn intersect_plane_plane(
+    _ctx: &mut SolidModelingContext,
+    _face_a: FaceId,
+    _face_b: FaceId,
+) -> Option<FaceFaceIntersection> {
+    None // stub — implemented in next step
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::brep_kernel::SolidModelingContext;
+    use crate::brep_compiler::{build_cuboid, build_cylinder};
+
+    // ── SsiTable ──────────────────────────────────────────────────────────────
 
     #[test]
     fn ssi_table_canonical_key_symmetry() {
@@ -60,5 +105,35 @@ mod test {
         table.insert(fa, fb, None);
         assert!(matches!(table.get(fa, fb), Some(None))); // tested, no intersection
         assert!(matches!(table.get(fa, fc), None));        // not yet computed
+    }
+
+    // ── intersect_faces dispatcher ────────────────────────────────────────────
+
+    #[test]
+    fn intersect_faces_non_planar_pair_is_none() {
+        let mut ctx = SolidModelingContext::new();
+        let sid = build_cylinder(&mut ctx, 1.0, 2.0, 0, 0);
+        let shell_id = ctx.get_solid(sid).outer;
+        let faces = ctx.get_shell(shell_id).faces.clone();
+        let cyl_face = *faces.iter().find(|&&fid| {
+            let surf_id = ctx.get_face(fid).surface;
+            matches!(ctx.get_surface(surf_id), SurfaceKind::Cylinder(_))
+        }).unwrap();
+        let plane_face = *faces.iter().find(|&&fid| {
+            let surf_id = ctx.get_face(fid).surface;
+            matches!(ctx.get_surface(surf_id), SurfaceKind::Plane(_))
+        }).unwrap();
+        assert!(intersect_faces(&mut ctx, cyl_face, plane_face).is_none());
+    }
+
+    #[test]
+    fn intersect_faces_planar_pair_dispatches_plane_plane() {
+        // Both faces are Plane — exercises the (Plane, Plane) arm.
+        // Returns None from stub; will gain content once intersect_plane_plane is implemented.
+        let mut ctx = SolidModelingContext::new();
+        let sid = build_cuboid(&mut ctx, 1.0, 1.0, 1.0, 0, 0);
+        let shell_id = ctx.get_solid(sid).outer;
+        let faces = ctx.get_shell(shell_id).faces.clone();
+        assert!(intersect_faces(&mut ctx, faces[0], faces[1]).is_none());
     }
 }
