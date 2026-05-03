@@ -111,6 +111,88 @@ fn intersect_plane_plane(
     None // stub — implemented in next step
 }
 
+// ── clip_line_to_face ─────────────────────────────────────────────────────────
+
+/// Drop the dominant axis of `normal` and return the two surviving axis indices.
+fn axis_pair(normal: Point3) -> (usize, usize) {
+    let ax = [normal.x.abs(), normal.y.abs(), normal.z.abs()];
+    let drop = ax.iter().enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap_or(2);
+    match drop {
+        0 => (1, 2), // drop X → project to YZ
+        1 => (0, 2), // drop Y → project to XZ
+        _ => (0, 1), // drop Z → project to XY
+    }
+}
+
+/// Clip the infinite line `origin + t*dir` to the boundary of `face_id`.
+///
+/// The line is assumed to lie in the face's plane. Returns `[t_min, t_max]` at
+/// the two boundary crossings, or `None` if the line misses the face or is
+/// tangent at a single point.
+fn clip_line_to_face(
+    ctx: &SolidModelingContext,
+    face_id: FaceId,
+    origin: Point3,
+    dir: Point3,
+) -> Option<[f64; 2]> {
+    let plane = plane_of_face(ctx, face_id);
+    let normal = plane.u_dir.cross(plane.v_dir);
+    let (a0, a1) = axis_pair(normal);
+
+    let o = [origin.x, origin.y, origin.z];
+    let d = [dir.x,    dir.y,    dir.z   ];
+
+    let outer_id = ctx.get_face(face_id).outer;
+    let coedge_ids = ctx.get_loop(outer_id).coedges.clone();
+
+    let mut hits: Vec<f64> = Vec::new();
+
+    for ceid in coedge_ids {
+        let edge_id = ctx.get_coedge(ceid).edge;
+        let edge = ctx.get_edge(edge_id);
+        let (t0_edge, t1_edge, c3id) = (edge.t0, edge.t1, edge.curve3);
+
+        let crate::geom::Curve3Kind::Line3(line) = ctx.get_curve3(c3id) else { continue };
+
+        // Edge: e(u) = line.p0 + (line.p1 - line.p0) * u,  u ∈ [t0_edge, t1_edge]
+        let ep = [line.p0.x, line.p0.y, line.p0.z];
+        let eq = [line.p1.x, line.p1.y, line.p1.z];
+        let ed = [eq[a0] - ep[a0], eq[a1] - ep[a1]];
+
+        // Solve:  d[a0]*t - ed[0]*u = ep[a0] - o[a0]
+        //         d[a1]*t - ed[1]*u = ep[a1] - o[a1]
+        let det = ed[0] * d[a1] - ed[1] * d[a0];
+        if det.abs() < 1e-12 { continue; }
+
+        let r0 = ep[a0] - o[a0];
+        let r1 = ep[a1] - o[a1];
+        let t_hit = (ed[0] * r1 - ed[1] * r0) / det;
+        let u_hit = (d[a0] * r1 - d[a1] * r0) / det;
+
+        if u_hit >= t0_edge - 1e-10 && u_hit <= t1_edge + 1e-10 {
+            hits.push(t_hit);
+        }
+    }
+
+    // Deduplicate hits at shared vertices (two edges meeting at a corner both fire).
+    hits.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut dedup: Vec<f64> = Vec::new();
+    for &t in &hits {
+        if dedup.last().map_or(true, |&last| (t - last).abs() > 1e-10) {
+            dedup.push(t);
+        }
+    }
+
+    if dedup.len() < 2 {
+        None
+    } else {
+        Some([dedup[0], *dedup.last().unwrap()])
+    }
+}
+
 // ── AABB ─────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
@@ -394,5 +476,133 @@ mod test {
         let shell_id = ctx.get_solid(sid).outer;
         let faces = ctx.get_shell(shell_id).faces.clone();
         assert!(intersect_faces(&mut ctx, faces[0], faces[1]).is_none());
+    }
+
+    // ── clip_line_to_face ─────────────────────────────────────────────────────
+
+    fn unit_cuboid_faces(ctx: &mut SolidModelingContext) -> Vec<FaceId> {
+        let sid = build_cuboid(ctx, 1.0, 1.0, 1.0, 0, 0);
+        let shell_id = ctx.get_solid(sid).outer;
+        ctx.get_shell(shell_id).faces.clone()
+    }
+
+    fn face_by_normal(ctx: &SolidModelingContext, faces: &[FaceId], nx: f64, ny: f64, nz: f64) -> FaceId {
+        let target = Point3::new(nx, ny, nz);
+        *faces.iter().find(|&&fid| {
+            let surf_id = ctx.get_face(fid).surface;
+            if let SurfaceKind::Plane(p) = ctx.get_surface(surf_id) {
+                (p.u_dir.cross(p.v_dir) - target).length() < 1e-6
+            } else {
+                false
+            }
+        }).expect("face with given normal not found")
+    }
+
+    #[test]
+    fn clip_line_miss_outside_parallel() {
+        // Line at y=2.0 (parallel to x-axis) never enters y∈[0,1] of top face.
+        let mut ctx = SolidModelingContext::new();
+        let faces = unit_cuboid_faces(&mut ctx);
+        let top = face_by_normal(&ctx, &faces, 0.0, 0.0, 1.0);
+        let origin = Point3::new(0.5, 2.0, 1.0);
+        let dir    = Point3::new(1.0, 0.0, 0.0);
+        assert!(clip_line_to_face(&ctx, top, origin, dir).is_none());
+    }
+
+    #[test]
+    fn clip_line_axis_aligned_through_opposite_edges() {
+        // Line x=0.5 dir=+y: enters bottom edge (y=0) at t=1.0, exits top edge (y=1) at t=2.0.
+        let mut ctx = SolidModelingContext::new();
+        let faces = unit_cuboid_faces(&mut ctx);
+        let top = face_by_normal(&ctx, &faces, 0.0, 0.0, 1.0);
+        let origin = Point3::new(0.5, -1.0, 1.0);
+        let dir    = Point3::new(0.0,  1.0, 0.0);
+        let [t0, t1] = clip_line_to_face(&ctx, top, origin, dir).unwrap();
+        let eps = 1e-10;
+        assert!((t0 - 1.0).abs() < eps, "t0={t0}");
+        assert!((t1 - 2.0).abs() < eps, "t1={t1}");
+    }
+
+    #[test]
+    fn clip_line_axis_aligned_through_adjacent_edges() {
+        // Line y=0.5 dir=+x: enters left edge (x=0) at t=1.0, exits right edge (x=1) at t=2.0.
+        let mut ctx = SolidModelingContext::new();
+        let faces = unit_cuboid_faces(&mut ctx);
+        let top = face_by_normal(&ctx, &faces, 0.0, 0.0, 1.0);
+        let origin = Point3::new(-1.0, 0.5, 1.0);
+        let dir    = Point3::new( 1.0, 0.0, 0.0);
+        let [t0, t1] = clip_line_to_face(&ctx, top, origin, dir).unwrap();
+        let eps = 1e-10;
+        assert!((t0 - 1.0).abs() < eps, "t0={t0}");
+        assert!((t1 - 2.0).abs() < eps, "t1={t1}");
+    }
+
+    #[test]
+    fn clip_line_diagonal_direction() {
+        // Line origin=(0,0.5,1) dir=(1,1,0): exits left edge at t=0.0, top edge at t=0.5.
+        let mut ctx = SolidModelingContext::new();
+        let faces = unit_cuboid_faces(&mut ctx);
+        let top = face_by_normal(&ctx, &faces, 0.0, 0.0, 1.0);
+        let origin = Point3::new(0.0, 0.5, 1.0);
+        let dir    = Point3::new(1.0, 1.0, 0.0);
+        let [t0, t1] = clip_line_to_face(&ctx, top, origin, dir).unwrap();
+        let eps = 1e-10;
+        assert!((t0 - 0.0).abs() < eps, "t0={t0}");
+        assert!((t1 - 0.5).abs() < eps, "t1={t1}");
+    }
+
+    #[test]
+    fn clip_line_corner_to_corner_dedup_both_ends() {
+        // Line passes through corners (0,0,1) at t=1 and (1,1,1) at t=2; each shared by
+        // two edges — deduplication must yield exactly two hits.
+        let mut ctx = SolidModelingContext::new();
+        let faces = unit_cuboid_faces(&mut ctx);
+        let top = face_by_normal(&ctx, &faces, 0.0, 0.0, 1.0);
+        let origin = Point3::new(-1.0, -1.0, 1.0);
+        let dir    = Point3::new( 1.0,  1.0, 0.0);
+        let [t0, t1] = clip_line_to_face(&ctx, top, origin, dir).unwrap();
+        let eps = 1e-10;
+        assert!((t0 - 1.0).abs() < eps, "t0={t0}");
+        assert!((t1 - 2.0).abs() < eps, "t1={t1}");
+    }
+
+    #[test]
+    fn clip_line_tangent_at_corner_is_none() {
+        // Line touches corner (0,0,1) at t=0 then moves away — only one unique hit.
+        let mut ctx = SolidModelingContext::new();
+        let faces = unit_cuboid_faces(&mut ctx);
+        let top = face_by_normal(&ctx, &faces, 0.0, 0.0, 1.0);
+        let origin = Point3::new(0.0,  0.0, 1.0);
+        let dir    = Point3::new(1.0, -1.0, 0.0);
+        assert!(clip_line_to_face(&ctx, top, origin, dir).is_none());
+    }
+
+    #[test]
+    fn clip_line_enter_edge_exit_corner_dedup_one_end() {
+        // Line enters left edge at t=0, exits corner (1,1,1) at t=1
+        // (right and top edges both fire at t=1 → deduplicated to one hit).
+        let mut ctx = SolidModelingContext::new();
+        let faces = unit_cuboid_faces(&mut ctx);
+        let top = face_by_normal(&ctx, &faces, 0.0, 0.0, 1.0);
+        let origin = Point3::new(0.0, 0.5, 1.0);
+        let dir    = Point3::new(1.0, 0.5, 0.0);
+        let [t0, t1] = clip_line_to_face(&ctx, top, origin, dir).unwrap();
+        let eps = 1e-10;
+        assert!((t0 - 0.0).abs() < eps, "t0={t0}");
+        assert!((t1 - 1.0).abs() < eps, "t1={t1}");
+    }
+
+    #[test]
+    fn clip_line_side_face_different_normal() {
+        // Left face (x=0, normal=(-1,0,0)): line at y=0.5 dir=+z enters z=0 at t=1, exits z=1 at t=2.
+        let mut ctx = SolidModelingContext::new();
+        let faces = unit_cuboid_faces(&mut ctx);
+        let left = face_by_normal(&ctx, &faces, -1.0, 0.0, 0.0);
+        let origin = Point3::new(0.0, 0.5, -1.0);
+        let dir    = Point3::new(0.0, 0.0,  1.0);
+        let [t0, t1] = clip_line_to_face(&ctx, left, origin, dir).unwrap();
+        let eps = 1e-10;
+        assert!((t0 - 1.0).abs() < eps, "t0={t0}");
+        assert!((t1 - 2.0).abs() < eps, "t1={t1}");
     }
 }
