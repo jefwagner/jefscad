@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::brep_kernel::{Curve2Id, Curve3Id, FaceId, SolidModelingContext, VertexId};
-use crate::geom::{Curve3Kind, Plane, Point3, SurfaceKind};
+use crate::brep_kernel::{Curve2Id, Curve3Id, FaceId, SolidModelingContext, Vertex, VertexId};
+use crate::geom::{Curve2Kind, Curve3Kind, Line2, Line3, Plane, Point2, Point3, SurfaceKind};
 
 #[derive(Debug, Clone)]
 pub struct FaceFaceIntersection {
@@ -104,11 +104,63 @@ fn plane_plane_line(
 }
 
 fn intersect_plane_plane(
-    _ctx: &mut SolidModelingContext,
-    _face_a: FaceId,
-    _face_b: FaceId,
+    ctx: &mut SolidModelingContext,
+    face_a: FaceId,
+    face_b: FaceId,
 ) -> Option<FaceFaceIntersection> {
-    None // stub — implemented in next step
+    let (n_a, d_a) = {
+        let p = plane_of_face(ctx, face_a);
+        let n = p.u_dir.cross(p.v_dir);
+        (n, n.dot(p.p0))
+    };
+    let (n_b, d_b) = {
+        let p = plane_of_face(ctx, face_b);
+        let n = p.u_dir.cross(p.v_dir);
+        (n, n.dot(p.p0))
+    };
+
+    let (origin, dir) = plane_plane_line(n_a, d_a, n_b, d_b)?;
+
+    let [ta0, ta1] = clip_line_to_face(ctx, face_a, origin, dir)?;
+    let [tb0, tb1] = clip_line_to_face(ctx, face_b, origin, dir)?;
+
+    let t_start = f64::max(ta0, tb0);
+    let t_end   = f64::min(ta1, tb1);
+    if t_start > t_end + 1e-10 {
+        return None;
+    }
+
+    let p_start = origin + dir * t_start;
+    let p_end   = origin + dir * t_end;
+
+    let tol      = ctx.tolerance.pos_tol;
+    let v_start  = ctx.push_vertex(Vertex::new(p_start, tol));
+    let v_end    = ctx.push_vertex(Vertex::new(p_end,   tol));
+    let curve3   = ctx.push_curve3(Curve3Kind::Line3(Line3::new(p_start, p_end)));
+    let pcurve_a = push_intersection_pcurve(ctx, face_a, p_start, p_end);
+    let pcurve_b = push_intersection_pcurve(ctx, face_b, p_start, p_end);
+
+    Some(FaceFaceIntersection { v_start, v_end, curve3, pcurve_a, pcurve_b })
+}
+
+/// Project `p_start`/`p_end` onto the UV plane of `face_id` and push a Line2 pcurve.
+fn push_intersection_pcurve(
+    ctx: &mut SolidModelingContext,
+    face_id: FaceId,
+    p_start: Point3,
+    p_end: Point3,
+) -> Curve2Id {
+    let (uv_start, uv_end) = {
+        let pl = plane_of_face(ctx, face_id);
+        let p0 = pl.p0;
+        let u  = pl.u_dir;
+        let v  = pl.v_dir;
+        (
+            Point2::new((p_start - p0).dot(u), (p_start - p0).dot(v)),
+            Point2::new((p_end   - p0).dot(u), (p_end   - p0).dot(v)),
+        )
+    };
+    ctx.push_curve2(Curve2Kind::Line2(Line2::new(uv_start, uv_end)))
 }
 
 // ── clip_line_to_face ─────────────────────────────────────────────────────────
@@ -604,5 +656,136 @@ mod test {
         let eps = 1e-10;
         assert!((t0 - 1.0).abs() < eps, "t0={t0}");
         assert!((t1 - 2.0).abs() < eps, "t1={t1}");
+    }
+
+    // ── intersect_plane_plane ────────────────────────────────────────────────
+
+    fn solid_faces(ctx: &SolidModelingContext, sid: crate::brep_kernel::SolidId) -> Vec<FaceId> {
+        let shell_id = ctx.get_solid(sid).outer;
+        ctx.get_shell(shell_id).faces.clone()
+    }
+
+    #[test]
+    fn intersect_pp_parallel_planes_is_none() {
+        // A top face (z=1) and B top face (z=2): parallel normals → None.
+        let mut ctx = SolidModelingContext::new();
+        let sid_a = build_cuboid(&mut ctx, 1.0, 1.0, 1.0, 0, 0);
+        let sid_b = build_cuboid(&mut ctx, 1.0, 1.0, 2.0, 0, 0);
+        let top_a = face_by_normal(&ctx, &solid_faces(&ctx, sid_a), 0.0, 0.0,  1.0);
+        let top_b = face_by_normal(&ctx, &solid_faces(&ctx, sid_b), 0.0, 0.0,  1.0);
+        assert!(intersect_plane_plane(&mut ctx, top_a, top_b).is_none());
+    }
+
+    #[test]
+    fn intersect_pp_nonparallel_line_misses_face_is_none() {
+        // A top face (z=1, x∈[0,1]) and B right face (x=2): intersection line at x=2
+        // misses A's top face → None.
+        let mut ctx = SolidModelingContext::new();
+        let sid_a = build_cuboid(&mut ctx, 1.0, 1.0, 1.0, 0, 0);
+        let sid_b = build_cuboid(&mut ctx, 2.0, 1.0, 1.0, 0, 0);
+        let top_a   = face_by_normal(&ctx, &solid_faces(&ctx, sid_a), 0.0, 0.0, 1.0);
+        let right_b = face_by_normal(&ctx, &solid_faces(&ctx, sid_b), 1.0, 0.0, 0.0);
+        assert!(intersect_plane_plane(&mut ctx, top_a, right_b).is_none());
+    }
+
+    #[test]
+    fn intersect_pp_nonparallel_disjoint_t_is_none() {
+        // A top face (z=1, y∈[0,1]) and B left face (x=0.5, y∈[1.5,2.5]):
+        // both clip to finite t-ranges that don't overlap → None.
+        // B = unit cube translated (0.5, 1.5, 0.5).
+        use crate::csg_lang::CsgNode;
+        use crate::brep_compiler::compile_csg_node;
+        let mut ctx = SolidModelingContext::new();
+        let sid_a = build_cuboid(&mut ctx, 1.0, 1.0, 1.0, 0, 0);
+        let b_node = CsgNode::cuboid(1.0, 1.0, 1.0).translate(0.5, 1.5, 0.5);
+        let sid_b  = compile_csg_node(&mut ctx, &b_node);
+        let top_a  = face_by_normal(&ctx, &solid_faces(&ctx, sid_a), 0.0,  0.0, 1.0);
+        let left_b = face_by_normal(&ctx, &solid_faces(&ctx, sid_b), -1.0, 0.0, 0.0);
+        assert!(intersect_plane_plane(&mut ctx, top_a, left_b).is_none());
+    }
+
+    #[test]
+    fn intersect_pp_intersects_vertex_positions() {
+        // A top face (z=1, x∈[0,1], y∈[0,1]) and B left face (x=0.5, y∈[0.1,0.6]).
+        // B = (1×0.5×1) cuboid translated (0.5, 0.1, 0.5).
+        // Both endpoints lie in the interior of A (test-case-4 geometry).
+        use crate::csg_lang::CsgNode;
+        use crate::brep_compiler::compile_csg_node;
+        let mut ctx = SolidModelingContext::new();
+        let sid_a  = build_cuboid(&mut ctx, 1.0, 1.0, 1.0, 0, 0);
+        let b_node = CsgNode::cuboid(1.0, 0.5, 1.0).translate(0.5, 0.1, 0.5);
+        let sid_b  = compile_csg_node(&mut ctx, &b_node);
+        let top_a  = face_by_normal(&ctx, &solid_faces(&ctx, sid_a), 0.0,  0.0, 1.0);
+        let left_b = face_by_normal(&ctx, &solid_faces(&ctx, sid_b), -1.0, 0.0, 0.0);
+        let ffi = intersect_plane_plane(&mut ctx, top_a, left_b).unwrap();
+
+        let ps = ctx.get_vertex(ffi.v_start).point;
+        let pe = ctx.get_vertex(ffi.v_end).point;
+        let eps = 1e-9;
+
+        // Both endpoints at x=0.5, z=1 (on the intersection line).
+        assert!((ps.x - 0.5).abs() < eps && (ps.z - 1.0).abs() < eps, "p_start={ps:?}");
+        assert!((pe.x - 0.5).abs() < eps && (pe.z - 1.0).abs() < eps, "p_end={pe:?}");
+
+        // y-values should be 0.1 and 0.6 (B's y-boundary, interior to A's y∈[0,1]).
+        let ys = [ps.y, pe.y];
+        assert!(ys.iter().any(|&y| (y - 0.6).abs() < eps), "y=0.6 missing: {ys:?}");
+        assert!(ys.iter().any(|&y| (y - 0.1).abs() < eps), "y=0.1 missing: {ys:?}");
+    }
+
+    #[test]
+    fn intersect_pp_intersects_curve3_and_pcurves() {
+        // A top (z=1, x∈[0,2], y∈[0,2]) ∩ B right (x=1, y∈[0,2], z∈[0,2]).
+        // Intersection line: x=1, z=1, dir=+y → segment (1,0,1)–(1,2,1).
+        // Verifies curve3 connects the vertices and pcurves lie on their planes.
+        let mut ctx = SolidModelingContext::new();
+        let sid_a = build_cuboid(&mut ctx, 2.0, 2.0, 1.0, 0, 0);
+        let sid_b = build_cuboid(&mut ctx, 1.0, 2.0, 2.0, 0, 0);
+        let top_a   = face_by_normal(&ctx, &solid_faces(&ctx, sid_a), 0.0, 0.0, 1.0);
+        let right_b = face_by_normal(&ctx, &solid_faces(&ctx, sid_b), 1.0, 0.0, 0.0);
+        let ffi = intersect_plane_plane(&mut ctx, top_a, right_b).unwrap();
+
+        let ps = ctx.get_vertex(ffi.v_start).point;
+        let pe = ctx.get_vertex(ffi.v_end).point;
+        let eps = 1e-9;
+
+        // Both endpoints on x=1, z=1; y-values are 0.0 and 2.0.
+        assert!((ps.x - 1.0).abs() < eps && (ps.z - 1.0).abs() < eps, "p_start={ps:?}");
+        assert!((pe.x - 1.0).abs() < eps && (pe.z - 1.0).abs() < eps, "p_end={pe:?}");
+        let ys = [ps.y, pe.y];
+        assert!(ys.iter().any(|&y| y.abs() < eps),        "y=0 missing: {ys:?}");
+        assert!(ys.iter().any(|&y| (y - 2.0).abs() < eps), "y=2 missing: {ys:?}");
+
+        // curve3 is a Line3 whose endpoints match the vertices.
+        let crate::geom::Curve3Kind::Line3(line) = ctx.get_curve3(ffi.curve3) else {
+            panic!("curve3 is not a Line3");
+        };
+        let line = *line;
+        assert!((line.p0 - ps).length().min((line.p0 - pe).length()) < eps, "curve3 p0 mismatch");
+        assert!((line.p1 - ps).length().min((line.p1 - pe).length()) < eps, "curve3 p1 mismatch");
+
+        // pcurve_a lies on A's top face (z=1 plane): both UV points should have the
+        // same u-coord (x=1 in A's UV) and v-coords 0 and 2.
+        let crate::geom::Curve2Kind::Line2(pc_a) = ctx.get_curve2(ffi.pcurve_a) else {
+            panic!("pcurve_a is not a Line2");
+        };
+        let pc_a = *pc_a;
+        assert!((pc_a.p0.u - 1.0).abs() < eps, "pcurve_a p0.u={}", pc_a.p0.u);
+        assert!((pc_a.p1.u - 1.0).abs() < eps, "pcurve_a p1.u={}", pc_a.p1.u);
+        let vs_a = [pc_a.p0.v, pc_a.p1.v];
+        assert!(vs_a.iter().any(|&v| v.abs() < eps),        "pcurve_a v=0 missing");
+        assert!(vs_a.iter().any(|&v| (v - 2.0).abs() < eps), "pcurve_a v=2 missing");
+
+        // pcurve_b lies on B's right face (x=1 plane): both UV points should have the
+        // same v-coord (z=1 in B's UV) and u-coords 0 and 2.
+        let crate::geom::Curve2Kind::Line2(pc_b) = ctx.get_curve2(ffi.pcurve_b) else {
+            panic!("pcurve_b is not a Line2");
+        };
+        let pc_b = *pc_b;
+        assert!((pc_b.p0.v - 1.0).abs() < eps, "pcurve_b p0.v={}", pc_b.p0.v);
+        assert!((pc_b.p1.v - 1.0).abs() < eps, "pcurve_b p1.v={}", pc_b.p1.v);
+        let us_b = [pc_b.p0.u, pc_b.p1.u];
+        assert!(us_b.iter().any(|&u| u.abs() < eps),        "pcurve_b u=0 missing");
+        assert!(us_b.iter().any(|&u| (u - 2.0).abs() < eps), "pcurve_b u=2 missing");
     }
 }
