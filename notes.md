@@ -17,6 +17,9 @@ The flint project defines new rounded floating point interval numeric types.
 
 ## ToDo:
 
+[_] Rename `Loop` / `LoopId` → `EdgeLoop` / `EdgeLoopId` in brep_kernel.rs and all call
+    sites (aligns with `EdgeChain` naming from boolean op strategy)
+
 [_] Create the cargo workspace
    - [x] Create the flint project
    - [x] add flint project to cargo workspace
