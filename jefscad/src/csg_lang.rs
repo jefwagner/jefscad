@@ -48,6 +48,7 @@ pub struct CsgNode {
     /// A hash built from the base and flat_transform (stubbed to 0 until hashing is implemented)
     pub(crate) geom_id: u64,
     /// A unique value to trace provenance through the system
+    #[allow(dead_code)] // read once the b-rep compiler / Python bindings consume provenance
     pub(crate) prov_id: u64,
     /// The bare constructive solid geometry without transforms
     pub(crate) base: CsgBaseNode,
@@ -111,7 +112,7 @@ pub(crate) enum AffineTransform {
 
 /// Optional metadata attached to a node
 #[derive(Debug)]
-pub(crate) struct CsgMetadata {
+pub struct CsgMetadata {
     // TODO: color, material id, label, texture info
 }
 
@@ -529,7 +530,6 @@ fn collect_flattened_intersection(children: &[NodeRef]) -> Vec<u64> {
 }
 
 fn hash_primitive(h: &mut impl std::hash::Hasher, prim: &CsgPrimitive) {
-    use std::hash::Hasher;
     match prim {
         CsgPrimitive::Cuboid { dx, dy, dz } => {
             h.write_u8(0);
@@ -564,7 +564,6 @@ fn hash_primitive(h: &mut impl std::hash::Hasher, prim: &CsgPrimitive) {
 }
 
 fn hash_path2d(h: &mut impl std::hash::Hasher, path: &Path2D) {
-    use std::hash::Hasher;
     h.write_u64(path.start.u.to_bits());
     h.write_u64(path.start.v.to_bits());
     h.write_u8(path.closed as u8);
@@ -597,7 +596,6 @@ fn hash_path2d(h: &mut impl std::hash::Hasher, path: &Path2D) {
 }
 
 fn hash_select_policy(h: &mut impl std::hash::Hasher, policy: &SelectPolicy) {
-    use std::hash::Hasher;
     match policy {
         SelectPolicy::ContainsPoint { point } => {
             h.write_u8(0);

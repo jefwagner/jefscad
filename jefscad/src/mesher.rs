@@ -431,8 +431,6 @@ impl Default for MeshOptions {
 /// normals from vertices anyway, but this produces a correct value for
 /// flat-shaded faces and a reasonable approximation for smooth ones.
 pub fn write_stl<W: std::io::Write>(mesh: &TriMesh, writer: &mut W) -> std::io::Result<()> {
-    use std::io::Write;
-
     // 80-byte header
     let mut header = [0u8; 80];
     let tag = b"jefscad binary STL";
@@ -502,8 +500,6 @@ pub fn write_stl_file(mesh: &TriMesh, path: &std::path::Path) -> std::io::Result
 /// per-vertex, each corner gets its own `vn`/`vt` entry.  For triangle `t`,
 /// corner `k`: vertex index = `triangles[t][k] + 1`, normal/UV index = `t*3 + k + 1`.
 pub fn write_obj<W: std::io::Write>(mesh: &TriMesh, writer: &mut W) -> std::io::Result<()> {
-    use std::io::Write;
-
     writeln!(writer, "# jefscad OBJ")?;
 
     // Vertex positions
@@ -1282,7 +1278,7 @@ mod test {
 
     #[test]
     fn dcel_set_twin_twin_twin_is_self() {
-        let (m, [_, he01, _, _, he11, _]) = two_triangle_dcel();
+        let (m, [_, he01, _, _, _he11, _]) = two_triangle_dcel();
         let twin_of_twin = m.half_edges[m.half_edges[he01.0].twin.unwrap().0].twin.unwrap();
         assert_eq!(twin_of_twin, he01, "he.twin.twin must equal he");
     }

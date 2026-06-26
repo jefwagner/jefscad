@@ -127,6 +127,10 @@ impl std::ops::Mul<f64> for Point2 {
 /// respect to `t`. The parameter domain `[t_min, t_max]` is stored in the concrete type
 /// but `eval` and `eval_dt` do **not** clamp — callers are responsible for staying in
 /// range (or knowingly extrapolating).
+// Phase-0 staging: eval_dt / is_degenerate on the curve traits are not yet called
+// by any consumer. Phase 0-b extends the curve API for bezier segments and Phase
+// 0-c wires the b-rep compiler that consumes them; remove this allow then.
+#[allow(dead_code)]
 pub trait Curve3 {
     /// Evaluate the point on the curve at parameter `t`.
     fn eval(&self, t: f64) -> Point3;
@@ -343,6 +347,7 @@ impl Curve3 for Curve3Kind {
 ///
 /// The same no-clamping contract as [`Curve3`] applies: `eval` does not enforce the
 /// domain stored in the concrete type.
+#[allow(dead_code)] // see note on Curve3 above — Phase-0 staging
 pub trait Curve2 {
     /// Evaluate the UV point on the curve at parameter `t`.
     fn eval(&self, t: f64) -> Point2;

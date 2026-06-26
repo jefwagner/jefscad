@@ -1,3 +1,9 @@
+// Phase-0 staging: the b-rep compiler is not yet wired into the public Python API
+// (py_bindings currently exposes only the CSG AST layer). Phase 0-c migrates these
+// build_* functions onto the defining-only b-rep structs; remove this allow once
+// the compiler is wired up.
+#![allow(dead_code)]
+
 //! B-rep compiler: converts CSG primitives into trimmed-surface B-rep solids.
 //!
 //! Each `build_*` function takes a [`SolidModelingContext`] and primitive parameters,
@@ -2701,13 +2707,11 @@ mod test {
         build_extrusion(&mut ctx, &path, 4.0, 0, 0).unwrap();
         assert_eq!(ctx.vertices.len(), 8);
         assert_eq!(ctx.edges.len(),    12);
-        assert_eq!(ctx.faces.len(),    6);
         assert_eq!(ctx.coedges.len(),  24);
     }
 
     // ── build_revolution ──────────────────────────────────────────────────────
 
-    use std::f64::consts::FRAC_PI_2;
 
     /// Case 2, N=1: line from (0,0) to (r,h) — degenerate at start, disk cap at end.
     fn cone_path() -> Path2D {

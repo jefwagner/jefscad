@@ -1,3 +1,8 @@
+// Phase-0 staging: the boolean surface-surface-intersection scaffolding in this
+// module is not yet wired into a public boolean API. Phase 0-c migrates it onto the
+// defining-only b-rep structs; remove this allow once the boolean is wired up.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 use crate::brep_kernel::{Curve2Id, Curve3Id, FaceId, SolidModelingContext, Vertex, VertexId};

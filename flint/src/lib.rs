@@ -1,7 +1,6 @@
 #![feature(portable_simd)]
 #![feature(macro_metavar_expr)]
 
-use core::ops::Range;
 use std::simd::prelude::*;
 
 // Module for getting next representable floating point value

@@ -359,7 +359,7 @@ impl SolidModelingContext {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::geom::{Point3, Line3, Line2, Plane, Curve3Kind, Curve2Kind, SurfaceKind};
+    use crate::geom::{Point3, Line3, Plane, Curve3Kind, SurfaceKind};
 
     fn pt(x: f64, y: f64, z: f64) -> Point3 { Point3::new(x, y, z) }
 
