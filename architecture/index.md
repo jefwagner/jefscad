@@ -6,7 +6,7 @@ OpenSCAD by delaying meshing until export time, supporting STEP interchange, and
 handling coincident faces / slivers via tolerance-aware booleans.
 
 This directory is the structured capture of a design + planning session. The original
-braindump is in `../jefscad.md`; these docs supersede and refine it.
+braindump is in `braindump.md`; these docs supersede and refine it.
 
 ## Motivation
 
@@ -93,7 +93,7 @@ Phased plan toward the dice first goal:
 - **Phase 5** — STL/3MF export + mesh refinement + font-glyph ingestion via
   `ttf-parser`. The dice application.
 
-See `roadmap.md` for full detail, validation/rendering strategy, and decisions log.
+See `../ROADMAP.md` for full detail, validation/rendering strategy, and decisions log.
 
 ## Open / deferred items (not on dice critical path)
 
@@ -123,4 +123,4 @@ See `roadmap.md` for full detail, validation/rendering strategy, and decisions l
   struct lifecycle.
 - `boolean-ops.md` — full boolean pipeline (phases 1–6 + 4.5 coincident-face
   handling), classification, PIS contract, cross-cutting primitives.
-- `roadmap.md` — phased plan, validation strategy, decisions log.
+- `../ROADMAP.md` — phased plan, validation strategy, decisions log.

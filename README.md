@@ -1,74 +1,128 @@
-# Jefscad
+# jefscad
 
-**What is Jefscad**
+A code-based solid-modeling language for constructive solid geometry (CSG), written in
+Rust and exposed to Python via maturin + PyO3. Author CSG solids in a real programming
+language (functions, loops, composability for free), keep them analytic until export
+time, export to mesh or STEP, and handle coincident faces cleanly under tolerance.
 
-A solid modeling language based on constructive solid geometry. Solids are created by 
-writing code, inspired by Openscad, but with a python front-end so we can use the full
-power of python scripting/language when creating solids.
+**Status:** early-stage personal project. The first concrete deliverable is custom D&D
+dice — a Python program that takes a font + a character and 3D-prints a die face with
+that character engraved. See `ROADMAP.md` for the phased plan toward it.
 
-**Why create somthing new? Why not use openscad?**
+---
 
-Openscad is a very good program, and I recommend it's use to many others. However I have
-run into three problems that I would like to address 
+## Why build it? (three OpenSCAD pain points)
 
-1. Openscad uses floating point numbers, and taking unions or differences can lead to
-objects that should connect not connecting or objects that should subtract prefectly 
-leaving an extremely thin left-over part. This can be fixed by adding small offsets when 
-creating objects, but it would be nicer if we wouldn't have to do that.
+OpenSCAD is good and worth recommending. But three recurring issues drove starting fresh:
 
-2. Openscad creates meshes at object creation. So a cylinder is actually an extruded
-polygon. I would like to keep objects as abstract shapes until it is time to render or
-export, and only then create the mesh.
+1. **Early meshing.** OpenSCAD meshes each primitive at creation, so non-uniform scaling
+   produces severe faceting — a circle becomes a polygon, then gets stretched. jefscad
+   keeps an analytic boundary representation (b-rep) with exact surfaces until mesh
+   time, so a circle stays a circle (or becomes an exact ellipse) under affine
+   transforms. Mesh smoothness (triangle size / dihedral-angle constraints) is a
+   *mesh-time* parameter, not a primitive-creation parameter.
 
-3. Openscad does not create or read .step files to sharing with other solid modeling
-programs or CNC services.
+2. **No STEP export.** OpenSCAD can't emit STEP, which blocks CNC services and
+   interchange with other CAD tools. jefscad's b-rep maps directly to STEP's native
+   analytic surface entities where possible (plane, cylinder, cone, sphere, torus,
+   surface-of-linear-extrusion, surface-of-revolution), falling back to rational NURBS
+   (`b_spline_surface`) for the cases STEP has no native entity for (elliptic cone,
+   triaxial ellipsoid, elliptic torus).
 
-So, as a personal project, I want to create my own solid modeling language.
+3. **Thin slivers from coincident faces.** Differing a cylinder from a block of the
+   same thickness can leave an extremely thin layer due to floating-point error.
+   Workable with manual epsilon offsets, but it shouldn't be necessary. jefscad handles
+   coincident faces explicitly via aligned/anti-aligned outward-normal rules and uses a
+   global *relative* tolerance (with an absolute floor, applied against local feature
+   size — not raw coordinate magnitudes) to snap near-coincident entities cleanly.
 
-## How do we address these three issues?
+A secondary motivation: use **Python** for CSG authoring instead of a custom DSL, so
+functions, loops, and composability come for free.
 
-We will try and architect the solid modeling system from the start to try and address
-the three pain points of using Openscad.
+---
 
-### Dealing with floating point numbers:
+## How it works
 
-To address the first issue, we will use rounded floating point intervals, which I've
-called `Flint`s instead of floating point numbers. The idea behind a rounded floating
-point interval is that we know that floating point numbers are inexact, so we keep a
-lower and upper bound for what the exact value should be, and after every mathematic
-acttions (adding, multiplying, applying functions) we grow the interval slightly to
-guarantee that the result is still within the interval. We can now define comparison
-operators for the `Flint` objects such that they will compare as equal if the intervals
-overlap at all. This addresses a classic issue with floating point number things that
-should be equal are not (this should address the issues with merging or subtracting
-solids), but it does introduce the case where equality is not transitive. You win some,
-you lose some I guess.
+1. **CSG tree** authored in Python → each node compiles to a b-rep `SolidSet`. Tree
+   nodes can be referenced by multiple parents (shared subnodes), so booleans preserve
+   their inputs via a working-copy pattern rather than in-place mutation.
+2. **B-rep** with topological structs (SolidSet → Solid → Shell → Face → EdgeLoop →
+   Coedge → Edge → Vertex) and geometric structs (Surface, Curve, PCurve, Point), all
+   living in a `Context` with unique IDs and all cross-references via IDs. Structs
+   carry only *defining* (immutable) content; *convenience* refs live in Context
+   side-tables rebuilt by `rebuild_indices()`.
+3. **Surfaces** stay STEP-mappable: plane, cylinder, cone, sphere, torus (native
+   analytic); ruled/extrusion and revolution (native STEP entities covering elliptic
+   cylinder and solids of rotation); NURBS fallback (engine-produced transforms only,
+   constrained rational-conic — no author-constructed NURBS). Rational NURBS represent
+   conics *exactly*, so a non-uniform scale that triggers NURBS conversion loses zero
+   geometry.
+4. **Meshing** via a half-edge (DCEL) data structure, allowing local refinement after
+   initial meshing. The DCEL traversal is shared with boolean face-splitting.
 
-### Dealing with early meshing:
+The **boolean operation pipeline** (union / difference / intersection) is the riskiest
+piece. It builds a 2D planar arrangement in each affected face's uv domain — the cells
+of that arrangement are the candidate new faces, classified against the other solid via
+point-in-solid (PIS). Coincident faces are resolved *before* classification (Phase 4.5)
+so the on-boundary case is designed out rather than handled inline.
 
-To address the second issue, we will structure the creation of solids in three steps:
-1. We only keep a construct solid geometry (csg) the captures the initial shapes and
-   operations. This is still exact at this point.
-2. We transform the csg solids into boundrary representations, where the face surfaces
-   can be, represented by generic functions so we still keep exact representation. We
-   will preferentially use NURBS surfaces since they can exactly represent circular or
-   spherical structures, and simple tranformatiosn (precisly affine transformations) of
-   the surface is easily obtained by transforming the control points.
-3. The boundary representations can then be meshed using something like Chew's second
-   algorithm to get a mesh of whatever resolution we need when we need to render the
-   solids or export them for 3-D printing.
+Full design detail lives in `architecture/`:
+- `architecture/index.md` — entry point / session summary
+- `architecture/architecture.md` — b-rep data model, surface taxonomy, tolerance
+  model, struct lifecycle (defining vs convenience)
+- `architecture/boolean-ops.md` — the full boolean pipeline, classification, PIS
+  contract, cross-cutting primitives (`pip2d`, `pis`, DCEL cycles)
+- `architecture/braindump.md` — the original planning braindump / motivation
 
-The idea is that we will mostly use steps 1 and 2 during the object creation or
-manipulation, and in both of those the shapes are 'exact' (i.e. circle are actual
-circles and not N-sided regular polygons).
+---
 
-### Sharing files:
+## Project layout
 
-This is the hardest issue. I don't know exactly what the .step file format looks like.
-It is an accepted standard, but you have to purchase it's specification to get the full
-details. From what I have been able to find online, I _think_ that the .step files can
-represent solids using the boundary representation. If that's the case, there is a good
-chance that we will be able to support exporting solids into .step files, and we _might_
-be able to support importing solids (not sure on this one - cause we would miss the
-step 1 representation mentioned above).
+```
+repo root/
+├── jefscad/            # Rust crate → compiled to jefscad._jefscad (Python extension)
+├── python/jefscad/     # thin pure-Python wrapper package (re-exports from ._jefscad)
+├── architecture/       # design narrative — the "what & why" (read for background)
+├── docs/               # Sphinx user-facing HTML docs source
+├── notebooks/          # Jupyter notebooks (interactive scratch)
+├── ROADMAP.md          # long-horizon phased plan
+├── TODO.md             # current / next-session actionable items
+├── CHANGELOG.md        # curated milestone summaries (reverse-chronological)
+├── DEVELOPMENT.md      # environment setup + build/test/jupyter how-to
+└── AGENTS.md           # guidance for AI coding agents
+```
 
+The Rust crate compiles to `jefscad._jefscad` (the underscore prefix marks it as an
+implementation detail); `python/jefscad/__init__.py` re-exports the public API, so
+callers write `import jefscad; jefscad.sphere(...)`.
+
+---
+
+## Getting started
+
+See `DEVELOPMENT.md` for the full setup. The essentials:
+
+```bash
+# One-time setup
+uv venv .venv
+uv pip install --python .venv/bin/python maturin pytest jupyterlab ipykernel
+source .venv/bin/activate
+maturin develop --features extension-module
+
+# Daily loop
+maturin develop --features extension-module   # rebuild after Rust edits
+cargo test                                    # Rust unit tests (no Python linking)
+pytest -v                                      # Python tests
+```
+
+**Toolchain note:** `jefscad` targets stable Rust, edition 2024. (A standalone `flint`
+crate — rounded floating-point interval arithmetic — was co-developed in this workspace
+and required nightly Rust; it is being spun out to its own repository as part of the
+Phase 0 foundation refactor. Once that migration lands, no `+nightly` is needed
+anywhere. See `ROADMAP.md` → Phase 0.)
+
+---
+
+## License
+
+MIT.
