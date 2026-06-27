@@ -1,12 +1,12 @@
 //! Defining the rust types for a Constructive Solid Geometry solid modeling language
 
+use crate::geom::{Curve2Kind, Path2D};
+use crate::linalg::{Mat4, QUANTIZE_SCALE};
 use std::fmt;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use crate::geom::{Curve2Kind, Path2D};
-use crate::linalg::{Mat4, QUANTIZE_SCALE};
 
 // ---------------------------------------------------------------------------
 // Float formatting helper
@@ -75,23 +75,50 @@ pub(crate) enum CsgBaseNode {
 /// Solid primitives that make up more complex solids
 #[derive(Clone, Debug)]
 pub(crate) enum CsgPrimitive {
-    Cuboid { dx: Num, dy: Num, dz: Num },
-    Cylinder { r: Num, h: Num },
-    Sphere { r: Num },
-    Cone { r: Num, h: Num },
+    Cuboid {
+        dx: Num,
+        dy: Num,
+        dz: Num,
+    },
+    Cylinder {
+        r: Num,
+        h: Num,
+    },
+    Sphere {
+        r: Num,
+    },
+    Cone {
+        r: Num,
+        h: Num,
+    },
     /// Linear extrusion of a closed `Path2D` profile along +Z by `height`.
-    Extrude { path: Path2D, height: Num },
+    Extrude {
+        path: Path2D,
+        height: Num,
+    },
     /// 360° revolution of a `Path2D` profile around the Z-axis.
-    Revolve { path: Path2D },
+    Revolve {
+        path: Path2D,
+    },
 }
 
 /// Operations to combine or select CsgNodes
 #[derive(Clone, Debug)]
 pub(crate) enum CsgOp {
-    Union { children: Vec<NodeRef> },
-    Intersection { children: Vec<NodeRef> },
-    Difference { base: NodeRef, subtract: Vec<NodeRef> },
-    Select { input: NodeRef, policy: SelectPolicy },
+    Union {
+        children: Vec<NodeRef>,
+    },
+    Intersection {
+        children: Vec<NodeRef>,
+    },
+    Difference {
+        base: NodeRef,
+        subtract: Vec<NodeRef>,
+    },
+    Select {
+        input: NodeRef,
+        policy: SelectPolicy,
+    },
 }
 
 /// A selection policy for the Select operation
@@ -145,26 +172,42 @@ fn node_header(node: &CsgNode) -> String {
 
 fn prim_header(p: &CsgPrimitive) -> String {
     match p {
-        CsgPrimitive::Sphere { r } =>
-            format!("sphere(r={})", fmt_f64(*r)),
-        CsgPrimitive::Cuboid { dx, dy, dz } =>
-            format!("cuboid(dx={}, dy={}, dz={})", fmt_f64(*dx), fmt_f64(*dy), fmt_f64(*dz)),
-        CsgPrimitive::Cylinder { r, h } =>
-            format!("cylinder(r={}, h={})", fmt_f64(*r), fmt_f64(*h)),
-        CsgPrimitive::Cone { r, h } =>
-            format!("cone(r={}, h={})", fmt_f64(*r), fmt_f64(*h)),
-        CsgPrimitive::Extrude { path, height } =>
-            format!("extrude(segs={}, h={})", path.segments.len(), fmt_f64(*height)),
-        CsgPrimitive::Revolve { path } =>
-            format!("revolve(segs={})", path.segments.len()),
+        CsgPrimitive::Sphere { r } => format!("sphere(r={})", fmt_f64(*r)),
+        CsgPrimitive::Cuboid { dx, dy, dz } => format!(
+            "cuboid(dx={}, dy={}, dz={})",
+            fmt_f64(*dx),
+            fmt_f64(*dy),
+            fmt_f64(*dz)
+        ),
+        CsgPrimitive::Cylinder { r, h } => {
+            format!("cylinder(r={}, h={})", fmt_f64(*r), fmt_f64(*h))
+        }
+        CsgPrimitive::Cone { r, h } => format!("cone(r={}, h={})", fmt_f64(*r), fmt_f64(*h)),
+        CsgPrimitive::Extrude { path, height } => format!(
+            "extrude(contours={}, segs={}, h={})",
+            path.n_contours(),
+            path.contours()
+                .iter()
+                .map(|c| c.segments.len())
+                .sum::<usize>(),
+            fmt_f64(*height)
+        ),
+        CsgPrimitive::Revolve { path } => format!(
+            "revolve(contours={}, segs={})",
+            path.n_contours(),
+            path.contours()
+                .iter()
+                .map(|c| c.segments.len())
+                .sum::<usize>()
+        ),
     }
 }
 
 fn op_header(op: &CsgOp) -> String {
     match op {
-        CsgOp::Union { .. }        => "union".to_owned(),
+        CsgOp::Union { .. } => "union".to_owned(),
         CsgOp::Intersection { .. } => "intersection".to_owned(),
-        CsgOp::Difference { .. }   => "difference".to_owned(),
+        CsgOp::Difference { .. } => "difference".to_owned(),
         CsgOp::Select { policy, .. } => format!("select(policy={})", policy_str(policy)),
     }
 }
@@ -172,24 +215,47 @@ fn op_header(op: &CsgOp) -> String {
 fn policy_str(p: &SelectPolicy) -> String {
     match p {
         SelectPolicy::LargestByVolume => "largest_by_volume".to_owned(),
-        SelectPolicy::ClosestToPoint { point } =>
-            format!("closest_to_point({}, {}, {})",
-                fmt_f64(point[0]), fmt_f64(point[1]), fmt_f64(point[2])),
-        SelectPolicy::ContainsPoint { point } =>
-            format!("contains_point({}, {}, {})",
-                fmt_f64(point[0]), fmt_f64(point[1]), fmt_f64(point[2])),
+        SelectPolicy::ClosestToPoint { point } => format!(
+            "closest_to_point({}, {}, {})",
+            fmt_f64(point[0]),
+            fmt_f64(point[1]),
+            fmt_f64(point[2])
+        ),
+        SelectPolicy::ContainsPoint { point } => format!(
+            "contains_point({}, {}, {})",
+            fmt_f64(point[0]),
+            fmt_f64(point[1]),
+            fmt_f64(point[2])
+        ),
     }
 }
 
 fn transform_str(t: &AffineTransform) -> String {
     match t {
-        AffineTransform::Translation { delta: [dx, dy, dz] } =>
-            format!("translate(dx={}, dy={}, dz={})", fmt_f64(*dx), fmt_f64(*dy), fmt_f64(*dz)),
-        AffineTransform::Scale { sx, sy, sz } =>
-            format!("scale(sx={}, sy={}, sz={})", fmt_f64(*sx), fmt_f64(*sy), fmt_f64(*sz)),
-        AffineTransform::RotationAA { axis: [ax, ay, az], angle } =>
-            format!("rot_aa(ax={}, ay={}, az={}, angle={})",
-                fmt_f64(*ax), fmt_f64(*ay), fmt_f64(*az), fmt_f64(*angle)),
+        AffineTransform::Translation {
+            delta: [dx, dy, dz],
+        } => format!(
+            "translate(dx={}, dy={}, dz={})",
+            fmt_f64(*dx),
+            fmt_f64(*dy),
+            fmt_f64(*dz)
+        ),
+        AffineTransform::Scale { sx, sy, sz } => format!(
+            "scale(sx={}, sy={}, sz={})",
+            fmt_f64(*sx),
+            fmt_f64(*sy),
+            fmt_f64(*sz)
+        ),
+        AffineTransform::RotationAA {
+            axis: [ax, ay, az],
+            angle,
+        } => format!(
+            "rot_aa(ax={}, ay={}, az={}, angle={})",
+            fmt_f64(*ax),
+            fmt_f64(*ay),
+            fmt_f64(*az),
+            fmt_f64(*angle)
+        ),
     }
 }
 
@@ -213,11 +279,7 @@ fn write_node(
 }
 
 /// Write the tree children of a node: transforms branch first, then CSG children.
-fn write_node_children(
-    node: &CsgNode,
-    f: &mut fmt::Formatter<'_>,
-    prefix: &str,
-) -> fmt::Result {
+fn write_node_children(node: &CsgNode, f: &mut fmt::Formatter<'_>, prefix: &str) -> fmt::Result {
     // Build the list of top-level display children.
     // Each item is either:
     //   - A transforms branch (handled specially)
@@ -344,7 +406,7 @@ fn branch_strs(prefix: &str, is_last: bool) -> (String, String) {
 
 // Transform-matrix constructors live in `linalg`; re-export here so the existing
 // call sites (`mat_translation(...)` etc.) keep working unchanged.
-use crate::linalg::{mat_translation, mat_scale, mat_rot_aa};
+use crate::linalg::{mat_rot_aa, mat_scale, mat_translation};
 
 // ---------------------------------------------------------------------------
 // Matrix quantization and identity check
@@ -406,13 +468,20 @@ impl CanonicalCsgNodeView {
             CsgBaseNode::Op(CsgOp::Difference { base, subtract }) => {
                 let mut sub_ids: Vec<u64> = subtract.iter().map(|n| n.geom_id).collect();
                 sub_ids.sort_unstable();
-                CanonicalBase::Difference { base: base.geom_id, subtract: sub_ids }
+                CanonicalBase::Difference {
+                    base: base.geom_id,
+                    subtract: sub_ids,
+                }
             }
-            CsgBaseNode::Op(CsgOp::Select { input, policy }) => {
-                CanonicalBase::Select { input: input.geom_id, policy: policy.clone() }
-            }
+            CsgBaseNode::Op(CsgOp::Select { input, policy }) => CanonicalBase::Select {
+                input: input.geom_id,
+                policy: policy.clone(),
+            },
         };
-        CanonicalCsgNodeView { canonical_base, quantized_transform }
+        CanonicalCsgNodeView {
+            canonical_base,
+            quantized_transform,
+        }
     }
 
     pub(crate) fn geom_id(&self) -> u64 {
@@ -465,7 +534,10 @@ impl CanonicalCsgNodeView {
 fn collect_flattened_union(children: &[NodeRef]) -> Vec<u64> {
     let mut ids = Vec::new();
     for child in children {
-        if let CsgBaseNode::Op(CsgOp::Union { children: grandchildren }) = &child.base {
+        if let CsgBaseNode::Op(CsgOp::Union {
+            children: grandchildren,
+        }) = &child.base
+        {
             if is_identity_transform(&child.flat_transform) {
                 ids.extend(collect_flattened_union(grandchildren));
                 continue;
@@ -480,7 +552,10 @@ fn collect_flattened_union(children: &[NodeRef]) -> Vec<u64> {
 fn collect_flattened_intersection(children: &[NodeRef]) -> Vec<u64> {
     let mut ids = Vec::new();
     for child in children {
-        if let CsgBaseNode::Op(CsgOp::Intersection { children: grandchildren }) = &child.base {
+        if let CsgBaseNode::Op(CsgOp::Intersection {
+            children: grandchildren,
+        }) = &child.base
+        {
             if is_identity_transform(&child.flat_transform) {
                 ids.extend(collect_flattened_intersection(grandchildren));
                 continue;
@@ -526,32 +601,44 @@ fn hash_primitive(h: &mut impl std::hash::Hasher, prim: &CsgPrimitive) {
 }
 
 fn hash_path2d(h: &mut impl std::hash::Hasher, path: &Path2D) {
-    h.write_u64(path.start.u.to_bits());
-    h.write_u64(path.start.v.to_bits());
-    h.write_u8(path.closed as u8);
-    h.write_usize(path.segments.len());
-    for seg in &path.segments {
-        match seg {
-            Curve2Kind::Line2(l) => {
-                h.write_u8(0);
-                h.write_u64(l.p0.u.to_bits()); h.write_u64(l.p0.v.to_bits());
-                h.write_u64(l.p1.u.to_bits()); h.write_u64(l.p1.v.to_bits());
-            }
-            Curve2Kind::CircularArc2(a) => {
-                h.write_u8(1);
-                h.write_u64(a.center.u.to_bits()); h.write_u64(a.center.v.to_bits());
-                h.write_u64(a.radius.to_bits());
-                h.write_u64(a.t0.to_bits());      h.write_u64(a.t1.to_bits());
-            }
-            Curve2Kind::Polyline2(pl) => {
-                h.write_u8(2);
-                h.write_usize(pl.points.len());
-                for pt in &pl.points {
-                    h.write_u64(pt.u.to_bits()); h.write_u64(pt.v.to_bits());
+    // Contour-set hash: order-sensitive over contours (distinct orderings are
+    // distinct authored paths; canonicalization across contour order is a future
+    // concern, same as the pre-contour-set behaviour was order-sensitive over
+    // segments).
+    h.write_usize(path.n_contours());
+    for contour in path.contours() {
+        h.write_u64(contour.start.u.to_bits());
+        h.write_u64(contour.start.v.to_bits());
+        h.write_u8(contour.closed as u8);
+        h.write_usize(contour.segments.len());
+        for seg in &contour.segments {
+            match seg {
+                Curve2Kind::Line2(l) => {
+                    h.write_u8(0);
+                    h.write_u64(l.p0.u.to_bits());
+                    h.write_u64(l.p0.v.to_bits());
+                    h.write_u64(l.p1.u.to_bits());
+                    h.write_u64(l.p1.v.to_bits());
                 }
-            }
-            Curve2Kind::Nurbs(_) => {
-                h.write_u8(3); // discriminant only; NURBS hashing deferred
+                Curve2Kind::CircularArc2(a) => {
+                    h.write_u8(1);
+                    h.write_u64(a.center.u.to_bits());
+                    h.write_u64(a.center.v.to_bits());
+                    h.write_u64(a.radius.to_bits());
+                    h.write_u64(a.t0.to_bits());
+                    h.write_u64(a.t1.to_bits());
+                }
+                Curve2Kind::Polyline2(pl) => {
+                    h.write_u8(2);
+                    h.write_usize(pl.points.len());
+                    for pt in &pl.points {
+                        h.write_u64(pt.u.to_bits());
+                        h.write_u64(pt.v.to_bits());
+                    }
+                }
+                Curve2Kind::Nurbs(_) => {
+                    h.write_u8(3); // discriminant only; NURBS hashing deferred
+                }
             }
         }
     }
@@ -683,7 +770,10 @@ impl CsgNode {
     ///
     /// Panics if `children` is empty.
     pub fn intersection(children: Vec<NodeRef>) -> NodeRef {
-        assert!(!children.is_empty(), "intersection requires at least one child");
+        assert!(
+            !children.is_empty(),
+            "intersection requires at least one child"
+        );
         Self::new_op(CsgOp::Intersection { children })
     }
 
@@ -691,7 +781,10 @@ impl CsgNode {
     ///
     /// Panics if `subtract` is empty.
     pub fn difference(base: NodeRef, subtract: Vec<NodeRef>) -> NodeRef {
-        assert!(!subtract.is_empty(), "difference requires at least one node to subtract");
+        assert!(
+            !subtract.is_empty(),
+            "difference requires at least one node to subtract"
+        );
         Self::new_op(CsgOp::Difference { base, subtract })
     }
 
@@ -706,23 +799,25 @@ impl CsgNode {
     /// Return a new node translated by `(dx, dy, dz)`.
     pub fn translate(&self, dx: f64, dy: f64, dz: f64) -> NodeRef {
         self.with_transform(
-            AffineTransform::Translation { delta: [dx, dy, dz] },
+            AffineTransform::Translation {
+                delta: [dx, dy, dz],
+            },
             mat_translation(dx, dy, dz),
         )
     }
 
     /// Return a new node scaled non-uniformly by `(sx, sy, sz)`.
     pub fn scale(&self, sx: f64, sy: f64, sz: f64) -> NodeRef {
-        self.with_transform(
-            AffineTransform::Scale { sx, sy, sz },
-            mat_scale(sx, sy, sz),
-        )
+        self.with_transform(AffineTransform::Scale { sx, sy, sz }, mat_scale(sx, sy, sz))
     }
 
     /// Return a new node rotated around the X axis by `angle_rad` (right-hand rule).
     pub fn rot_x(&self, angle_rad: f64) -> NodeRef {
         self.with_transform(
-            AffineTransform::RotationAA { axis: [1.0, 0.0, 0.0], angle: angle_rad },
+            AffineTransform::RotationAA {
+                axis: [1.0, 0.0, 0.0],
+                angle: angle_rad,
+            },
             mat_rot_aa([1.0, 0.0, 0.0], angle_rad),
         )
     }
@@ -730,7 +825,10 @@ impl CsgNode {
     /// Return a new node rotated around the Y axis by `angle_rad` (right-hand rule).
     pub fn rot_y(&self, angle_rad: f64) -> NodeRef {
         self.with_transform(
-            AffineTransform::RotationAA { axis: [0.0, 1.0, 0.0], angle: angle_rad },
+            AffineTransform::RotationAA {
+                axis: [0.0, 1.0, 0.0],
+                angle: angle_rad,
+            },
             mat_rot_aa([0.0, 1.0, 0.0], angle_rad),
         )
     }
@@ -738,7 +836,10 @@ impl CsgNode {
     /// Return a new node rotated around the Z axis by `angle_rad` (right-hand rule).
     pub fn rot_z(&self, angle_rad: f64) -> NodeRef {
         self.with_transform(
-            AffineTransform::RotationAA { axis: [0.0, 0.0, 1.0], angle: angle_rad },
+            AffineTransform::RotationAA {
+                axis: [0.0, 0.0, 1.0],
+                angle: angle_rad,
+            },
             mat_rot_aa([0.0, 0.0, 1.0], angle_rad),
         )
     }
@@ -747,7 +848,10 @@ impl CsgNode {
     /// `axis` need not be a unit vector; it will be normalised internally.
     pub fn rot_aa(&self, axis: [f64; 3], angle_rad: f64) -> NodeRef {
         self.with_transform(
-            AffineTransform::RotationAA { axis, angle: angle_rad },
+            AffineTransform::RotationAA {
+                axis,
+                angle: angle_rad,
+            },
             mat_rot_aa(axis, angle_rad),
         )
     }
@@ -841,7 +945,10 @@ mod test {
     #[test]
     fn fresh_node_has_identity_flat_transform() {
         let n = CsgNode::sphere(1.0);
-        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(IDENTITY)));
+        assert!(mat_approx_eq(
+            &n.flat_transform,
+            &Mat4::from_array(IDENTITY)
+        ));
     }
 
     #[test]
@@ -872,7 +979,10 @@ mod test {
             0.0, 0.0, 1.0, 4.0,
             0.0, 0.0, 0.0, 1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
+        assert!(mat_approx_eq(
+            &n.flat_transform,
+            &Mat4::from_array(expected)
+        ));
     }
 
     #[test]
@@ -885,7 +995,10 @@ mod test {
             0.0, 0.0, 4.0, 0.0,
             0.0, 0.0, 0.0, 1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
+        assert!(mat_approx_eq(
+            &n.flat_transform,
+            &Mat4::from_array(expected)
+        ));
     }
 
     #[test]
@@ -903,7 +1016,10 @@ mod test {
             0.0,  1.0,  0.0,  0.0,
             0.0,  0.0,  0.0,  1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
+        assert!(mat_approx_eq(
+            &n.flat_transform,
+            &Mat4::from_array(expected)
+        ));
     }
 
     #[test]
@@ -921,7 +1037,10 @@ mod test {
             -1.0,  0.0,  0.0,  0.0,
              0.0,  0.0,  0.0,  1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
+        assert!(mat_approx_eq(
+            &n.flat_transform,
+            &Mat4::from_array(expected)
+        ));
     }
 
     #[test]
@@ -939,7 +1058,10 @@ mod test {
             0.0,  0.0,  1.0,  0.0,
             0.0,  0.0,  0.0,  1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
+        assert!(mat_approx_eq(
+            &n.flat_transform,
+            &Mat4::from_array(expected)
+        ));
     }
 
     #[test]
@@ -971,7 +1093,10 @@ mod test {
     fn transform_does_not_mutate_original() {
         let original = CsgNode::sphere(1.0);
         let _translated = original.translate(1.0, 0.0, 0.0);
-        assert!(mat_approx_eq(&original.flat_transform, &Mat4::from_array(IDENTITY)));
+        assert!(mat_approx_eq(
+            &original.flat_transform,
+            &Mat4::from_array(IDENTITY)
+        ));
         assert!(original.transforms.is_empty());
     }
 
@@ -990,7 +1115,9 @@ mod test {
 
     #[test]
     fn chain_two_transforms_stack_length_is_two() {
-        let n = CsgNode::sphere(1.0).translate(1.0, 0.0, 0.0).rot_x(PI / 2.0);
+        let n = CsgNode::sphere(1.0)
+            .translate(1.0, 0.0, 0.0)
+            .rot_x(PI / 2.0);
         assert_eq!(n.transforms.len(), 2);
     }
 
@@ -1017,7 +1144,10 @@ mod test {
             0.0, 0.0, 2.0, 3.0,
             0.0, 0.0, 0.0, 1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
+        assert!(mat_approx_eq(
+            &n.flat_transform,
+            &Mat4::from_array(expected)
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -1127,7 +1257,10 @@ mod test {
     #[test]
     fn union_has_identity_flat_transform() {
         let u = CsgNode::union(vec![CsgNode::sphere(1.0), CsgNode::sphere(2.0)]);
-        assert!(mat_approx_eq(&u.flat_transform, &Mat4::from_array(IDENTITY)));
+        assert!(mat_approx_eq(
+            &u.flat_transform,
+            &Mat4::from_array(IDENTITY)
+        ));
     }
 
     #[test]
@@ -1153,11 +1286,11 @@ mod test {
 
     #[test]
     fn intersection_base_is_intersection_op() {
-        let i = CsgNode::intersection(vec![
-            CsgNode::sphere(1.0),
-            CsgNode::cuboid(2.0, 2.0, 2.0),
-        ]);
-        assert!(matches!(&i.base, CsgBaseNode::Op(CsgOp::Intersection { .. })));
+        let i = CsgNode::intersection(vec![CsgNode::sphere(1.0), CsgNode::cuboid(2.0, 2.0, 2.0)]);
+        assert!(matches!(
+            &i.base,
+            CsgBaseNode::Op(CsgOp::Intersection { .. })
+        ));
     }
 
     #[test]
@@ -1205,7 +1338,10 @@ mod test {
     #[test]
     fn difference_has_identity_flat_transform() {
         let d = CsgNode::difference(CsgNode::cuboid(2.0, 2.0, 2.0), vec![CsgNode::sphere(0.5)]);
-        assert!(mat_approx_eq(&d.flat_transform, &Mat4::from_array(IDENTITY)));
+        assert!(mat_approx_eq(
+            &d.flat_transform,
+            &Mat4::from_array(IDENTITY)
+        ));
     }
 
     #[test]
@@ -1236,7 +1372,10 @@ mod test {
     #[test]
     fn select_contains_point_stores_point() {
         let pt = [1.0, 2.0, 3.0];
-        let s = CsgNode::select(CsgNode::sphere(1.0), SelectPolicy::ContainsPoint { point: pt });
+        let s = CsgNode::select(
+            CsgNode::sphere(1.0),
+            SelectPolicy::ContainsPoint { point: pt },
+        );
         match &s.base {
             CsgBaseNode::Op(CsgOp::Select {
                 policy: SelectPolicy::ContainsPoint { point },
@@ -1254,7 +1393,9 @@ mod test {
     fn canonical_view_prim_stores_primitive() {
         let n = CsgNode::sphere(2.5);
         let cv = CanonicalCsgNodeView::from_node(&n);
-        assert!(matches!(cv.canonical_base, CanonicalBase::Prim(CsgPrimitive::Sphere { r }) if r == 2.5));
+        assert!(
+            matches!(cv.canonical_base, CanonicalBase::Prim(CsgPrimitive::Sphere { r }) if r == 2.5)
+        );
     }
 
     #[test]
@@ -1394,7 +1535,10 @@ mod test {
         let _step2 = step1.rot_x(PI / 4.0);
 
         // base: identity, empty stack
-        assert!(mat_approx_eq(&base.flat_transform, &Mat4::from_array(IDENTITY)));
+        assert!(mat_approx_eq(
+            &base.flat_transform,
+            &Mat4::from_array(IDENTITY)
+        ));
         assert!(base.transforms.is_empty());
 
         // step1: only translation, stack length 1
@@ -1405,7 +1549,10 @@ mod test {
             0.0, 0.0, 1.0, 0.0,
             0.0, 0.0, 0.0, 1.0,
         ];
-        assert!(mat_approx_eq(&step1.flat_transform, &Mat4::from_array(t_expected)));
+        assert!(mat_approx_eq(
+            &step1.flat_transform,
+            &Mat4::from_array(t_expected)
+        ));
         assert_eq!(step1.transforms.len(), 1);
     }
 
@@ -1571,26 +1718,48 @@ mod test {
 
     #[test]
     fn display_select_largest_header() {
-        let s = format!("{}", CsgNode::select(CsgNode::sphere(1.0), SelectPolicy::LargestByVolume));
-        assert_eq!(s.lines().next().unwrap(), "select(policy=largest_by_volume)");
+        let s = format!(
+            "{}",
+            CsgNode::select(CsgNode::sphere(1.0), SelectPolicy::LargestByVolume)
+        );
+        assert_eq!(
+            s.lines().next().unwrap(),
+            "select(policy=largest_by_volume)"
+        );
     }
 
     #[test]
     fn display_select_closest_to_header() {
         let s = format!(
             "{}",
-            CsgNode::select(CsgNode::sphere(1.0), SelectPolicy::ClosestToPoint { point: [1.0, 2.0, 3.0] }),
+            CsgNode::select(
+                CsgNode::sphere(1.0),
+                SelectPolicy::ClosestToPoint {
+                    point: [1.0, 2.0, 3.0]
+                }
+            ),
         );
-        assert_eq!(s.lines().next().unwrap(), "select(policy=closest_to_point(1.0, 2.0, 3.0))");
+        assert_eq!(
+            s.lines().next().unwrap(),
+            "select(policy=closest_to_point(1.0, 2.0, 3.0))"
+        );
     }
 
     #[test]
     fn display_select_contains_header() {
         let s = format!(
             "{}",
-            CsgNode::select(CsgNode::sphere(1.0), SelectPolicy::ContainsPoint { point: [0.0, 0.0, 1.0] }),
+            CsgNode::select(
+                CsgNode::sphere(1.0),
+                SelectPolicy::ContainsPoint {
+                    point: [0.0, 0.0, 1.0]
+                }
+            ),
         );
-        assert_eq!(s.lines().next().unwrap(), "select(policy=contains_point(0.0, 0.0, 1.0))");
+        assert_eq!(
+            s.lines().next().unwrap(),
+            "select(policy=contains_point(0.0, 0.0, 1.0))"
+        );
     }
 
     // --- float formatting ---------------------------------------------------

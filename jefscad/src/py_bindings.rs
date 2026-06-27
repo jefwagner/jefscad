@@ -16,7 +16,7 @@ use crate::csg_lang::{CsgNode, SelectPolicy};
 use crate::geom::{Path2D, Point2};
 
 #[cfg(feature = "extension-module")]
-use crate::mesher::{MeshOptions, TriMesh, mesh_solid, write_stl, write_obj};
+use crate::mesher::{MeshOptions, TriMesh, mesh_solid, write_obj, write_stl};
 
 // ---------------------------------------------------------------------------
 // Python-visible Mesh class
@@ -71,16 +71,14 @@ impl PyMesh {
 fn write_stl_file_py(mesh: &TriMesh, path: &str) -> PyResult<()> {
     let mut f = std::fs::File::create(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-    write_stl(mesh, &mut f)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+    write_stl(mesh, &mut f).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
 }
 
 #[cfg(feature = "extension-module")]
 fn write_obj_file_py(mesh: &TriMesh, path: &str) -> PyResult<()> {
     let mut f = std::fs::File::create(path)
         .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-    write_obj(mesh, &mut f)
-        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
+    write_obj(mesh, &mut f).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -92,8 +90,9 @@ fn write_obj_file_py(mesh: &TriMesh, path: &str) -> PyResult<()> {
 /// For **extrusion** the path is in the X-Y plane: `u` = x, `v` = y.
 /// For **revolution** the path is in the X-Z half-plane: `u` = radial distance, `v` = height.
 ///
-/// Build the path with the builder methods (`line_to`, `arc_to`, `close`,
-/// `line_to_close`), all of which return `self` for chaining.  Then call
+/// Build the path with the builder methods: `start_contour` opens a contour
+/// (errors if the previous contour is still open), `line_to`/`arc_to` extend
+/// the current contour, `close`/`line_to_close` close it.  Then call
 /// `extrude(height)` or `revolve()` to obtain a `Node`.
 #[cfg(feature = "extension-module")]
 #[gen_stub_pyclass]
@@ -106,37 +105,28 @@ pub struct PyPath2D {
 #[gen_stub_pymethods]
 #[pymethods]
 impl PyPath2D {
-    /// Create a new path starting at `(u, v)`.
+    /// Create a new empty path (no contours).  Call `start_contour` to open
+    /// the first contour.
     #[new]
-    fn new(u: f64, v: f64) -> Self {
-        PyPath2D { inner: Path2D::new(Point2::new(u, v)) }
+    fn new() -> Self {
+        PyPath2D {
+            inner: Path2D::new(),
+        }
     }
 
     // --- introspection ------------------------------------------------------
 
-    /// Starting point of the path as `(u, v)`.
+    /// Number of contours in the path.
     #[getter]
-    fn start(&self) -> (f64, f64) {
-        (self.inner.start.u, self.inner.start.v)
+    fn n_contours(&self) -> usize {
+        self.inner.n_contours()
     }
 
-    /// Current end-point of the path as `(u, v)`.
+    /// Current end-point of the last contour as `(u, v)`, or `None` if the
+    /// path is empty.
     #[getter]
-    fn current_pos(&self) -> (f64, f64) {
-        let p = self.inner.current_pos();
-        (p.u, p.v)
-    }
-
-    /// Number of segments.
-    #[getter]
-    fn n_segments(&self) -> usize {
-        self.inner.segments.len()
-    }
-
-    /// Whether the path has been marked closed.
-    #[getter]
-    fn closed(&self) -> bool {
-        self.inner.closed
+    fn current_pos(&self) -> Option<(f64, f64)> {
+        self.inner.current_pos().map(|p| (p.u, p.v))
     }
 
     fn __repr__(&self) -> String {
@@ -149,7 +139,25 @@ impl PyPath2D {
 
     // --- builder methods ----------------------------------------------------
 
+    /// Open a new contour starting at `(u, v)`.
+    ///
+    /// Raises `ValueError` if the previous contour is still open (non-empty
+    /// and not closed) — call `close()` or `line_to_close()` first.
+    fn start_contour(
+        mut slf: pyo3::PyRefMut<'_, Self>,
+        u: f64,
+        v: f64,
+    ) -> pyo3::PyResult<pyo3::PyRefMut<'_, Self>> {
+        slf.inner
+            .start_contour(Point2::new(u, v))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))?;
+        Ok(slf)
+    }
+
     /// Append a straight segment to `(u, v)`.  Returns `self` for chaining.
+    ///
+    /// Panics (Rust) / raises (Python-side via the GIL panic hook) if no
+    /// contour is open — call `start_contour` first.
     fn line_to(mut slf: pyo3::PyRefMut<'_, Self>, u: f64, v: f64) -> pyo3::PyRefMut<'_, Self> {
         slf.inner.line_to(Point2::new(u, v));
         slf
@@ -157,24 +165,37 @@ impl PyPath2D {
 
     /// Append a circular arc sweeping `sweep` radians around `(cu, cv)`.
     /// Positive sweep is CCW; negative is CW.  Returns `self` for chaining.
-    fn arc_to(mut slf: pyo3::PyRefMut<'_, Self>, cu: f64, cv: f64, sweep: f64) -> pyo3::PyRefMut<'_, Self> {
+    fn arc_to(
+        mut slf: pyo3::PyRefMut<'_, Self>,
+        cu: f64,
+        cv: f64,
+        sweep: f64,
+    ) -> pyo3::PyRefMut<'_, Self> {
         slf.inner.arc_to(Point2::new(cu, cv), sweep);
         slf
     }
 
-    /// Mark the path as closed without adding a segment.
-    /// The caller must ensure `current_pos` is already at `start`.
-    /// Returns `self` for chaining.
-    fn close(mut slf: pyo3::PyRefMut<'_, Self>) -> pyo3::PyRefMut<'_, Self> {
-        slf.inner.close();
-        slf
+    /// Mark the current contour as closed without adding a segment.
+    ///
+    /// The caller must ensure `current_pos` is already bit-exactly at the
+    /// contour's start.  Raises `ValueError` otherwise, or if no contour is open.
+    fn close(mut slf: pyo3::PyRefMut<'_, Self>) -> pyo3::PyResult<pyo3::PyRefMut<'_, Self>> {
+        slf.inner
+            .close()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))?;
+        Ok(slf)
     }
 
-    /// Append a straight segment back to `start` and mark the path as closed.
-    /// Returns `self` for chaining.
-    fn line_to_close(mut slf: pyo3::PyRefMut<'_, Self>) -> pyo3::PyRefMut<'_, Self> {
-        slf.inner.line_to_close();
-        slf
+    /// Append a straight segment back to the contour's start and mark it closed.
+    ///
+    /// Raises `ValueError` if no contour is open.
+    fn line_to_close(
+        mut slf: pyo3::PyRefMut<'_, Self>,
+    ) -> pyo3::PyResult<pyo3::PyRefMut<'_, Self>> {
+        slf.inner
+            .line_to_close()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e}")))?;
+        Ok(slf)
     }
 
     // --- solid constructors -------------------------------------------------
@@ -182,14 +203,17 @@ impl PyPath2D {
     /// Extrude this closed path by `height` along +Z, returning a `Node`.
     ///
     /// Raises `ValueError` if the path is not closed, has no segments,
-    /// `height` is non-positive, or the path is geometrically open.
+    /// `height` is non-positive, the path is geometrically open, or the path
+    /// has more than one contour (multi-contour nesting not yet supported).
     fn extrude(&self, height: f64) -> pyo3::PyResult<PyNode> {
         use crate::brep_compiler::build_extrusion;
         use crate::brep_kernel::SolidModelingContext;
         let mut ctx = SolidModelingContext::new();
         build_extrusion(&mut ctx, &self.inner, height, 0, 0)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e:?}")))?;
-        Ok(PyNode { inner: CsgNode::extrude(self.inner.clone(), height) })
+        Ok(PyNode {
+            inner: CsgNode::extrude(self.inner.clone(), height),
+        })
     }
 
     /// Revolve this profile 360° around the Z-axis, returning a `Node`.
@@ -202,19 +226,22 @@ impl PyPath2D {
         let mut ctx = SolidModelingContext::new();
         build_revolution(&mut ctx, &self.inner, 0, 0)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("{e:?}")))?;
-        Ok(PyNode { inner: CsgNode::revolve(self.inner.clone()) })
+        Ok(PyNode {
+            inner: CsgNode::revolve(self.inner.clone()),
+        })
     }
 }
 
-/// Create a new 2-D path starting at `(u, v)`.
+/// Create a new empty 2-D path.
 ///
-/// Use the builder methods `line_to`, `arc_to`, `close`, and `line_to_close`
-/// to define the path, then call `extrude(height)` or `revolve()`.
+/// Use the builder methods (`start_contour`, `line_to`, `arc_to`, `close`,
+/// `line_to_close`) to define the path, then call `extrude(height)` or
+/// `revolve()`.
 #[cfg(feature = "extension-module")]
 #[gen_stub_pyfunction]
 #[pyfunction]
-fn path2d(u: f64, v: f64) -> PyPath2D {
-    PyPath2D::new(u, v)
+fn path2d() -> PyPath2D {
+    PyPath2D::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -276,7 +303,14 @@ impl PyNode {
         use crate::brep_kernel::SolidModelingContext;
         let mut ctx = SolidModelingContext::new();
         let sid = compile_csg_node(&mut ctx, &self.inner);
-        let tri_mesh = mesh_solid(&ctx, sid, &MeshOptions { resolution, ..MeshOptions::default() });
+        let tri_mesh = mesh_solid(
+            &ctx,
+            sid,
+            &MeshOptions {
+                resolution,
+                ..MeshOptions::default()
+            },
+        );
         PyMesh { inner: tri_mesh }
     }
 
@@ -284,27 +318,37 @@ impl PyNode {
 
     /// Return a new Node translated by (dx, dy, dz).
     fn translate(&self, dx: f64, dy: f64, dz: f64) -> PyNode {
-        PyNode { inner: self.inner.translate(dx, dy, dz) }
+        PyNode {
+            inner: self.inner.translate(dx, dy, dz),
+        }
     }
 
     /// Return a new Node scaled by (sx, sy, sz).
     fn scale(&self, sx: f64, sy: f64, sz: f64) -> PyNode {
-        PyNode { inner: self.inner.scale(sx, sy, sz) }
+        PyNode {
+            inner: self.inner.scale(sx, sy, sz),
+        }
     }
 
     /// Return a new Node rotated around the X axis by `angle_rad` (right-hand rule).
     fn rot_x(&self, angle_rad: f64) -> PyNode {
-        PyNode { inner: self.inner.rot_x(angle_rad) }
+        PyNode {
+            inner: self.inner.rot_x(angle_rad),
+        }
     }
 
     /// Return a new Node rotated around the Y axis by `angle_rad` (right-hand rule).
     fn rot_y(&self, angle_rad: f64) -> PyNode {
-        PyNode { inner: self.inner.rot_y(angle_rad) }
+        PyNode {
+            inner: self.inner.rot_y(angle_rad),
+        }
     }
 
     /// Return a new Node rotated around the Z axis by `angle_rad` (right-hand rule).
     fn rot_z(&self, angle_rad: f64) -> PyNode {
-        PyNode { inner: self.inner.rot_z(angle_rad) }
+        PyNode {
+            inner: self.inner.rot_z(angle_rad),
+        }
     }
 
     /// Return a new Node rotated around `axis` by `angle_rad` (right-hand rule).
@@ -313,7 +357,9 @@ impl PyNode {
     ///     axis: Rotation axis as `[x, y, z]`. Need not be a unit vector; normalised internally.
     ///     angle_rad: Rotation angle in radians.
     fn rot_aa(&self, axis: [f64; 3], angle_rad: f64) -> PyNode {
-        PyNode { inner: self.inner.rot_aa(axis, angle_rad) }
+        PyNode {
+            inner: self.inner.rot_aa(axis, angle_rad),
+        }
     }
 }
 
@@ -326,7 +372,9 @@ impl PyNode {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn sphere(r: f64) -> PyNode {
-    PyNode { inner: CsgNode::sphere(r) }
+    PyNode {
+        inner: CsgNode::sphere(r),
+    }
 }
 
 /// Create an axis-aligned cuboid with one corner at the origin and the opposite corner at `(dx, dy, dz)`.
@@ -334,7 +382,9 @@ fn sphere(r: f64) -> PyNode {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn cuboid(dx: f64, dy: f64, dz: f64) -> PyNode {
-    PyNode { inner: CsgNode::cuboid(dx, dy, dz) }
+    PyNode {
+        inner: CsgNode::cuboid(dx, dy, dz),
+    }
 }
 
 /// Create a cylinder with radius `r` and height `h`.
@@ -343,7 +393,9 @@ fn cuboid(dx: f64, dy: f64, dz: f64) -> PyNode {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn cylinder(r: f64, h: f64) -> PyNode {
-    PyNode { inner: CsgNode::cylinder(r, h) }
+    PyNode {
+        inner: CsgNode::cylinder(r, h),
+    }
 }
 
 /// Create a cone with base radius `r` and height `h`.
@@ -352,7 +404,9 @@ fn cylinder(r: f64, h: f64) -> PyNode {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn cone(r: f64, h: f64) -> PyNode {
-    PyNode { inner: CsgNode::cone(r, h) }
+    PyNode {
+        inner: CsgNode::cone(r, h),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -372,8 +426,13 @@ fn union(children: Vec<Bound<'_, PyNode>>) -> PyResult<PyNode> {
             "union requires at least one child",
         ));
     }
-    let refs: Vec<_> = children.iter().map(|n| Arc::clone(&n.borrow().inner)).collect();
-    Ok(PyNode { inner: CsgNode::union(refs) })
+    let refs: Vec<_> = children
+        .iter()
+        .map(|n| Arc::clone(&n.borrow().inner))
+        .collect();
+    Ok(PyNode {
+        inner: CsgNode::union(refs),
+    })
 }
 
 /// Return the intersection (common volume) of the given nodes: `intersection(a, b, c, ...)`.
@@ -389,8 +448,13 @@ fn intersection(children: Vec<Bound<'_, PyNode>>) -> PyResult<PyNode> {
             "intersection requires at least one child",
         ));
     }
-    let refs: Vec<_> = children.iter().map(|n| Arc::clone(&n.borrow().inner)).collect();
-    Ok(PyNode { inner: CsgNode::intersection(refs) })
+    let refs: Vec<_> = children
+        .iter()
+        .map(|n| Arc::clone(&n.borrow().inner))
+        .collect();
+    Ok(PyNode {
+        inner: CsgNode::intersection(refs),
+    })
 }
 
 /// Subtract volumes from a base shape: `difference(base, sub1, sub2, ...)`.
@@ -407,8 +471,13 @@ fn difference(base: Bound<'_, PyNode>, subtract: Vec<Bound<'_, PyNode>>) -> PyRe
         ));
     }
     let base_ref = Arc::clone(&base.borrow().inner);
-    let sub_refs: Vec<_> = subtract.iter().map(|n| Arc::clone(&n.borrow().inner)).collect();
-    Ok(PyNode { inner: CsgNode::difference(base_ref, sub_refs) })
+    let sub_refs: Vec<_> = subtract
+        .iter()
+        .map(|n| Arc::clone(&n.borrow().inner))
+        .collect();
+    Ok(PyNode {
+        inner: CsgNode::difference(base_ref, sub_refs),
+    })
 }
 
 /// Select the single largest connected component of `node` by volume.
@@ -416,7 +485,12 @@ fn difference(base: Bound<'_, PyNode>, subtract: Vec<Bound<'_, PyNode>>) -> PyRe
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn select_largest(node: Bound<'_, PyNode>) -> PyNode {
-    PyNode { inner: CsgNode::select(Arc::clone(&node.borrow().inner), SelectPolicy::LargestByVolume) }
+    PyNode {
+        inner: CsgNode::select(
+            Arc::clone(&node.borrow().inner),
+            SelectPolicy::LargestByVolume,
+        ),
+    }
 }
 
 /// Select the connected component of `node` whose centroid is closest to `point`.
@@ -425,7 +499,12 @@ fn select_largest(node: Bound<'_, PyNode>) -> PyNode {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn select_closest_to(node: Bound<'_, PyNode>, point: [f64; 3]) -> PyNode {
-    PyNode { inner: CsgNode::select(Arc::clone(&node.borrow().inner), SelectPolicy::ClosestToPoint { point }) }
+    PyNode {
+        inner: CsgNode::select(
+            Arc::clone(&node.borrow().inner),
+            SelectPolicy::ClosestToPoint { point },
+        ),
+    }
 }
 
 /// Select the connected component of `node` that contains `point`.
@@ -434,7 +513,12 @@ fn select_closest_to(node: Bound<'_, PyNode>, point: [f64; 3]) -> PyNode {
 #[gen_stub_pyfunction]
 #[pyfunction]
 fn select_contains(node: Bound<'_, PyNode>, point: [f64; 3]) -> PyNode {
-    PyNode { inner: CsgNode::select(Arc::clone(&node.borrow().inner), SelectPolicy::ContainsPoint { point }) }
+    PyNode {
+        inner: CsgNode::select(
+            Arc::clone(&node.borrow().inner),
+            SelectPolicy::ContainsPoint { point },
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------

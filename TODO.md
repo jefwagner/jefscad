@@ -146,6 +146,14 @@ segment types, compiled through a ruled (`LinearExtrusionSurface`) extrusion.
   parts. Extrusion of one `Path2D` produces a `SolidSet` (multiple `Solid`s for
   disconnected outers; inner cap `EdgeLoop`s for holes). Hole-ness comes from contour
   structure, **not** from CSG boolean ops.
+- **Naming: `Path2D` (outer, role-named, author-facing) contains `Vec<Contour>`**
+  (inner, structurally-named, mirrors `Solid`/`EdgeLoop`). The b-rep-style parallelism
+  lives in the *element* name (`Contour` ↔ `Solid`) — `Path2D` describes the author's
+  role ("I'm building a 2D path"), while `ContourSet` as the outer name would describe
+  an implementation detail. 3D uses `SolidSet`/`Solid` (set-named outer) because the
+  multi-solid result is user-visible (selection operator, booleans); 2D uses
+  `Path2D`/`Contour` because the multi-contour structure is an authoring convenience,
+  not first-class. Asymmetry recorded as deliberate.
 - **No tolerance in the builder.** Validation splits:
   - *Builder-enforced (tolerance-free, exact):* segment chaining (by construction),
     `close()` exactness (`current_pos == start` bit-exact else error), degenerate
@@ -154,6 +162,14 @@ segment types, compiled through a ruled (`LinearExtrusionSurface`) extrusion.
   - *Compile-enforced (needs Context tolerance, lands with 0-c / Phase 1):* fuzzy
     closure snap (end ≈ start within tol), self-intersection, geometric containment
     validation.
+- **Winding check split (0-b.Q1 resolved):**
+  - *Build-time* (`finish()`): per-contour **nonzero signed area** only. Catches
+    degenerate contours (back-and-forth lines, self-cancelling figure-eights) cheaply
+    and locally. This is the "capture errors early" Rust-philosophy check.
+  - *Compile-time* (nesting in `build_extrusion`): the **role check** — CCW contour
+    must be a top-level outer, CW contour must be inside a CCW outer. Cannot be done
+    at build time because role depends on the *other* contours (circular dep).
+    Reject on mismatch per the reject-don't-swap rule below.
 - **Minimal `pip2d`** (point-in-polygon, single level) implemented in 0-b and used by
   `build_extrusion` to determine contour nesting via winding. Rejects malformed nesting
   (e.g. a CW contour not inside any CCW outer) as a compile error — delivers the
@@ -170,39 +186,99 @@ segment types, compiled through a ruled (`LinearExtrusionSurface`) extrusion.
   multi-Solid; holes → inner cap loops) so 0-c only re-touches it for the
   field/side-table mechanic, not the contour logic.
 
+### Builder API (0-b.Q2 resolved)
+- **Drop `Path2D::start(p)`.** `Path2D::new()` creates the empty contour set; the
+  first `start_contour(p)` opens contour 0. No special "first contour" path — every
+  contour opens the same way. (`Path2D::start` only made sense when a path was a single
+  contour; the multi-contour model contradicts its "one start" implication.)
+- **`start_contour(p: Point2) -> Result<&mut Self, PathError>`** opens a new contour.
+  **Strict, not silent:** errors with `PathError::UnclosedContour` if the previous contour
+  is open (non-empty + not closed). This catches the "forgot to close" omission at the
+  call site where it's made (Rust philosophy, per Q1), rather than downstream.
+  - *Why not `move_to` (SVG convention):* SVG auto-closes-on-`move_to` is fine for
+    rendering (fill rules) but violates our bit-exact-close invariant. The strict
+    `move_to` variant is the contender, but the name carries the silent-close baggage
+    authors may misremember. `start_contour`/`close` is an unambiguous verb pair.
+  - *Font-pipeline fit:* `ttf-parser` emits `move_to` events; the Phase-5 Rust font
+    binding shims that event to `start_contour` internally. Machine consumer adapts;
+    the author-facing API optimizes for authors.
+- **`close() -> Result<&mut Self, PathError>` / `line_to_close() -> Result<&mut Self,
+  PathError>`** close the current contour (see Q3 below).
+- **`line_to`/`arc_to`/`quad_to`/`cubic_to` are infallible (`&mut Self`)** — they
+  append to the current contour and panic on programmer error (no open contour),
+  which is the "unreachable in correct usage" case. This split is self-documenting:
+  fallible methods (`start_contour`, `close`, `line_to_close`, `finish`) carry real
+  preconditions (structural state + geometric exactness); infallible appends only
+  fail on a misuse that `finish()` could never recover from anyway (0-b.Q4 resolved:
+  option 2 — pragmatic fallibility split).
+- **`finish() -> Result<Path2D, PathError>`** consumes the builder, runs structural +
+  winding validation.
+- Full builder API:
+  ```rust
+  Path2D::new()                                              // empty contour set
+      .start_contour(p: Point2) -> Result<&mut Self, PathError>  // open (errors if prev unclosed)
+      .line_to(end)             -> &mut Self                  // infallible append
+      .arc_to(center, sweep)    -> &mut Self
+      .quad_to(c1, end)         -> &mut Self                  // (0-b adds the curve type)
+      .cubic_to(c1, c2, end)    -> &mut Self                  // (0-b adds the curve type)
+      .close()                  -> Result<&mut Self, PathError>  // mark closed (errors if current_pos != start)
+      .line_to_close()          -> Result<&mut Self, PathError>  // append final Line2 to start, then close
+      .finish()                 -> Result<Path2D, PathError>      // consume + validate
+  ```
+
+### Close-method family (0-b.Q3 resolved)
+- **Keep `line_to_close`.** It's load-bearing ergonomics for the 90% case: the author
+  built up the curve chain but the last point isn't bit-exactly at `start`, and lines
+  have no control points to think about — delegating the final segment is unambiguous.
+  Stays exact because the explicit `Line2` makes `current_pos == start` hold for the
+  subsequent `close()` check.
+- **Do NOT add** `arc_to_close` / `quad_to_close` / `cubic_to_close`. With bezier
+  closes, the author is *already specifying* the endpoint as a parameter — at which
+  point `end = start` is just `quad_to(start)` + `close()`, and the `_to_close`
+  variant saves one call while hiding tangent-matching the author should own (a smooth
+  close wants the closing segment's incoming tangent matched to the first segment's
+  start tangent — a real geometric computation, not something to bury in a "close"
+  method). Document the pattern instead: *to close smoothly, call `*_to(start)` with
+  control points chosen for tangent continuity, then `close()`.*
+
 ### Tasks — data model & builder
-- [ ] `geom.rs`: redefine
+- [x] `geom.rs`: redefine
       `Path2D { contours: Vec<Contour> }`, `Contour { start: Point2, segments: Vec<Curve2Kind>, closed: bool }`.
-      `Contour` carries a private `current_pos` during building (or recompute on the
-      fly — decide; private field mirrors current approach).
-- [ ] Builder API on `Path2D`:
-      - `Path2D::new() -> Self` — empty contour set (note: no `start` arg; first
-        `move_to` provides it). *Decision needed:* keep a `Path2D::start(p)` alias for
-        single-contour ergonomics that opens the first contour? Lean yes.
-      - `move_to(p: Point2) -> &mut Self` — close current contour (if open+non-empty
-        → error) and begin a new contour at `p`.
-      - `line_to`, `arc_to`, `quad_to`, `cubic_to` — extend current contour.
-      - `close() -> &mut Self` — close current contour; **error if `current_pos !=
-        start` (bit-exact)**. (Replaces `line_to_close`; decide whether to keep
-        `line_to_close` as a convenience that adds a closing `Line2` then closes —
-        lean yes, it's the common "I didn't return exactly to start" case and stays
-        exact because the explicit segment makes `current_pos == start` hold.)
-      - `finish() -> Result<Path2D, PathError>` (or infallible returning the frozen
-        value) — consumes the builder, runs structural + winding validation:
-          * every contour non-empty,
-          * every closed contour has `current_pos == start`,
-          * no degenerate segments,
-          * winding sign correct per contour (CCW for outer, CW for hole) — *but
-            role (outer/hole) isn't known until nesting at compile time*. So
-            `finish()` enforces only **non-zero signed area and consistent sign per
-            contour**; the CCW-outer/CW-hole *role* check happens at compile (nesting)
-            time. Reconcile: builder guarantees "each contour has a definite, nonzero
-            winding direction"; compiler guarantees "winding direction matches role
-            per nesting." Reject at compile on mismatch (per the reject-don't-swap
-            rule). *Confirm this split — see open question 0-b.Q1.*
-- [ ] `PathError` enum: `UnclosedContour`, `EmptyContour`, `DegenerateSegment`,
-      `ZeroAreaContour`, `CloseNotAtStart`, plus compile-time variants
-      (`WindingRoleMismatch`, `HoleOutsideOuter`, `SelfIntersection`(future)).
+      `Contour` carries a private `current_pos` during building (decided: private field,
+      O(1) append, mirrors the pre-refactor approach).
+- [x] Builder API on `Path2D` per the locked "Builder API" decision above
+      (0-b.Q4 resolved: option 2 — pragmatic fallibility split):
+      - `new()` (empty set, infallible).
+      - `start_contour(p) -> Result<&mut Self, PathError>` — open; errors
+        `UnclosedContour` if previous contour is open.
+      - `line_to`/`arc_to`/`quad_to`/`cubic_to` — infallible `&mut Self` appends;
+        panic on programmer error (no open contour) rather than return `Result`.
+        *(quad_to/cubic_to deferred to the bezier-segment cycle — the curve types
+        don't exist yet.)*
+      - `close() -> Result<&mut Self, PathError>` — errors `NoOpenContour` (no open
+        contour) or `CloseNotAtStart` (`current_pos != start`, bit-exact).
+      - `line_to_close() -> Result<&mut Self, PathError>` — append final `Line2` to
+        `start`, then close; same errors as `close()` (plus `NoOpenContour`).
+      - `finish() -> Result<Path2D, PathError>` — consume + validate.
+      No `Path2D::start(p)` alias. No `move_to`. No `arc_to_close`/`quad_to_close`/
+      `cubic_to_close`. Added a public `Curve2Kind::end()` method (replaces the
+      private `curve2_end` free fn in `brep_compiler.rs`).
+- [x] `finish()` validation (build-time, tolerance-free, exact):
+      * every contour non-empty → else `EmptyContour`,
+      * every contour closed (no open contour left at finish) → else `UnclosedContour`,
+      * every closed contour has `current_pos == start` (bit-exact) → else
+        `CloseNotAtStart`,
+      * no degenerate segments → else `DegenerateSegment`,
+      * each contour has **nonzero signed area** → else `ZeroAreaContour`.
+      (Role check — CCW outer / CW hole — is *compile-time*, not here.)
+      *(Also: `ExtrusionError::GeometricallyOpen` is now unreachable through the
+      builder because `close()` is bit-exact; kept as defense-in-depth + the 0-c
+      fuzzy-closure hook. The `extrude_err_geometrically_open` test was dropped —
+      the state can't be constructed via the public API.)*
+- [x] `PathError` enum: `NoOpenContour`, `UnclosedContour`, `EmptyContour`,
+      `DegenerateSegment`, `ZeroAreaContour`, `CloseNotAtStart`, plus compile-time
+      variants (`WindingRoleMismatch`, `HoleOutsideOuter`,
+      `SelfIntersection`(future)). `Display` + `std::error::Error` impls.
 
 ### Tasks — bezier segment types
 - [ ] `geom.rs`: add
@@ -246,17 +322,11 @@ segment types, compiled through a ruled (`LinearExtrusionSurface`) extrusion.
       type carries beziers and eval/deriv are correct). Add tests exercising a
       quadratic-bezier extrusion end-to-end (path → solid → mesh or struct count).
 - [ ] Update `py_bindings.rs` `PyPath2D` to the new builder API
-      (`move_to`/`quad_to`/`cubic_to`/etc.); update docstrings; regenerate stubs.
+      (`start_contour`/`quad_to`/`cubic_to`/etc.); update docstrings; regenerate stubs.
 
-### Open questions (resolve before implementing 0-b)
-- **0-b.Q1** Confirm the winding-check split: builder enforces "nonzero, definite
-  winding per contour"; compile (nesting) enforces "winding matches role (CCW outer /
-  CW hole)" and rejects on mismatch. Alternative: builder is fully winding-agnostic
-  and compile does all winding logic. Lean: the split above (builder catches the
-  cheap/structural winding errors early; compile does the role-aware check that needs
-  nesting).
-- **0-b.Q2** `Path2D::start(p)` ergonomics alias for single-contour paths — keep?
-- **0-b.Q3** Keep `line_to_close` convenience? (Lean yes.)
+### Open questions
+(none — all 0-b open questions resolved: Q1 winding split, Q2 builder API,
+Q3 close family, Q4 fallibility split.)
 
 ### Out of scope for 0-b
 - Fuzzy closure snap + self-intersection (need Context tolerance → 0-c / Phase 1).
@@ -316,6 +386,18 @@ rewritten, not patched.
 faces), not defining — a shell is fully defined by its faces+senses.
 
 ### Tasks — structs
+- [ ] **Rename `NodeBRep` → `SolidSet`** (lands *first* in 0-c, before the
+      side-table migration, so all subsequent work uses the final vocabulary).
+      Mechanical find-replace across `brep_kernel.rs`, `brep_compiler.rs`,
+      `mesher.rs`, `bool_ops.rs`, `py_bindings.rs`: `NodeBRep` → `SolidSet`,
+      `NodeBRepId` → `SolidSetId`, `push_node`/`get_node`/`get_mut_node` →
+      `push_solidset`/`get_solidset`/`get_mut_solidset` (and the `nodes` arena
+      field → `solidsets`). Primitive tests are the safety net and stay green.
+      *Design note:* the struct becomes `SolidSet { solids: Vec<SolidId>,
+      source_csg_id: u64 }` — `source_csg_id` is kept as a **defining** field
+      (provenance is identity, per the same rule that keeps `CsgSource`/`attr`
+      on `Face`). This aligns the code with `architecture.md`'s data-model
+      diagram, which already names the top-level struct `SolidSet`.
 - [ ] `brep_kernel.rs`: strip convenience fields:
       - `Face`: drop `shell` (→ `Context::shell_of_face`).
       - `Shell`: drop `solid` (→ `Context::solid_of_shell`); keep `faces` as defining
@@ -398,8 +480,9 @@ faces), not defining — a shell is fully defined by its faces+senses.
 ---
 
 ## Cross-cutting
-- Every sub-phase ends with `cargo +nightly check` + `cargo +nightly test` green and
-  `cargo +nightly fmt`.
+- Every sub-phase ends with `cargo check` + `cargo test` green and `cargo fmt`.
+  (Stable Rust, edition 2024 — no `+nightly` since 0-a; the former cross-cutting note
+  referenced nightly and is updated here.)
 - Validation channel (per roadmap): 2D paths via SVG export; 3D via STL/OBJ export
   (STL export is needed for Phase 5 anyway, reusable from Phase 2 onward). Add a
   throwaway SVG dump for Path2D in 0-b if it helps visualize glyph outlines — optional.

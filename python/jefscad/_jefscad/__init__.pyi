@@ -4,18 +4,48 @@
 import builtins
 import typing
 __all__ = [
+    "Mesh",
     "Node",
+    "Path2D",
     "cone",
     "cuboid",
     "cylinder",
     "difference",
     "intersection",
+    "path2d",
     "select_closest_to",
     "select_contains",
     "select_largest",
     "sphere",
     "union",
 ]
+
+@typing.final
+class Mesh:
+    r"""
+    A triangle mesh produced by tessellating a CSG solid.
+    
+    Obtain one via `Node.mesh(resolution=32)`. Export with `save_stl` or `save_obj`.
+    """
+    @property
+    def triangle_count(self) -> builtins.int:
+        r"""
+        Number of triangles in the mesh.
+        """
+    @property
+    def vertex_count(self) -> builtins.int:
+        r"""
+        Number of vertices in the mesh.
+        """
+    def save_stl(self, path: builtins.str) -> None:
+        r"""
+        Write the mesh to a binary STL file at `path`.
+        """
+    def save_obj(self, path: builtins.str) -> None:
+        r"""
+        Write the mesh to a Wavefront OBJ file at `path`.
+        """
+    def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class Node:
@@ -39,6 +69,17 @@ class Node:
         """
     def __repr__(self) -> builtins.str: ...
     def __str__(self) -> builtins.str: ...
+    def mesh(self, resolution: builtins.int = ...) -> Mesh:
+        r"""
+        Tessellate this node into a triangle mesh.
+        
+        Args:
+            resolution: Number of segments per full circle (default 32).
+                        Higher values give smoother curves at the cost of more triangles.
+        
+        Returns:
+            A `Mesh` object with `save_stl` and `save_obj` export methods.
+        """
     def translate(self, dx: builtins.float, dy: builtins.float, dz: builtins.float) -> Node:
         r"""
         Return a new Node translated by (dx, dy, dz).
@@ -66,6 +107,85 @@ class Node:
         Args:
             axis: Rotation axis as `[x, y, z]`. Need not be a unit vector; normalised internally.
             angle_rad: Rotation angle in radians.
+        """
+
+@typing.final
+class Path2D:
+    r"""
+    A 2-D path for use with `extrude` and `revolve`.
+    
+    For **extrusion** the path is in the X-Y plane: `u` = x, `v` = y.
+    For **revolution** the path is in the X-Z half-plane: `u` = radial distance, `v` = height.
+    
+    Build the path with the builder methods: `start_contour` opens a contour
+    (errors if the previous contour is still open), `line_to`/`arc_to` extend
+    the current contour, `close`/`line_to_close` close it.  Then call
+    `extrude(height)` or `revolve()` to obtain a `Node`.
+    """
+    @property
+    def n_contours(self) -> builtins.int:
+        r"""
+        Number of contours in the path.
+        """
+    @property
+    def current_pos(self) -> typing.Optional[tuple[builtins.float, builtins.float]]:
+        r"""
+        Current end-point of the last contour as `(u, v)`, or `None` if the
+        path is empty.
+        """
+    def __new__(cls) -> Path2D:
+        r"""
+        Create a new empty path (no contours).  Call `start_contour` to open
+        the first contour.
+        """
+    def __repr__(self) -> builtins.str: ...
+    def __str__(self) -> builtins.str: ...
+    def start_contour(self, u: builtins.float, v: builtins.float) -> Path2D:
+        r"""
+        Open a new contour starting at `(u, v)`.
+        
+        Raises `ValueError` if the previous contour is still open (non-empty
+        and not closed) — call `close()` or `line_to_close()` first.
+        """
+    def line_to(self, u: builtins.float, v: builtins.float) -> Path2D:
+        r"""
+        Append a straight segment to `(u, v)`.  Returns `self` for chaining.
+        
+        Panics (Rust) / raises (Python-side via the GIL panic hook) if no
+        contour is open — call `start_contour` first.
+        """
+    def arc_to(self, cu: builtins.float, cv: builtins.float, sweep: builtins.float) -> Path2D:
+        r"""
+        Append a circular arc sweeping `sweep` radians around `(cu, cv)`.
+        Positive sweep is CCW; negative is CW.  Returns `self` for chaining.
+        """
+    def close(self) -> Path2D:
+        r"""
+        Mark the current contour as closed without adding a segment.
+        
+        The caller must ensure `current_pos` is already bit-exactly at the
+        contour's start.  Raises `ValueError` otherwise, or if no contour is open.
+        """
+    def line_to_close(self) -> Path2D:
+        r"""
+        Append a straight segment back to the contour's start and mark it closed.
+        
+        Raises `ValueError` if no contour is open.
+        """
+    def extrude(self, height: builtins.float) -> Node:
+        r"""
+        Extrude this closed path by `height` along +Z, returning a `Node`.
+        
+        Raises `ValueError` if the path is not closed, has no segments,
+        `height` is non-positive, the path is geometrically open, or the path
+        has more than one contour (multi-contour nesting not yet supported).
+        """
+    def revolve(self) -> Node:
+        r"""
+        Revolve this profile 360° around the Z-axis, returning a `Node`.
+        
+        Raises `ValueError` if the path is empty, a knot has x < 0,
+        or the path is open with neither endpoint on the Z-axis.
         """
 
 def cone(r: builtins.float, h: builtins.float) -> Node:
@@ -97,6 +217,15 @@ def intersection(*children: typing.Any) -> Node:
     Return the intersection (common volume) of the given nodes: `intersection(a, b, c, ...)`.
     
     Raises `ValueError` if no nodes are provided.
+    """
+
+def path2d() -> Path2D:
+    r"""
+    Create a new empty 2-D path.
+    
+    Use the builder methods (`start_contour`, `line_to`, `arc_to`, `close`,
+    `line_to_close`) to define the path, then call `extrude(height)` or
+    `revolve()`.
     """
 
 def select_closest_to(node: Node, point: typing.Sequence[builtins.float]) -> Node:
