@@ -11,6 +11,7 @@ pub mod csg_lang;
 pub mod geom;
 pub mod linalg;
 mod mesher;
+pub mod pip2d;
 mod py_bindings;
 
 pub use csg_lang::{CsgNode, NodeRef, SelectPolicy};

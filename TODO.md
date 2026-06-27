@@ -314,13 +314,95 @@ segment types, compiled through a ruled (`LinearExtrusionSurface`) extrusion.
       No test exercised the bug before; the new bezier-contour `finish` tests guard it.
 
 ### Tasks — minimal pip2d
-- [ ] New module `jefscad/src/pip2d.rs` (or fold into `geom.rs` — lean separate module,
-      it's a standalone primitive per the roadmap's de-risking ethos).
-      `pip2d(point: Point2, outer: &[Point2] /* polygon vertices in order */) -> bool`
-      using even-odd ray casting (or scanline). Single level (no holes-within-holes
-      recursion) — sufficient for nesting via winding.
-- [ ] Inline tests on hand-built polygons (square, triangle, concave, point-on-edge
-      behavior documented).
+
+**API decision (locked this session):**
+
+- **Input shape: `&Contour` (segments), not `&[Point2]`.** Keeps curves analytic
+  (line/quadratic/cubic/arc all closed-form) — no creation-time sampling, preserving
+  the "circle is a circle" property at the topology level (motivation #1). The TODO's
+  earlier `// polygon vertices in order` comment was pre-decision and is superseded.
+- **Rule: even-odd ray casting.** Matches the committed Phase-1 full `pip2d`
+  design (`boolean-ops.md`'s "interior sample point via scanline pip2d in uv"); the
+  0-b minimal version is a subset (single level, no holes-within-holes recursion).
+  Nesting needs *geometric containment*, and we classify winding (CCW outer / CW
+  hole) separately at `finish`/compile time — so even-odd is the right rule, not
+  nonzero-winding.
+- **Retry strategy: deterministic fixed-sequence, no PRNG, no new crate dep.**
+  A `PIP2D_RAY_DIRECTIONS: [Point2; 4]` compile-time constant (primary =
+  `(1, 1/√2)` with an irrational slope to avoid axis-aligned degeneracies; plus 3
+  retry directions with distinct irrational slopes). Try each in turn; on
+  *detected* degeneracy (per-variant analytic check: ray tangent to the curve, or
+  crossing coincides with a segment endpoint within epsilon), retry the next.
+  Return the first non-degenerate answer; if all 4 are degenerate (pathological,
+  astronomically unlikely for real geometry), return `false` (documented
+  limitation — revisit if a real model hits it; the "bump the direction" logic
+  from conjugate-gradient-style algorithms is the fallback if retry ever proves
+  insufficient on real (non-hand-crafted) geometry).
+  - **Why deterministic over random:** randomness is the wrong tool for a
+    *characterizable* degeneracy. We know what went wrong (tangent / vertex
+    graze), so retry with a specifically-chosen deterministic escape direction.
+    Fully reproducible by construction (no state, no seed, bit-identical across
+    runs/platforms/test-orderings), and zero new dependencies.
+- **Return type: `bool` (infallible).** Nesting needs a definite in/out, not a
+  trinary (unlike PIS for boolean classification). The retry absorbs degeneracy.
+  Returns `false` for on-boundary points ("not strictly inside").
+- **Module: `jefscad/src/pip2d.rs` (separate).** Standalone, testable in
+  isolation per the roadmap's de-risking ethos; later extended by the Phase-1
+  full pip2d-with-holes (no wasted work — the 0-b version is the building block).
+- **Degeneracy-detection tolerance: small constant absolute epsilon (1e-12) for
+  0-b.** NOT the relative-tolerance model (that's 0-c's job). Documented as a 0-b
+  simplification; fine because inputs are engine-built (vertices are exact, not
+  intersection-produced). 0-c replaces this epsilon with `fuzzy_eq` + `ref_scale`.
+- **Per-segment curve-ray crossing (the implementation heart):** for each
+  `Curve2Kind` variant, a helper counts crossings of the ray
+  `R(t) = point + t * MAGIC_RAY_DIR` (t > 0) with that segment's curve:
+  - `Line2`: classic segment-vs-ray, exact.
+  - `CircularArc2`: ray-vs-circle (quadratic solve), keep roots in `[t0,t1]` and
+    ahead of `point` along the ray.
+  - `QuadraticBezier2`: substitute ray equation into the bezier's parametric form
+    → quadratic in the bezier's `t` (2 candidates).
+  - `CubicBezier2`: → cubic in the bezier's `t` (3 candidates); small
+    `solve_cubic` helper with carefully-tested degenerate-leading-coefficient
+    cases (→ quadratic/linear).
+  All analytic — "bezier stays a bezier," no sampling.
+
+```rust
+// jefscad/src/pip2d.rs
+
+/// Is `point` strictly inside the closed `contour`? Even-odd ray casting.
+///
+/// Walks the contour's [`Curve2Kind`] segments analytically (no sampling).
+/// Returns `false` for on-boundary points. See module/TODO for the full
+/// API decision (deterministic retry, even-odd rule, etc.).
+///
+/// # Panics
+/// Panics if `contour` is empty. The caller passes a closed, non-empty contour;
+/// `build_extrusion` only calls this on contours that passed `finish()`.
+pub fn pip2d(point: Point2, contour: &Contour) -> bool { ... }
+```
+
+- [x] New module `jefscad/src/pip2d.rs` with the API above. Per-segment curve-ray
+      crossing helpers; `PIP2D_RAY_DIRECTIONS` constant; detect-and-retry loop.
+      `lib.rs`: add `pub mod pip2d;`.
+- [x] Inline tests on hand-built contours (lines): square, triangle, concave
+      chevron (notch-in-triangle outside, main-body inside), point-on-edge-retry,
+      nested squares (outer's rep point not inside inner; inner's rep point inside
+      outer).
+- [x] Inline tests on curved contours: circle (arc) inside/outside/center;
+      quadratic-bezier "blob" inside/outside; cubic-bezier loop inside/outside;
+      polyline triangle inside/outside.
+- [x] Inline tests on degeneracy: point whose primary ray grazes a vertex → retry
+      fires deterministically, stable answer (both inside & outside cases); empty
+      contour → panic.
+      *Implementation notes:* per-segment crossing uses the `cross(Q−P, dir)=0`
+      formulation (single polynomial per curve type, ray-magnitude-independent).
+      `solve_quadratic` (Kahan-stable) + `solve_cubic` (depressed-cubic trig
+      method for 3-real-root case, Cardano for 1-real-root, degenerate-leading-
+      coefficient → quadratic). Degeneracy detection: tangent (double root /
+      discriminant≈0), endpoint-coincidence (root or crossing within `DEGEN_EPS`
+      of segment endpoint), point-on-curve (ray-parameter≈0). `Contour::new`/`push`
+      made `pub(crate)` so pip2d's tests can hand-build contours (and so the
+      nesting task can too).
 
 ### Tasks — extrusion compile (contour-set)
 - [ ] `build_extrusion` rewrite in `brep_compiler.rs`:

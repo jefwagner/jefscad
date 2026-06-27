@@ -1249,7 +1249,7 @@ pub struct Contour {
 
 impl Contour {
     /// Create a new empty contour beginning at `start`.
-    fn new(start: Point2) -> Self {
+    pub(crate) fn new(start: Point2) -> Self {
         Self {
             start,
             segments: Vec::new(),
@@ -1264,7 +1264,7 @@ impl Contour {
     }
 
     /// Push a segment, advancing `current_pos` to the segment's end.
-    fn push(&mut self, seg: Curve2Kind, end: Point2) {
+    pub(crate) fn push(&mut self, seg: Curve2Kind, end: Point2) {
         self.segments.push(seg);
         self.current_pos = end;
     }

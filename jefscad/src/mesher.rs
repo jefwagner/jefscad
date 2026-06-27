@@ -762,6 +762,28 @@ where
                     result.push((vid, uv));
                 }
             }
+            Curve2Kind::QuadraticBezier2(_) | Curve2Kind::CubicBezier2(_) => {
+                // Bézier edge: `resolution` samples, endpoint excluded — same
+                // sampling strategy as CircularArc2 (the curve is non-linear, so
+                // intermediate samples approximate it; k=0 is a B-rep corner).
+                let n  = opts.resolution as usize;
+                let dt = (t_end - t_start) / n as f64;
+                for k in 0..n {
+                    let t   = t_start + k as f64 * dt;
+                    let p   = pcurve.eval(t);
+                    let uv  = [p.u, p.v];
+                    let vid = if k == 0 {
+                        registry.get_or_insert_corner(corner_vid, dcel, || {
+                            make_vertex(uv, MeshVertexRef::Corner(corner_vid))
+                        })
+                    } else {
+                        registry.get_or_insert_edge(edge_id, t, dcel, || {
+                            make_vertex(uv, MeshVertexRef::OnEdge(edge_id))
+                        })
+                    };
+                    result.push((vid, uv));
+                }
+            }
             Curve2Kind::Polyline2(_) => todo!("UV sampling for Polyline2 not yet implemented"),
             Curve2Kind::Nurbs(_)     => todo!("UV sampling for NurbsCurve2 not yet implemented"),
         }
@@ -1130,6 +1152,15 @@ fn sample_loop_uvs(
             }
             Curve2Kind::CircularArc2(_) => {
                 // Curved edge: sample `resolution` points, endpoint excluded
+                let n = opts.resolution as usize;
+                let dt = (t_end - t_start) / n as f64;
+                for k in 0..n {
+                    let p = pcurve.eval(t_start + k as f64 * dt);
+                    uvs.push([p.u, p.v]);
+                }
+            }
+            Curve2Kind::QuadraticBezier2(_) | Curve2Kind::CubicBezier2(_) => {
+                // Bézier edge: sample `resolution` points, endpoint excluded
                 let n = opts.resolution as usize;
                 let dt = (t_end - t_start) / n as f64;
                 for k in 0..n {
