@@ -73,23 +73,24 @@ swaps in with zero call-site changes. Revisit with `cargo flamegraph` on a real 
 (it won't). `#[repr(transparent)]` is baked in for free so layout stays FFI-safe.
 
 ### Tasks
-- [ ] Create `jefscad/src/linalg.rs` with a `Mat4` newtype wrapping `[f64; 16]`
+- [x] Create `jefscad/src/linalg.rs` with a `Mat4` newtype wrapping `[f64; 16]`
       (row-major, column-vector / right-multiply convention — matches current code).
-      Members:
+      Members (final, see "API decision" above):
       - `pub const IDENTITY: Mat4`
-      - `Mat4::from_array([f64; 16]) -> Mat4`
+      - `Mat4::from_array([f64; 16]) -> Mat4` (`const`)
       - `Mat4::mat_mul(&self, &Mat4) -> Mat4` (compose transforms: `self · rhs`)
       - `Mat4::apply_pt(&self, Point3) -> Point3` (w=1, linear + translation)
       - `Mat4::apply_vec(&self, Point3) -> Point3` (w=0, linear part only)
-      - `Mat4::inverse(&self) -> Mat4` (panic on singular; reuse `mat4_inv_f64` logic)
-      - `Mat4::midpoint(&self) -> [f64; 16]` — *drop this*: with plain f64 there is no
-        interval; the newtype is already the value. Where current code calls
-        `.midpoint()` (brep_compiler transform application, predicates), just access
-        the inner array. Keep an `as_array(&self) -> &[f64; 16]` accessor instead.
-      - `Mat4::is_identity(&self) -> bool` (within 1e-12, replaces `is_identity` in
-        brep_compiler) — *or* keep the quantize-and-compare version from csg_lang.
-        Decide: simple eps-compare is fine since these are engine-built matrices.
-- [ ] `jefscad/src/lib.rs`: add `mod linalg;` (and `pub(crate)` as needed).
+      - `Mat4::inverse(&self) -> Mat4` (panics on singular; ports `mat4_inv_f64` from
+        `predicates.rs`; doc-notes a future `Result` split for STEP import)
+      - `Mat4::as_array(&self) -> &[f64; 16]` (replaces the dropped `midpoint()`;
+        documented as not-for-hot-loops so a future SIMD swap is zero-cost)
+      - `Mat4::is_identity(&self) -> bool` — quantize-and-compare-to-identity at
+        `IDENTITY_QUANT_SCALE = 1e12` (distinct from the 1e6 hash scale; see API
+        decision). 19 unit tests in `linalg.rs`.
+      - Constructors `mat_translation`/`mat_scale`/`mat_rot_aa` (free functions,
+        ported verbatim from `csg_lang` so behaviour is unchanged on swap-in).
+- [x] `jefscad/src/lib.rs`: add `pub mod linalg;`.
 - [ ] `jefscad/src/csg_lang.rs`:
       - Replace `use flint::{FlintArray, IDENTITY_4X4};` with the new `Mat4`.
       - `CsgNode::flat_transform: FlintArray<f64, 16>` → `Mat4`.
@@ -108,12 +109,19 @@ swaps in with zero call-site changes. Revisit with `cargo flamegraph` on a real 
       - `is_identity(transform)` → `transform.is_identity()`.
       - Update the `IDENTITY_4X4` test fixture at ~line 2102/2108 to `Mat4::IDENTITY`
         / `Mat4::from_array(transform)`.
-- [ ] `jefscad/src/predicates.rs`: **delete the file**; remove `mod predicates;` and
-      `pub mod predicates;` from `lib.rs`. First move `mat4_inv_f64` onto `Mat4::inverse`.
-- [ ] `jefscad/Cargo.toml`: remove `flint = { path = "../flint" }`.
-- [ ] `cargo +nightly check` clean; `cargo +nightly test` green (existing primitive
-      + csg_lang tests are the safety net).
-- [ ] `cargo +nightly fmt`.
+- [x] `jefscad/src/predicates.rs`: **delete the file**; remove `mod predicates;` and
+      `pub mod predicates;` from `lib.rs`. (`mat4_inv_f64` moved onto `Mat4::inverse`.
+      File was genuinely dead — `classify_node`/`Classification` had no callers; the
+      abandoned pervasive-interval direction.)
+- [x] `jefscad/Cargo.toml`: remove `flint = { path = "../flint" }`.
+- [x] `cargo test` clean on **stable Rust** (jefscad no longer needs `+nightly` —
+      flint was the only nightly-feature consumer). Existing primitive + csg_lang
+      tests are the safety net and stayed green throughout.
+- [ ] `cargo fmt` — **deferred**. The codebase has pre-existing rustfmt drift across
+      many files (predating this work); running `cargo fmt` reformats the whole crate
+      and buries the migration edits. Tracked as a separate housekeeping commit after
+      the flint crate is spun out (the flint files would otherwise be reformatted
+      pointlessly).
 
 ### Out of scope for 0-a
 - Shewchuk predicates (future, on-demand).

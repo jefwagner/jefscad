@@ -6,7 +6,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use crate::geom::{Curve2Kind, Path2D};
-use flint::{FlintArray, IDENTITY_4X4};
+use crate::linalg::{Mat4, QUANTIZE_SCALE};
 
 // ---------------------------------------------------------------------------
 // Float formatting helper
@@ -60,7 +60,7 @@ pub struct CsgNode {
     /// Application: p' = M · p  (matrix left-multiplies column vector).
     /// Chaining: right-multiply each new transform — M_new = M_old · T.
     /// The bottom row is always [0, 0, 0, 1]; translations live in column 3.
-    pub(crate) flat_transform: FlintArray<f64, 16>,
+    pub(crate) flat_transform: Mat4,
     /// Optional metadata to attach to the CSG node
     pub(crate) meta: Option<Arc<CsgMetadata>>,
 }
@@ -342,48 +342,9 @@ fn branch_strs(prefix: &str, is_last: bool) -> (String, String) {
 // Matrix helpers (row-major, right-multiply convention)
 // ---------------------------------------------------------------------------
 
-/// Build the 4×4 matrix for a Translation transform.
-/// Row-major, column-vector convention: deltas go in column 3.
-#[rustfmt::skip]
-fn mat_translation(dx: f64, dy: f64, dz: f64) -> FlintArray<f64, 16> {
-    FlintArray::from_f64([
-        1.0, 0.0, 0.0, dx,
-        0.0, 1.0, 0.0, dy,
-        0.0, 0.0, 1.0, dz,
-        0.0, 0.0, 0.0, 1.0,
-    ])
-}
-
-/// Build the 4×4 matrix for a non-uniform Scale transform.
-#[rustfmt::skip]
-fn mat_scale(sx: f64, sy: f64, sz: f64) -> FlintArray<f64, 16> {
-    FlintArray::from_f64([
-        sx,  0.0, 0.0, 0.0,
-        0.0, sy,  0.0, 0.0,
-        0.0, 0.0, sz,  0.0,
-        0.0, 0.0, 0.0, 1.0,
-    ])
-}
-
-/// Build the 4×4 rotation matrix for an arbitrary axis/angle (Rodrigues' formula).
-/// `axis` is normalised internally; `angle` is in radians (right-hand rule).
-fn mat_rot_aa(axis: [f64; 3], angle: f64) -> FlintArray<f64, 16> {
-    let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
-    let [ux, uy, uz] = [axis[0] / len, axis[1] / len, axis[2] / len];
-
-    let c = angle.cos();
-    let s = angle.sin();
-    let t = 1.0 - c; // (1 - cos θ)
-
-    #[rustfmt::skip]
-    let arr = [
-        c + ux*ux*t,       ux*uy*t - uz*s,   ux*uz*t + uy*s,   0.0,
-        uy*ux*t + uz*s,    c + uy*uy*t,       uy*uz*t - ux*s,   0.0,
-        uz*ux*t - uy*s,    uz*uy*t + ux*s,    c + uz*uz*t,       0.0,
-        0.0,               0.0,               0.0,               1.0,
-    ];
-    FlintArray::from_f64(arr)
-}
+// Transform-matrix constructors live in `linalg`; re-export here so the existing
+// call sites (`mat_translation(...)` etc.) keep working unchanged.
+use crate::linalg::{mat_translation, mat_scale, mat_rot_aa};
 
 // ---------------------------------------------------------------------------
 // Matrix quantization and identity check
@@ -391,18 +352,19 @@ fn mat_rot_aa(axis: [f64; 3], angle: f64) -> FlintArray<f64, 16> {
 
 /// Scale factor for converting f64 matrix entries to i64 buckets.
 /// Noise smaller than `1 / QUANTIZE_SCALE` (i.e. < 1e-6) is absorbed by rounding,
-/// while values differing by ≥ 1e-6 produce distinct integers.
-const QUANTIZE_SCALE: f64 = 1e6;
+// `QUANTIZE_SCALE` is re-exported from `linalg` (single source of truth).
 
-/// Quantize a 4×4 interval matrix to i64 by scaling and rounding the lb of each entry.
-/// Used to build geometry hashes that are stable under floating-point noise.
-/// For transforms built from exact f64 inputs lb == ub, so using lb is exact.
-fn quantize_matrix(mat: &FlintArray<f64, 16>) -> [i64; 16] {
-    mat.lb.map(|v| (v * QUANTIZE_SCALE).round() as i64)
+/// Quantize a 4×4 matrix to i64 by scaling and rounding each entry. Used to build
+/// geometry hashes that are stable under floating-point noise (1e-6 lattice —
+/// deliberately coarse so near-identical engine-built matrices canonicalize to the
+/// same id). Distinct from `Mat4::is_identity`, which uses a tighter 1e-12 lattice
+/// for the identity test (see `linalg::IDENTITY_QUANT_SCALE`).
+fn quantize_matrix(mat: &Mat4) -> [i64; 16] {
+    mat.as_array().map(|v| (v * QUANTIZE_SCALE).round() as i64)
 }
 
-fn is_identity_transform(mat: &FlintArray<f64, 16>) -> bool {
-    quantize_matrix(mat) == quantize_matrix(&IDENTITY_4X4)
+fn is_identity_transform(mat: &Mat4) -> bool {
+    mat.is_identity()
 }
 
 // ---------------------------------------------------------------------------
@@ -628,7 +590,7 @@ impl CsgNode {
             prov_id: next_prov_id(),
             base: CsgBaseNode::Prim(prim),
             transforms: Vec::new(),
-            flat_transform: IDENTITY_4X4,
+            flat_transform: Mat4::IDENTITY,
             meta: None,
         };
         node.geom_id = CanonicalCsgNodeView::from_node(&node).geom_id();
@@ -637,7 +599,7 @@ impl CsgNode {
 
     /// Return a new node that is `self` with `t` appended to the transform stack.
     /// `mat` is the 4×4 matrix for `t`; the new flat_transform = self.flat_transform · mat.
-    fn with_transform(&self, t: AffineTransform, mat: FlintArray<f64, 16>) -> NodeRef {
+    fn with_transform(&self, t: AffineTransform, mat: Mat4) -> NodeRef {
         let mut transforms = self.transforms.clone();
         transforms.push(t);
         let mut node = CsgNode {
@@ -660,7 +622,7 @@ impl CsgNode {
             prov_id: next_prov_id(),
             base: CsgBaseNode::Op(op),
             transforms: Vec::new(),
-            flat_transform: IDENTITY_4X4,
+            flat_transform: Mat4::IDENTITY,
             meta: None,
         };
         node.geom_id = CanonicalCsgNodeView::from_node(&node).geom_id();
@@ -815,11 +777,13 @@ mod test {
         0.0, 0.0, 0.0, 1.0,
     ];
 
-    /// Compare two interval transforms by their midpoints.
-    fn mat_approx_eq(a: &FlintArray<f64, 16>, b: &FlintArray<f64, 16>) -> bool {
-        let mida = a.midpoint();
-        let midb = b.midpoint();
-        mida.iter().zip(midb.iter()).all(|(x, y)| (x - y).abs() < EPS)
+    /// Compare two transforms entry-wise (within EPS). With plain f64 the entries
+    /// are the values directly (no interval midpoint to extract).
+    fn mat_approx_eq(a: &Mat4, b: &Mat4) -> bool {
+        a.as_array()
+            .iter()
+            .zip(b.as_array().iter())
+            .all(|(x, y)| (x - y).abs() < EPS)
     }
 
     // -----------------------------------------------------------------------
@@ -877,7 +841,7 @@ mod test {
     #[test]
     fn fresh_node_has_identity_flat_transform() {
         let n = CsgNode::sphere(1.0);
-        assert!(mat_approx_eq(&n.flat_transform, &FlintArray::from_f64(IDENTITY)));
+        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(IDENTITY)));
     }
 
     #[test]
@@ -908,7 +872,7 @@ mod test {
             0.0, 0.0, 1.0, 4.0,
             0.0, 0.0, 0.0, 1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &FlintArray::from_f64(expected)));
+        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
     }
 
     #[test]
@@ -921,7 +885,7 @@ mod test {
             0.0, 0.0, 4.0, 0.0,
             0.0, 0.0, 0.0, 1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &FlintArray::from_f64(expected)));
+        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
     }
 
     #[test]
@@ -939,7 +903,7 @@ mod test {
             0.0,  1.0,  0.0,  0.0,
             0.0,  0.0,  0.0,  1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &FlintArray::from_f64(expected)));
+        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
     }
 
     #[test]
@@ -957,7 +921,7 @@ mod test {
             -1.0,  0.0,  0.0,  0.0,
              0.0,  0.0,  0.0,  1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &FlintArray::from_f64(expected)));
+        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
     }
 
     #[test]
@@ -975,7 +939,7 @@ mod test {
             0.0,  0.0,  1.0,  0.0,
             0.0,  0.0,  0.0,  1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &FlintArray::from_f64(expected)));
+        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
     }
 
     #[test]
@@ -1007,7 +971,7 @@ mod test {
     fn transform_does_not_mutate_original() {
         let original = CsgNode::sphere(1.0);
         let _translated = original.translate(1.0, 0.0, 0.0);
-        assert!(mat_approx_eq(&original.flat_transform, &FlintArray::from_f64(IDENTITY)));
+        assert!(mat_approx_eq(&original.flat_transform, &Mat4::from_array(IDENTITY)));
         assert!(original.transforms.is_empty());
     }
 
@@ -1053,7 +1017,7 @@ mod test {
             0.0, 0.0, 2.0, 3.0,
             0.0, 0.0, 0.0, 1.0,
         ];
-        assert!(mat_approx_eq(&n.flat_transform, &FlintArray::from_f64(expected)));
+        assert!(mat_approx_eq(&n.flat_transform, &Mat4::from_array(expected)));
     }
 
     // -----------------------------------------------------------------------
@@ -1063,7 +1027,7 @@ mod test {
     #[test]
     fn quantize_identity_gives_expected_integers() {
         // 1.0 → QUANTIZE_SCALE (as i64), 0.0 → 0
-        let q = quantize_matrix(&IDENTITY_4X4);
+        let q = quantize_matrix(&Mat4::IDENTITY);
         let s = QUANTIZE_SCALE as i64;
         #[rustfmt::skip]
         let expected: [i64; 16] = [
@@ -1111,7 +1075,8 @@ mod test {
     fn quantize_noise_below_precision_is_stable() {
         // Noise smaller than 1/QUANTIZE_SCALE (= 1e-6) must not affect the result
         let clean = mat_translation(1.0, 1.0, 1.0);
-        let noisy = FlintArray::from_f64(clean.midpoint().map(|v| v + 1e-10));
+        let noisy_arr: [f64; 16] = clean.as_array().map(|v| v + 1e-10);
+        let noisy = Mat4::from_array(noisy_arr);
         assert_eq!(quantize_matrix(&clean), quantize_matrix(&noisy));
     }
 
@@ -1162,7 +1127,7 @@ mod test {
     #[test]
     fn union_has_identity_flat_transform() {
         let u = CsgNode::union(vec![CsgNode::sphere(1.0), CsgNode::sphere(2.0)]);
-        assert!(mat_approx_eq(&u.flat_transform, &FlintArray::from_f64(IDENTITY)));
+        assert!(mat_approx_eq(&u.flat_transform, &Mat4::from_array(IDENTITY)));
     }
 
     #[test]
@@ -1240,7 +1205,7 @@ mod test {
     #[test]
     fn difference_has_identity_flat_transform() {
         let d = CsgNode::difference(CsgNode::cuboid(2.0, 2.0, 2.0), vec![CsgNode::sphere(0.5)]);
-        assert!(mat_approx_eq(&d.flat_transform, &FlintArray::from_f64(IDENTITY)));
+        assert!(mat_approx_eq(&d.flat_transform, &Mat4::from_array(IDENTITY)));
     }
 
     #[test]
@@ -1429,7 +1394,7 @@ mod test {
         let _step2 = step1.rot_x(PI / 4.0);
 
         // base: identity, empty stack
-        assert!(mat_approx_eq(&base.flat_transform, &FlintArray::from_f64(IDENTITY)));
+        assert!(mat_approx_eq(&base.flat_transform, &Mat4::from_array(IDENTITY)));
         assert!(base.transforms.is_empty());
 
         // step1: only translation, stack length 1
@@ -1440,7 +1405,7 @@ mod test {
             0.0, 0.0, 1.0, 0.0,
             0.0, 0.0, 0.0, 1.0,
         ];
-        assert!(mat_approx_eq(&step1.flat_transform, &FlintArray::from_f64(t_expected)));
+        assert!(mat_approx_eq(&step1.flat_transform, &Mat4::from_array(t_expected)));
         assert_eq!(step1.transforms.len(), 1);
     }
 

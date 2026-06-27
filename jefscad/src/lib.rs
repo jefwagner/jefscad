@@ -4,14 +4,13 @@ use pyo3::prelude::*;
 #[cfg(feature = "extension-module")]
 use pyo3_stub_gen;
 
-mod brep_kernel;
-pub(crate) mod brep_compiler;
 mod bool_ops;
+pub(crate) mod brep_compiler;
+mod brep_kernel;
 pub mod csg_lang;
 pub mod geom;
 pub mod linalg;
 mod mesher;
-pub mod predicates;
 mod py_bindings;
 
 pub use csg_lang::{CsgNode, NodeRef, SelectPolicy};

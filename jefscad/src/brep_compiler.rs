@@ -10,11 +10,11 @@
 //! populates the arena with all geometry and topology, and returns the [`SolidId`] of
 //! the resulting solid.
 
-use flint::{FlintArray, IDENTITY_4X4};
 use crate::brep_kernel::{
     CoEdge, Edge, Face, FaceSense, Loop, LoopId, Orientation, ProvenanceData,
     Shell, Solid, SolidId, SolidModelingContext, Vertex,
 };
+use crate::linalg::Mat4;
 use crate::geom::{
     CircularArc2, CircularArc3, ConicalSurface, Curve2, Curve2Kind, Curve3Kind, CylindricalSurface,
     Line2, Line3, LinearExtrusionSurface, Path2D, Plane, Point2, Point3, Polyline3,
@@ -1186,7 +1186,7 @@ pub fn build_revolution(
 pub fn compile_primitive(
     ctx: &mut SolidModelingContext,
     prim: &crate::csg_lang::CsgPrimitive,
-    transform: &FlintArray<f64, 16>,
+    transform: &Mat4,
     prov_id: u64,
     geom_id: u64,
 ) -> SolidId {
@@ -1212,15 +1212,15 @@ pub fn compile_primitive(
     };
 
     // Skip the walk when the transform is the identity.
-    if is_identity(transform) {
+    if transform.is_identity() {
         return solid_id;
     }
 
     // ── Extract linear part and translation ───────────────────────────────────
     // Row-major layout: row i, col j → index i*4 + j.
     // Linear part M (3×3) is the top-left block; translation d is column 3, rows 0-2.
-    // Use midpoint of each interval element for geometry operations.
-    let mat = transform.midpoint();
+    // Read the row-major array directly (plain f64 — no interval midpoint to extract).
+    let mat = transform.as_array();
     let m = |r: usize, c: usize| mat[r * 4 + c];
     let d = Point3::new(m(0, 3), m(1, 3), m(2, 3));
 
@@ -1370,11 +1370,7 @@ fn scale_lateral_pcurves(
     }
 }
 
-/// Returns `true` if `transform` is the 4×4 identity matrix (within 1e-12).
-fn is_identity(transform: &FlintArray<f64, 16>) -> bool {
-    let mid = transform.midpoint();
-    mid.iter().zip(IDENTITY_4X4.lb.iter()).all(|(a, b)| (a - b).abs() < 1e-12)
-}
+// `is_identity` is now `Mat4::is_identity` (linalg) — collapse this local wrapper.
 
 // ── compile_csg_node ──────────────────────────────────────────────────────────
 
@@ -2105,13 +2101,13 @@ mod test {
     /// Compile with identity transform, forwarding prov/geom ids.
     fn compile(prim: CsgPrimitive) -> (SolidModelingContext, SolidId) {
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_primitive(&mut ctx, &prim, &IDENTITY_4X4, 7, 42);
+        let sid = compile_primitive(&mut ctx, &prim, &Mat4::IDENTITY, 7, 42);
         (ctx, sid)
     }
 
     /// Compile with an explicit transform given as a plain [f64;16]; prov/geom ids are zeroed.
     fn compile_with(prim: CsgPrimitive, transform: [f64; 16]) -> (SolidModelingContext, SolidId) {
-        let t = FlintArray { lb: transform, ub: transform };
+        let t = Mat4::from_array(transform);
         let mut ctx = SolidModelingContext::new();
         let sid = compile_primitive(&mut ctx, &prim, &t, 0, 0);
         (ctx, sid)
