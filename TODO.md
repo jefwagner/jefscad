@@ -35,6 +35,43 @@ today and are handled separately.
   a standalone, no-longer-depended-on crate (housekeeping: optionally delete it outright
   later; not part of 0-a scope).
 
+### API decision (locked this session)
+Resolved the open questions on the `Mat4` interface before implementing:
+
+- **`apply_pt`/`apply_vec` take and return `Point3`** (not `[f64; 3]`). Lean on the
+  type system to prevent point/vector confusion. `linalg → geom` is a one-directional,
+  harmless dependency (`Point3` is a plain `{x,y,z}` struct with no back-edge).
+- **`mat_mul(&self, &Mat4) -> Mat4` takes by reference**, not by value. 16 × 64-bit =
+  128 bytes is clearly over the copy-by-value threshold. (Rule of thumb recorded: take
+  by ref for arrays ≥ ~4 × f64; revisit line per-type as they come up.)
+- **`inverse()` panics on singular** (engine-built affine transforms are always
+  invertible; a singular matrix is a programmer error, not a runtime condition).
+  *Note in the doc-comment:* revisit as `Result`/`Option` when STEP import of arbitrary
+  external matrices lands — those can legitimately be singular.
+- **`is_identity()` uses the quantize-and-compare-to-identity pattern** (not
+  `fuzzy_eq`/`Tolerance` — pulling that in would force the tolerance model in 0-a, which
+  0-c owns). **Two quantize scales, both the quantize pattern, labeled by purpose:**
+  - `QUANTIZE_SCALE = 1e6` (status quo) for geom-id hashing — deliberately coarse to
+    canonicalize near-identical matrices to the same id.
+  - `IDENTITY_QUANT_SCALE = 1e12` (new) for the identity test — tight enough that a
+    real sub-micron translation (e.g. a user's sliver-avoidance offset, motivation
+    #3) is *not* swallowed as "no transform". The 1e6 hash scale is too coarse for
+    this purpose; reusing it for identity would be a correctness bug.
+  Both scales are named constants with comments explaining their distinct jobs.
+
+### SIMD recommendation (decision: defer)
+Build `Mat4` as plain `[f64; 16]` now. Do **not** design for SIMD in 0-a. Reasoning:
+the call-site profile (handful of `mat_mul`s during CSG-tree build, one
+`apply_pt`/`apply_vec` pass per `compile_primitive`) is not hot-loop; 4×4 matmul is
+~64 flops and not the bottleneck even in the boolean/mesher paths (geometry
+classification — ray-surface, PIS — dominates). f64-wide SIMD on x86 is awkward
+(AVX-512 only for clean 4-wide; AVX2 gets 2-wide) and would re-import a nightly
+feature gate — the exact dependency 0-a removes. The method-based interface
+(`apply_pt`/`mat_mul`/etc., inner array private) means a future SIMD-backed `Mat4`
+swaps in with zero call-site changes. Revisit with `cargo flamegraph` on a real model
+*after* Phase 2 booleans work end-to-end — only if matrix math shows up as a hot spot
+(it won't). `#[repr(transparent)]` is baked in for free so layout stays FFI-safe.
+
 ### Tasks
 - [ ] Create `jefscad/src/linalg.rs` with a `Mat4` newtype wrapping `[f64; 16]`
       (row-major, column-vector / right-multiply convention — matches current code).

@@ -8,8 +8,9 @@ mod brep_kernel;
 pub(crate) mod brep_compiler;
 mod bool_ops;
 pub mod csg_lang;
-mod geom;
-pub mod mesher;
+pub mod geom;
+pub mod linalg;
+mod mesher;
 pub mod predicates;
 mod py_bindings;
 

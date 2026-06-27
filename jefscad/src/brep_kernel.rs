@@ -1,3 +1,8 @@
+// Phase-0 staging: the b-rep kernel structs and Context side-tables are not yet
+// wired into the public Python API. Phase 0-c migrates them to defining-only structs
+// with Context side-tables; remove this allow once the kernel is wired up.
+#![allow(dead_code)]
+
 //! Boundary-representation kernel: topological types and the modeling context arena.
 //!
 //! This module contains the topological layer of the B-rep kernel. Geometric types

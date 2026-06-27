@@ -1,3 +1,9 @@
+// Phase-0 staging: the tessellation pipeline (HalfEdgeMesh, TriMesh, mesh_*
+// functions, STL/OBJ writers) is not yet wired into the public Python API and is
+// slated for rewrite in a later phase (per Phase 0-c notes: mesher will be
+// substantially rewritten anyway). Remove this allow once the mesh path is wired up.
+#![allow(dead_code)]
+
 //! Tessellation: converts B-rep solids into triangle meshes.
 
 use crate::brep_kernel::{EdgeId, FaceId, FaceSense, LoopId, Orientation, SolidId, SolidModelingContext, VertexId};
