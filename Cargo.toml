@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "flint",
     "jefscad",
 ]
 resolver = "2"

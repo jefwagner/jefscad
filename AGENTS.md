@@ -83,28 +83,23 @@ repo root/
 └── AGENTS.md                # this file
 ```
 
-### Phase 0 in flight
+### Phase 0 (0-a complete)
 
-The project is mid-refactor. Phase 0 (see `ROADMAP.md` → Phase 0, and
-`architecture/` for the detailed breakdown) is the foundation refactor. Its first
-sub-step **0-a** removes the `flint` dependency from this repo:
+The project's foundation refactor is Phase 0 (see `ROADMAP.md` → Phase 0, and
+`architecture/` for the detailed breakdown). **Sub-step 0-a is complete:**
 
-- The standalone `flint/` crate (rounded floating-point interval arithmetic, nightly
-  Rust) is being **spun out to its own independent repository**. It stays buildable in
-  isolation but is no longer a dependency of `jefscad`.
-- `jefscad` itself uses **no nightly features**; once `flint` is removed the toolchain
-  is **stable Rust, edition 2024** (no more `cargo +nightly`).
-- `jefscad/src/predicates.rs` is dead code (the abandoned pervasive-interval direction)
-  and is deleted in 0-a; its `mat4_inv_f64` helper is preserved as `Mat4::inverse` in a
-  new `linalg.rs`.
+- The standalone `flint` crate (rounded floating-point interval arithmetic, nightly
+  Rust) has been **spun out to its own independent repository** and is no longer in
+  this workspace or a dependency of `jefscad`.
+- `jefscad` uses **no nightly features**; the toolchain is **stable Rust, edition
+  2024** — plain `cargo`, no `+nightly` anywhere.
+- `jefscad/src/predicates.rs` (dead code, the abandoned pervasive-interval direction)
+  was deleted in 0-a; its `mat4_inv_f64` helper is preserved as `Mat4::inverse` in
+  `linalg.rs`.
 
-Until 0-a lands, `cargo +nightly` is still required because `jefscad` still depends on
-`flint`. After 0-a, drop the `+nightly` everywhere. The build commands below are written
-for the **target (stable)** state; prefix `+nightly` only while the `flint` dependency
-remains.
-
-The `_AGENTS.md` file (the renamed former `AGENTS.md`) is the `flint`-specific guidance
-being kept for the spin-out; it is **not** authoritative for this repo once 0-a lands.
+The remaining Phase 0 work is **0-b** (Path2D contour-set + beziers + ruled surface)
+and **0-c** (b-rep defining-only structs + Context side-tables + relative tolerance).
+`TODO.md` tracks the current actionable items.
 
 ---
 
@@ -127,7 +122,6 @@ maturin develop --features extension-module   # recompile + reinstall the .so in
 
 # Run Rust unit tests (no Python linking required — extension-module feature is optional):
 cargo test
-# (pre-0-a only: cargo +nightly test)
 
 # Run Python tests:
 pytest -v
@@ -158,9 +152,9 @@ sphinx-build -b html docs/ docs/_build/html/
 - **`extension-module` is an optional pyo3 feature** in `jefscad/Cargo.toml`. This means
   `cargo test` works **without linking against Python at all** — Rust unit tests run
   standalone. Only `maturin develop` activates the feature.
-- **No `rust-toolchain.toml`** in the repo. Pre-0-a you must use `cargo +nightly`
-  (flint needs `portable_simd` / `macro_metavar_expr`). Post-0-a plain `cargo` on stable
-  is correct.
+- **No `rust-toolchain.toml`** in the repo. `jefscad` targets stable Rust, edition
+  2024 — plain `cargo` everywhere. (The former `flint` workspace member was the only
+  nightly consumer; it has been spun out to its own repo as part of Phase 0-a.)
 - `.venv/` and the compiled `.so` are gitignored; every fresh clone needs the one-time
   setup in `DEVELOPMENT.md` (`uv venv`, `uv pip install ...`, `maturin develop`).
 
@@ -334,8 +328,9 @@ from here.
 
 ## Things to Avoid
 
-- Do not run `cargo build` / `cargo test` with `+nightly` once Phase 0-a has landed —
-  `jefscad` is stable-Rust. (Pre-0-a, `+nightly` is still required because of `flint`.)
+- Do not run `cargo build` / `cargo test` with `+nightly` — `jefscad` is stable-Rust
+  (edition 2024). The former `flint` crate was the only nightly consumer and has been
+  spun out to its own repo.
 - Do not modify `architecture/` design narrative as a side-effect of an implementation
   task unless the task genuinely changes the design — then update it deliberately.
 - Do not rewrite integration tests (cross-module / `tests/` / `jefscad/tests/`) during a

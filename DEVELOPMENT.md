@@ -9,7 +9,7 @@ work interactively in Jupyter.
 |------|------|
 | `uv` | Creates and manages the Python virtualenv and Python dependencies |
 | `maturin` | Compiles the Rust extension and installs it as a Python package |
-| Rust nightly | Required by `flint` (`portable_simd`, `macro_metavar_expr`) |
+| Rust (stable) | Builds `jefscad` (edition 2024; no nightly features) |
 | `pytest` | Python test runner |
 | `jupyterlab` | Interactive notebook server |
 
@@ -39,7 +39,6 @@ repo root/
 │       ├── csg_lang.rs         # CSG AST types and constructors
 │       ├── py_bindings.rs      # pyo3 Python bindings
 │       └── bin/stub_gen.rs     # generates _jefscad/__init__.pyi
-└── flint/                      # Rust interval arithmetic library
 ```
 
 **How the two layers fit together:**
@@ -48,7 +47,7 @@ implementation detail). `python/jefscad/__init__.py` imports from `._jefscad` an
 re-exports the public API, so callers write `import jefscad; jefscad.sphere(...)`.
 
 The `extension-module` pyo3 feature is *optional* in `jefscad/Cargo.toml`, which
-means `cargo +nightly test` works without linking against Python at all.
+means `cargo test` works without linking against Python at all.
 
 ---
 
@@ -96,7 +95,7 @@ It typically takes a few seconds for incremental builds.
 ### Run Rust unit tests (no Python required)
 
 ```bash
-cargo +nightly test
+cargo test
 ```
 
 ### Run Python tests
@@ -202,7 +201,7 @@ python -m http.server 8080 --directory docs/_build/html/
 ### Rebuilding the Rust API docs
 
 ```bash
-cargo +nightly doc --no-deps --features extension-module
+cargo doc --no-deps --features extension-module
 # opens target/doc/_jefscad/index.html
 ```
 
@@ -211,7 +210,7 @@ cargo +nightly doc --no-deps --features extension-module
 Run after any change to the public Python API (new functions, changed signatures):
 
 ```bash
-cargo +nightly run --bin stub_gen --features extension-module
+cargo run --bin stub_gen --features extension-module
 # writes python/jefscad/_jefscad/__init__.pyi
 ```
 
@@ -224,9 +223,10 @@ Every new clone requires the one-time setup above. The compiled `.so`
 (`python/jefscad/_jefscad.cpython-*.so`) is also gitignored and regenerated
 by `maturin develop`.
 
-**Always use `cargo +nightly`**
-There is no `rust-toolchain.toml` in this repo. Omitting `+nightly` will use
-stable Rust, which does not support the features required by `flint`.
+**Use stable `cargo`**
+There is no `rust-toolchain.toml` in this repo; `jefscad` builds on stable Rust
+(edition 2024, no nightly features). The former `flint` workspace member was the
+only nightly consumer and has been spun out to its own repo (Phase 0-a).
 
 **Editable installs and the `.pth` file**
 `maturin develop` installs a `.pth` file in `.venv/lib/.../site-packages/`

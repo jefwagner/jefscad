@@ -115,11 +115,11 @@ cargo test                                    # Rust unit tests (no Python linki
 pytest -v                                      # Python tests
 ```
 
-**Toolchain note:** `jefscad` targets stable Rust, edition 2024. (A standalone `flint`
-crate — rounded floating-point interval arithmetic — was co-developed in this workspace
-and required nightly Rust; it is being spun out to its own repository as part of the
-Phase 0 foundation refactor. Once that migration lands, no `+nightly` is needed
-anywhere. See `ROADMAP.md` → Phase 0.)
+**Toolchain note:** `jefscad` builds on stable Rust, edition 2024 (no nightly
+features). A standalone `flint` crate — rounded floating-point interval arithmetic —
+was co-developed in this workspace and required nightly Rust; it has been spun out to
+its own repository as part of the Phase 0 foundation refactor. See `ROADMAP.md` →
+Phase 0.
 
 ---
 

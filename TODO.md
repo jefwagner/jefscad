@@ -91,7 +91,7 @@ swaps in with zero call-site changes. Revisit with `cargo flamegraph` on a real 
       - Constructors `mat_translation`/`mat_scale`/`mat_rot_aa` (free functions,
         ported verbatim from `csg_lang` so behaviour is unchanged on swap-in).
 - [x] `jefscad/src/lib.rs`: add `pub mod linalg;`.
-- [ ] `jefscad/src/csg_lang.rs`:
+- [x] `jefscad/src/csg_lang.rs`:
       - Replace `use flint::{FlintArray, IDENTITY_4X4};` with the new `Mat4`.
       - `CsgNode::flat_transform: FlintArray<f64, 16>` → `Mat4`.
       - `mat_translation`/`mat_scale`/`mat_rot_aa` return `Mat4` (build via `from_array`).
@@ -101,7 +101,10 @@ swaps in with zero call-site changes. Revisit with `cargo flamegraph` on a real 
         directly — for engine-built transforms lb==ub==value so semantics unchanged.)
       - Update all tests using `FlintArray::from_f64(IDENTITY)` → `Mat4::IDENTITY` /
         `Mat4::from_array(...)`.
-- [ ] `jefscad/src/brep_compiler.rs`:
+      *(Done in commit 40bfde2; also collapsed `is_identity_transform` to delegate to
+      `Mat4::is_identity`, and re-exported the `mat_*` constructors from `linalg`
+      instead of duplicating them.)*
+- [x] `jefscad/src/brep_compiler.rs`:
       - Replace `use flint::{FlintArray, IDENTITY_4X4};`.
       - `compile_primitive`'s `transform: &FlintArray<f64, 16>` → `&Mat4`.
       - Replace `transform.midpoint()` with `transform.as_array()` (or inline field
@@ -109,6 +112,8 @@ swaps in with zero call-site changes. Revisit with `cargo flamegraph` on a real 
       - `is_identity(transform)` → `transform.is_identity()`.
       - Update the `IDENTITY_4X4` test fixture at ~line 2102/2108 to `Mat4::IDENTITY`
         / `Mat4::from_array(transform)`.
+      *(Done in commit 40bfde2; local `is_identity` wrapper deleted in favour of the
+      `Mat4` method.)*
 - [x] `jefscad/src/predicates.rs`: **delete the file**; remove `mod predicates;` and
       `pub mod predicates;` from `lib.rs`. (`mat4_inv_f64` moved onto `Mat4::inverse`.
       File was genuinely dead — `classify_node`/`Classification` had no callers; the
