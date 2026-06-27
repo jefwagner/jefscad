@@ -281,16 +281,37 @@ segment types, compiled through a ruled (`LinearExtrusionSurface`) extrusion.
       `SelfIntersection`(future)). `Display` + `std::error::Error` impls.
 
 ### Tasks — bezier segment types
-- [ ] `geom.rs`: add
+- [x] `geom.rs`: add
       `QuadraticBezier2 { p0, p1, p2: Point2, t_min, t_max }` and
       `CubicBezier2 { p0, p1, p2, p3: Point2, t_min, t_max }`, both `t ∈ [0,1]`
       (matches the edge t-parameter convention in `boolean-ops.md`).
-- [ ] Implement `Curve2` for both (`eval`, `eval_dt`, `is_degenerate`).
-- [ ] Add variants to `Curve2Kind` and arms in:
-      `curve2_end`, `curve2_t_range`, `lift_curve2`, `lift_xz_curve2`, `Path2D::Display`.
-- [ ] Add `Bezier3` (`QuadraticBezier3`/`CubicBezier3`) to `Curve3Kind` + the lift arms,
-      or lift beziers directly into existing 3D bezier structs (decide: a 3D bezier
-      struct pair is cleaner and needed for ruled-surface profile curves anyway).
+- [x] Implement `Curve2` for both (`eval`, `eval_dt`, `is_degenerate`).
+      *`is_degenerate` = all control points coincide (bit-exact); collinear-but-distinct
+      is NOT degenerate (it's a valid line-spanning curve).* Direct Bernstein-form
+      eval + analytic derivative; no de Casteljau subdivision needed in 0-b.
+- [x] Add variants to `Curve2Kind` and arms in:
+      `Curve2Kind::end`, `curve2_t_range`, `lift_curve2`, `lift_xz_curve2`,
+      `Path2D::Display`, plus `hash_path2d` (csg_lang), `scale_lateral_pcurves`
+      (brep_compiler), and both mesher pcurve-sampling match arms.
+- [x] Add `Bezier3` (`QuadraticBezier3`/`CubicBezier3`) to `Curve3Kind` + the lift arms
+      (decided: a 3D bezier struct pair is cleaner and needed for ruled-surface profile
+      curves anyway — `LinearExtrusionSurface.profile` is a `Curve3Kind`). Bezier
+      control points transform as points (w=1) in `compile_primitive`'s
+      transform-absorption match; t-domain unchanged (matches `Line3` handling).
+- [x] `Path2D::quad_to`/`cubic_to` builder methods (infallible appends, panic on
+      no-open-contour — consistent with `line_to`/`arc_to` per Q4 option 2). Wired into
+      `PyPath2D` (`quad_to`/`cubic_to` → `&mut self` for chaining). Stubs regenerated.
+- [x] Ruled-surface bezier end-to-end: `extrude_quad_bezier_profile_entity_counts`
+      + `extrude_quad_bezier_lateral_is_extrusion_surface` tests exercise a
+      line+quadratic closed profile through `build_extrusion` — confirms the
+      `LinearExtrusionSurface` profile is a `QuadraticBezier3` and the topology
+      counts match an N=2 triangle extrusion.
+- [x] **Fixed latent `contour_signed_area` bug** — the pre-contour-set chord-only
+      shoelace undercounted area for arcs subtending < 2π and *zeroed* area for
+      any contour whose chord endpoints were collinear (including the line+quadratic
+      glyph profile the dice needs). Rewrote as the exact per-segment Green's-theorem
+      integral ∫(x·y'−y·x')dt with closed forms for line/quadratic/cubic/arc/polyline.
+      No test exercised the bug before; the new bezier-contour `finish` tests guard it.
 
 ### Tasks — minimal pip2d
 - [ ] New module `jefscad/src/pip2d.rs` (or fold into `geom.rs` — lean separate module,
@@ -317,11 +338,12 @@ segment types, compiled through a ruled (`LinearExtrusionSurface`) extrusion.
         both caps.
       - Multi-outer → push multiple `Solid`s into one `NodeBRep` (the SolidSet).
       - Keep the existing `ExtrusionError` variants; add the new ones above.
-- [ ] Extend `LinearExtrusionSurface` to accept bezier profile segments (the surface
+- [x] Extend `LinearExtrusionSurface` to accept bezier profile segments (the surface
       eval already delegates to the profile `Curve2`/`Curve3`; ensure the profile curve
-      type carries beziers and eval/deriv are correct). Add tests exercising a
-      quadratic-bezier extrusion end-to-end (path → solid → mesh or struct count).
-- [ ] Update `py_bindings.rs` `PyPath2D` to the new builder API
+      type carries beziers and eval/deriv are correct). Tests exercising a
+      quadratic-bezier extrusion end-to-end (path → solid → struct count + surface
+      type) landed in `brep_compiler::test`.
+- [x] Update `py_bindings.rs` `PyPath2D` to the new builder API
       (`start_contour`/`quad_to`/`cubic_to`/etc.); update docstrings; regenerate stubs.
 
 ### Open questions

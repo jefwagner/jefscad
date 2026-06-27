@@ -636,6 +636,24 @@ fn hash_path2d(h: &mut impl std::hash::Hasher, path: &Path2D) {
                         h.write_u64(pt.v.to_bits());
                     }
                 }
+                Curve2Kind::QuadraticBezier2(b) => {
+                    h.write_u8(4);
+                    for pt in [b.p0, b.p1, b.p2] {
+                        h.write_u64(pt.u.to_bits());
+                        h.write_u64(pt.v.to_bits());
+                    }
+                    h.write_u64(b.t_min.to_bits());
+                    h.write_u64(b.t_max.to_bits());
+                }
+                Curve2Kind::CubicBezier2(b) => {
+                    h.write_u8(5);
+                    for pt in [b.p0, b.p1, b.p2, b.p3] {
+                        h.write_u64(pt.u.to_bits());
+                        h.write_u64(pt.v.to_bits());
+                    }
+                    h.write_u64(b.t_min.to_bits());
+                    h.write_u64(b.t_max.to_bits());
+                }
                 Curve2Kind::Nurbs(_) => {
                     h.write_u8(3); // discriminant only; NURBS hashing deferred
                 }

@@ -159,6 +159,16 @@ class Path2D:
         Append a circular arc sweeping `sweep` radians around `(cu, cv)`.
         Positive sweep is CCW; negative is CW.  Returns `self` for chaining.
         """
+    def quad_to(self, c1u: builtins.float, c1v: builtins.float, eu: builtins.float, ev: builtins.float) -> Path2D:
+        r"""
+        Append a quadratic Bézier from the current position through control
+        `(c1u, c1v)` to `(eu, ev)`.  Returns `self` for chaining.
+        """
+    def cubic_to(self, c1u: builtins.float, c1v: builtins.float, c2u: builtins.float, c2v: builtins.float, eu: builtins.float, ev: builtins.float) -> Path2D:
+        r"""
+        Append a cubic Bézier from the current position through controls
+        `(c1u, c1v)` and `(c2u, c2v)` to `(eu, ev)`.  Returns `self` for chaining.
+        """
     def close(self) -> Path2D:
         r"""
         Mark the current contour as closed without adding a segment.

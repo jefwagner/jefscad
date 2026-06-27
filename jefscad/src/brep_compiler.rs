@@ -15,9 +15,9 @@ use crate::brep_kernel::{
     SolidId, SolidModelingContext, Vertex,
 };
 use crate::geom::{
-    CircularArc2, CircularArc3, ConicalSurface, Curve2Kind, Curve3Kind, CylindricalSurface, Line2,
-    Line3, LinearExtrusionSurface, Path2D, Plane, Point2, Point3, Polyline3, RevolutionSurface,
-    SphericalSurface, SurfaceKind,
+    CircularArc2, CircularArc3, ConicalSurface, CubicBezier3, Curve2Kind, Curve3Kind,
+    CylindricalSurface, Line2, Line3, LinearExtrusionSurface, Path2D, Plane, Point2, Point3,
+    Polyline3, QuadraticBezier3, RevolutionSurface, SphericalSurface, SurfaceKind,
 };
 use crate::linalg::Mat4;
 
@@ -863,6 +863,8 @@ fn curve2_t_range(c: &Curve2Kind) -> (f64, f64) {
     match c {
         Curve2Kind::Line2(l) => (l.t_min, l.t_max),
         Curve2Kind::CircularArc2(a) => (a.t0, a.t1),
+        Curve2Kind::QuadraticBezier2(b) => (b.t_min, b.t_max),
+        Curve2Kind::CubicBezier2(b) => (b.t_min, b.t_max),
         Curve2Kind::Polyline2(pl) => (0.0, pl.n_segments() as f64),
         Curve2Kind::Nurbs(_) => todo!("curve2_t_range for NurbsCurve2"),
     }
@@ -886,6 +888,17 @@ fn lift_curve2(c: &Curve2Kind, z: f64) -> Curve3Kind {
             a.radius,
             a.t0,
             a.t1,
+        )),
+        Curve2Kind::QuadraticBezier2(b) => Curve3Kind::QuadraticBezier3(QuadraticBezier3::new(
+            p3(b.p0.u, b.p0.v),
+            p3(b.p1.u, b.p1.v),
+            p3(b.p2.u, b.p2.v),
+        )),
+        Curve2Kind::CubicBezier2(b) => Curve3Kind::CubicBezier3(CubicBezier3::new(
+            p3(b.p0.u, b.p0.v),
+            p3(b.p1.u, b.p1.v),
+            p3(b.p2.u, b.p2.v),
+            p3(b.p3.u, b.p3.v),
         )),
         Curve2Kind::Polyline2(pl) => Curve3Kind::Polyline3(Polyline3::new(
             pl.points
@@ -913,6 +926,17 @@ fn lift_xz_curve2(c: &Curve2Kind) -> Curve3Kind {
             a.radius,
             a.t0,
             a.t1,
+        )),
+        Curve2Kind::QuadraticBezier2(b) => Curve3Kind::QuadraticBezier3(QuadraticBezier3::new(
+            p3(b.p0.u, b.p0.v),
+            p3(b.p1.u, b.p1.v),
+            p3(b.p2.u, b.p2.v),
+        )),
+        Curve2Kind::CubicBezier2(b) => Curve3Kind::CubicBezier3(CubicBezier3::new(
+            p3(b.p0.u, b.p0.v),
+            p3(b.p1.u, b.p1.v),
+            p3(b.p2.u, b.p2.v),
+            p3(b.p3.u, b.p3.v),
         )),
         Curve2Kind::Polyline2(pl) => Curve3Kind::Polyline3(Polyline3::new(
             pl.points
@@ -1526,6 +1550,18 @@ pub fn compile_primitive(
                 a.normal = apply_vec(a.normal).normalize();
                 a.radius *= s;
             }
+            Curve3Kind::QuadraticBezier3(b) => {
+                // Bezier control points transform as points (w=1); t-domain unchanged.
+                b.p0 = apply_pt(b.p0);
+                b.p1 = apply_pt(b.p1);
+                b.p2 = apply_pt(b.p2);
+            }
+            Curve3Kind::CubicBezier3(b) => {
+                b.p0 = apply_pt(b.p0);
+                b.p1 = apply_pt(b.p1);
+                b.p2 = apply_pt(b.p2);
+                b.p3 = apply_pt(b.p3);
+            }
             Curve3Kind::Polyline3(_) => {
                 todo!("transform absorption for Polyline3 not yet implemented")
             }
@@ -1612,6 +1648,17 @@ fn scale_lateral_pcurves(ctx: &mut SolidModelingContext, surf_idx: usize, s: f64
             }
             Curve2Kind::CircularArc2(a) => {
                 a.center.v *= s;
+            }
+            Curve2Kind::QuadraticBezier2(b) => {
+                b.p0.v *= s;
+                b.p1.v *= s;
+                b.p2.v *= s;
+            }
+            Curve2Kind::CubicBezier2(b) => {
+                b.p0.v *= s;
+                b.p1.v *= s;
+                b.p2.v *= s;
+                b.p3.v *= s;
             }
             Curve2Kind::Polyline2(_) => {
                 todo!("pcurve v-scaling for Polyline2 not yet implemented")
@@ -3195,6 +3242,57 @@ mod test {
         assert_eq!(ctx.vertices.len(), 8);
         assert_eq!(ctx.edges.len(), 12);
         assert_eq!(ctx.coedges.len(), 24);
+    }
+
+    // ── build_extrusion with a bezier profile (ruled surface end-to-end) ───────
+
+    /// A 3-segment closed profile mixing lines and a quadratic bezier:
+    /// (0,0) → line → (2,0) → quad(c=(1,1), end=(0,0)) → close.
+    /// The quad bulges above the x-axis, so the contour has nonzero area (the
+    /// pre-fix chord-only `contour_signed_area` would have rejected this as
+    /// zero-area — this test also guards the closed-form bezier area integral).
+    #[test]
+    fn extrude_quad_bezier_profile_entity_counts() {
+        let mut ctx = SolidModelingContext::new();
+        let mut p = Path2D::new();
+        p.start_contour(Point2::new(0.0, 0.0))
+            .unwrap()
+            .line_to(Point2::new(2.0, 0.0))
+            .quad_to(Point2::new(1.0, 1.0), Point2::new(0.0, 0.0));
+        p.close().unwrap();
+        // The quad bulges above the x-axis, so the contour has nonzero area (the
+        // pre-fix chord-only `contour_signed_area` would have rejected this as
+        // zero-area — `finish()` here also guards the closed-form bezier integral).
+        // build_extrusion does its own validation, so we pass the un-finished path.
+        build_extrusion(&mut ctx, &p, 1.0, 0, 0).unwrap();
+        // 2 segments → 4V, 6E, 4F (2 lateral + 2 caps), 12CE — same topology shape
+        // as a 2-line triangle extrusion (N=2).
+        assert_eq!(ctx.vertices.len(), 4);
+        assert_eq!(ctx.edges.len(), 6);
+        assert_eq!(ctx.faces.len(), 4);
+        assert_eq!(ctx.coedges.len(), 12);
+    }
+
+    #[test]
+    fn extrude_quad_bezier_lateral_is_extrusion_surface() {
+        // The segment-1 lateral face (the quadratic) must be a LinearExtrusionSurface
+        // whose profile is a QuadraticBezier3.
+        let mut ctx = SolidModelingContext::new();
+        let mut p = Path2D::new();
+        p.start_contour(Point2::new(0.0, 0.0))
+            .unwrap()
+            .line_to(Point2::new(2.0, 0.0))
+            .quad_to(Point2::new(1.0, 1.0), Point2::new(0.0, 0.0));
+        p.close().unwrap();
+        build_extrusion(&mut ctx, &p, 1.0, 0, 0).unwrap();
+        let bezier_lateral = ctx.faces.iter().any(|f| {
+            matches!(&ctx.surfaces[f.surface.0], SurfaceKind::Extrusion(les)
+                if matches!(les.profile, Curve3Kind::QuadraticBezier3(_)))
+        });
+        assert!(
+            bezier_lateral,
+            "expected a lateral face backed by a QuadraticBezier3 profile"
+        );
     }
 
     // ── build_revolution ──────────────────────────────────────────────────────

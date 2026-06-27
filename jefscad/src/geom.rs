@@ -246,6 +246,107 @@ impl Curve3 for CircularArc3 {
     }
 }
 
+// ── QuadraticBezier3 ─────────────────────────────────────────────────────────
+
+/// A quadratic Bézier curve in 3-D space: `B(t) = (1-t)²·p0 + 2(1-t)t·p1 + t²·p2`.
+///
+/// `t ∈ [0, 1]`. Produced by lifting a [`QuadraticBezier2`] profile into 3-D
+/// (e.g. as the profile curve of a [`LinearExtrusionSurface`] or
+/// [`RevolutionSurface`]). Eval/derivative are the direct Bernstein form.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuadraticBezier3 {
+    pub p0: Point3,
+    pub p1: Point3,
+    pub p2: Point3,
+    pub t_min: f64,
+    pub t_max: f64,
+}
+
+impl QuadraticBezier3 {
+    /// Construct a quadratic Bézier from `p0` through control `p1` to `p2`, domain `[0, 1]`.
+    pub fn new(p0: Point3, p1: Point3, p2: Point3) -> Self {
+        Self {
+            p0,
+            p1,
+            p2,
+            t_min: 0.0,
+            t_max: 1.0,
+        }
+    }
+}
+
+impl Curve3 for QuadraticBezier3 {
+    fn eval(&self, t: f64) -> Point3 {
+        let u = 1.0 - t;
+        self.p0 * (u * u) + self.p1 * (2.0 * u * t) + self.p2 * (t * t)
+    }
+
+    fn eval_dt(&self, t: f64) -> Point3 {
+        let u = 1.0 - t;
+        (self.p1 - self.p0) * (2.0 * u) + (self.p2 - self.p1) * (2.0 * t)
+    }
+
+    /// Degenerate iff all three control points coincide (bit-exact).
+    fn is_degenerate(&self) -> bool {
+        self.p0 == self.p1 && self.p1 == self.p2
+    }
+}
+
+// ── CubicBezier3 ──────────────────────────────────────────────────────────────
+
+/// A cubic Bézier curve in 3-D space:
+/// `B(t) = (1-t)³·p0 + 3(1-t)²t·p1 + 3(1-t)t²·p2 + t³·p3`.
+///
+/// `t ∈ [0, 1]`. 3-D analogue of [`CubicBezier2`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CubicBezier3 {
+    pub p0: Point3,
+    pub p1: Point3,
+    pub p2: Point3,
+    pub p3: Point3,
+    pub t_min: f64,
+    pub t_max: f64,
+}
+
+impl CubicBezier3 {
+    /// Construct a cubic Bézier from `p0` through controls `p1`, `p2` to `p3`,
+    /// domain `[0, 1]`.
+    pub fn new(p0: Point3, p1: Point3, p2: Point3, p3: Point3) -> Self {
+        Self {
+            p0,
+            p1,
+            p2,
+            p3,
+            t_min: 0.0,
+            t_max: 1.0,
+        }
+    }
+}
+
+impl Curve3 for CubicBezier3 {
+    fn eval(&self, t: f64) -> Point3 {
+        let u = 1.0 - t;
+        let u2 = u * u;
+        let t2 = t * t;
+        self.p0 * (u2 * u)
+            + self.p1 * (3.0 * u2 * t)
+            + self.p2 * (3.0 * u * t2)
+            + self.p3 * (t2 * t)
+    }
+
+    fn eval_dt(&self, t: f64) -> Point3 {
+        let u = 1.0 - t;
+        (self.p1 - self.p0) * (3.0 * u * u)
+            + (self.p2 - self.p1) * (6.0 * u * t)
+            + (self.p3 - self.p2) * (3.0 * t * t)
+    }
+
+    /// Degenerate iff all four control points coincide (bit-exact).
+    fn is_degenerate(&self) -> bool {
+        self.p0 == self.p1 && self.p1 == self.p2 && self.p2 == self.p3
+    }
+}
+
 // ── Stub types for remaining Curve3Kind variants ───────────────────────────────
 
 /// A rational B-spline curve in 3-D space. Fields TBD — stub for `Curve3Kind`.
@@ -320,6 +421,8 @@ impl Curve3 for Polyline3 {
 pub enum Curve3Kind {
     Line3(Line3),
     CircularArc3(CircularArc3),
+    QuadraticBezier3(QuadraticBezier3),
+    CubicBezier3(CubicBezier3),
     Polyline3(Polyline3),
     Nurbs(NurbsCurve3),
     Ssi(SsiCurve3),
@@ -330,6 +433,8 @@ impl Curve3 for Curve3Kind {
         match self {
             Curve3Kind::Line3(l) => l.eval(t),
             Curve3Kind::CircularArc3(a) => a.eval(t),
+            Curve3Kind::QuadraticBezier3(b) => b.eval(t),
+            Curve3Kind::CubicBezier3(b) => b.eval(t),
             Curve3Kind::Polyline3(p) => p.eval(t),
             Curve3Kind::Nurbs(_) => todo!("NurbsCurve3::eval"),
             Curve3Kind::Ssi(_) => todo!("SsiCurve3::eval"),
@@ -340,6 +445,8 @@ impl Curve3 for Curve3Kind {
         match self {
             Curve3Kind::Line3(l) => l.eval_dt(t),
             Curve3Kind::CircularArc3(a) => a.eval_dt(t),
+            Curve3Kind::QuadraticBezier3(b) => b.eval_dt(t),
+            Curve3Kind::CubicBezier3(b) => b.eval_dt(t),
             Curve3Kind::Polyline3(p) => p.eval_dt(t),
             Curve3Kind::Nurbs(_) => todo!("NurbsCurve3::eval_dt"),
             Curve3Kind::Ssi(_) => todo!("SsiCurve3::eval_dt"),
@@ -350,6 +457,8 @@ impl Curve3 for Curve3Kind {
         match self {
             Curve3Kind::Line3(l) => l.is_degenerate(),
             Curve3Kind::CircularArc3(a) => a.is_degenerate(),
+            Curve3Kind::QuadraticBezier3(b) => b.is_degenerate(),
+            Curve3Kind::CubicBezier3(b) => b.is_degenerate(),
             Curve3Kind::Polyline3(p) => p.is_degenerate(),
             Curve3Kind::Nurbs(_) => todo!("NurbsCurve3::is_degenerate"),
             Curve3Kind::Ssi(_) => todo!("SsiCurve3::is_degenerate"),
@@ -513,6 +622,116 @@ impl Curve2 for Polyline2 {
     }
 }
 
+// ── QuadraticBezier2 ─────────────────────────────────────────────────────────
+
+/// A quadratic Bézier curve in UV space: `B(t) = (1-t)²·p0 + 2(1-t)t·p1 + t²·p2`.
+///
+/// `t ∈ [0, 1]` over the standard domain (`t_min = 0`, `t_max = 1`), matching the
+/// curve-global t-parameter convention (`boolean-ops.md`). `eval(0) = p0`,
+/// `eval(1) = p2`; `p1` is the off-curve control point. As with all [`Curve2`] types,
+/// `eval` does not clamp — callers stay in range or knowingly extrapolate.
+///
+/// Needed for `.ttf` font-glyph outlines (quadratic beziers are TrueType's native
+/// curve type). Cubic beziers cover `.otf`/CFF fonts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuadraticBezier2 {
+    pub p0: Point2, // start point (on-curve)
+    pub p1: Point2, // control point (off-curve)
+    pub p2: Point2, // end point (on-curve)
+    pub t_min: f64,
+    pub t_max: f64,
+}
+
+impl QuadraticBezier2 {
+    /// Construct a quadratic Bézier from `p0` through control `p1` to `p2`, domain `[0, 1]`.
+    pub fn new(p0: Point2, p1: Point2, p2: Point2) -> Self {
+        Self {
+            p0,
+            p1,
+            p2,
+            t_min: 0.0,
+            t_max: 1.0,
+        }
+    }
+}
+
+impl Curve2 for QuadraticBezier2 {
+    fn eval(&self, t: f64) -> Point2 {
+        let u = 1.0 - t;
+        self.p0 * (u * u) + self.p1 * (2.0 * u * t) + self.p2 * (t * t)
+    }
+
+    /// `B'(t) = 2(1-t)(p1-p0) + 2t(p2-p1)`.
+    fn eval_dt(&self, t: f64) -> Point2 {
+        let u = 1.0 - t;
+        (self.p1 - self.p0) * (2.0 * u) + (self.p2 - self.p1) * (2.0 * t)
+    }
+
+    /// Degenerate iff all three control points coincide (bit-exact) — the curve
+    /// collapses to a single point. Collinear-but-distinct control points are NOT
+    /// degenerate (the curve is a valid line segment spanning p0→p2).
+    fn is_degenerate(&self) -> bool {
+        self.p0 == self.p1 && self.p1 == self.p2
+    }
+}
+
+// ── CubicBezier2 ──────────────────────────────────────────────────────────────
+
+/// A cubic Bézier curve in UV space:
+/// `B(t) = (1-t)³·p0 + 3(1-t)²t·p1 + 3(1-t)t²·p2 + t³·p3`.
+///
+/// `t ∈ [0, 1]`; `eval(0) = p0`, `eval(1) = p3`. `p1` and `p2` are the off-curve
+/// control points. Needed for `.otf`/CFF font outlines.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CubicBezier2 {
+    pub p0: Point2, // start point (on-curve)
+    pub p1: Point2, // first control point (off-curve)
+    pub p2: Point2, // second control point (off-curve)
+    pub p3: Point2, // end point (on-curve)
+    pub t_min: f64,
+    pub t_max: f64,
+}
+
+impl CubicBezier2 {
+    /// Construct a cubic Bézier from `p0` through controls `p1`, `p2` to `p3`,
+    /// domain `[0, 1]`.
+    pub fn new(p0: Point2, p1: Point2, p2: Point2, p3: Point2) -> Self {
+        Self {
+            p0,
+            p1,
+            p2,
+            p3,
+            t_min: 0.0,
+            t_max: 1.0,
+        }
+    }
+}
+
+impl Curve2 for CubicBezier2 {
+    fn eval(&self, t: f64) -> Point2 {
+        let u = 1.0 - t;
+        let u2 = u * u;
+        let t2 = t * t;
+        self.p0 * (u2 * u)
+            + self.p1 * (3.0 * u2 * t)
+            + self.p2 * (3.0 * u * t2)
+            + self.p3 * (t2 * t)
+    }
+
+    /// `B'(t) = 3(1-t)²(p1-p0) + 6(1-t)t(p2-p1) + 3t²(p3-p2)`.
+    fn eval_dt(&self, t: f64) -> Point2 {
+        let u = 1.0 - t;
+        (self.p1 - self.p0) * (3.0 * u * u)
+            + (self.p2 - self.p1) * (6.0 * u * t)
+            + (self.p3 - self.p2) * (3.0 * t * t)
+    }
+
+    /// Degenerate iff all four control points coincide (bit-exact).
+    fn is_degenerate(&self) -> bool {
+        self.p0 == self.p1 && self.p1 == self.p2 && self.p2 == self.p3
+    }
+}
+
 // ── Stub type for future Curve2Kind variant ───────────────────────────────────
 
 /// A rational B-spline curve in UV space. Fields TBD — stub for `Curve2Kind`.
@@ -526,6 +745,8 @@ pub struct NurbsCurve2;
 pub enum Curve2Kind {
     Line2(Line2),
     CircularArc2(CircularArc2),
+    QuadraticBezier2(QuadraticBezier2),
+    CubicBezier2(CubicBezier2),
     Polyline2(Polyline2),
     Nurbs(NurbsCurve2),
 }
@@ -535,6 +756,8 @@ impl Curve2 for Curve2Kind {
         match self {
             Curve2Kind::Line2(l) => l.eval(t),
             Curve2Kind::CircularArc2(a) => a.eval(t),
+            Curve2Kind::QuadraticBezier2(b) => b.eval(t),
+            Curve2Kind::CubicBezier2(b) => b.eval(t),
             Curve2Kind::Polyline2(p) => p.eval(t),
             Curve2Kind::Nurbs(_) => todo!("NurbsCurve2::eval"),
         }
@@ -544,6 +767,8 @@ impl Curve2 for Curve2Kind {
         match self {
             Curve2Kind::Line2(l) => l.eval_dt(t),
             Curve2Kind::CircularArc2(a) => a.eval_dt(t),
+            Curve2Kind::QuadraticBezier2(b) => b.eval_dt(t),
+            Curve2Kind::CubicBezier2(b) => b.eval_dt(t),
             Curve2Kind::Polyline2(p) => p.eval_dt(t),
             Curve2Kind::Nurbs(_) => todo!("NurbsCurve2::eval_dt"),
         }
@@ -553,6 +778,8 @@ impl Curve2 for Curve2Kind {
         match self {
             Curve2Kind::Line2(l) => l.is_degenerate(),
             Curve2Kind::CircularArc2(a) => a.is_degenerate(),
+            Curve2Kind::QuadraticBezier2(b) => b.is_degenerate(),
+            Curve2Kind::CubicBezier2(b) => b.is_degenerate(),
             Curve2Kind::Polyline2(p) => p.is_degenerate(),
             Curve2Kind::Nurbs(_) => todo!("NurbsCurve2::is_degenerate"),
         }
@@ -565,6 +792,8 @@ impl Curve2Kind {
         match self {
             Curve2Kind::Line2(l) => l.p1,
             Curve2Kind::CircularArc2(a) => a.eval(a.t1),
+            Curve2Kind::QuadraticBezier2(b) => b.p2,
+            Curve2Kind::CubicBezier2(b) => b.p3,
             Curve2Kind::Polyline2(pl) => *pl.points.last().expect("Polyline2 has points"),
             Curve2Kind::Nurbs(_) => todo!("NurbsCurve2::end"),
         }
@@ -1141,6 +1370,41 @@ impl Path2D {
         self
     }
 
+    /// Append a quadratic Bézier from the current position through control `c1`
+    /// to `end`. Infallible (panics if no contour is open). The segment's `p0` is
+    /// the current position; `eval(0)` returns it and `eval(1)` returns `end`.
+    pub fn quad_to(&mut self, c1: Point2, end: Point2) -> &mut Self {
+        let p0 = {
+            let c = self
+                .current_contour()
+                .expect("no open contour; call start_contour first");
+            c.current_pos()
+        };
+        let seg = Curve2Kind::QuadraticBezier2(QuadraticBezier2::new(p0, c1, end));
+        let c = self
+            .current_contour()
+            .expect("no open contour; call start_contour first");
+        c.push(seg, end);
+        self
+    }
+
+    /// Append a cubic Bézier from the current position through controls `c1`, `c2`
+    /// to `end`. Infallible (panics if no contour is open).
+    pub fn cubic_to(&mut self, c1: Point2, c2: Point2, end: Point2) -> &mut Self {
+        let p0 = {
+            let c = self
+                .current_contour()
+                .expect("no open contour; call start_contour first");
+            c.current_pos()
+        };
+        let seg = Curve2Kind::CubicBezier2(CubicBezier2::new(p0, c1, c2, end));
+        let c = self
+            .current_contour()
+            .expect("no open contour; call start_contour first");
+        c.push(seg, end);
+        self
+    }
+
     /// Mark the current contour as closed. No segment is added; the caller asserts
     /// that `current_pos` is already bit-exactly at the contour's `start`. Returns
     /// [`PathError::CloseNotAtStart`] if not, or [`PathError::NoOpenContour`] if no
@@ -1214,14 +1478,66 @@ impl Default for Path2D {
 /// zero-area (degenerate-winding) contours. Exact for non-degenerate polygons; for
 /// arcs/beziers the contribution is the area swept by the chord (the linear term),
 /// which is exact for the signed-area/winding-sign purpose.
+/// Exact signed area of a closed contour (Green's theorem: 0.5·∮(x·dy − y·dx),
+/// evaluated per segment via closed-form ∫(p.u·p'.v − p.v·p'.u)dt).
+///
+/// Positive = CCW (outer), negative = CW (hole). Used by [`Path2D::finish`] to reject
+/// zero-area (degenerate-winding) contours. Exact for all segment types over the
+/// builder's standard `[0,1]` domain (arcs use their `[t0,t1]` domain).
+///
+/// **Per-segment integrand** (∫(x·y' − y·x')dt, with `cross2(a,b)=a.u·b.v−a.v·b.u`):
+/// - Line p0→p1: `cross2(p0,p1)`.
+/// - Quadratic p0,p1,p2: `(2/3)·cross2(p0,p1) + (1/3)·cross2(p0,p2) + (2/3)·cross2(p1,p2)`.
+/// - Cubic p0,p1,p2,p3: `(3/5)·cross2(p0,p1) + (3/10)·cross2(p0,p2) + (1/10)·cross2(p0,p3)
+///   + (3/10)·cross2(p1,p2) + (3/10)·cross2(p1,p3) + (3/5)·cross2(p2,p3)`.
+/// - Arc (center c, radius r, [t0,t1]): `r·c.u·(sin t1 − sin t0) − r·c.v·(cos t1 − cos t0)
+///   + r²·(t1 − t0)`.
+///
+/// (The arc term reduces to the chord formula `cross2(start, end)` only when the arc
+/// subtends 0 or 2π — the swept-wedge term `r²·Δt` is what captures the curved area.
+/// The pre-contour-set `contour_signed_area` used the chord formula for arcs too, which
+/// undercounted area for arcs subtending < 2π; that was a latent bug with no test
+/// exercising it. The closed forms here are exact.)
 fn contour_signed_area(c: &Contour) -> f64 {
+    /// 2-D cross product (z-component of the 3-D cross): a.u·b.v − a.v·b.u.
+    fn cross2(a: Point2, b: Point2) -> f64 {
+        a.u * b.v - a.v * b.u
+    }
     let mut area = 0.0;
-    let mut p = c.start;
     for seg in &c.segments {
-        let q = seg.end();
-        // Shoelace cross term: p × q (the z-component of the 3-D cross).
-        area += p.u * q.v - p.v * q.u;
-        p = q;
+        area += match seg {
+            Curve2Kind::Line2(l) => cross2(l.p0, l.p1),
+            Curve2Kind::CircularArc2(a) => {
+                // ∫(x·y' − y·x')dt over [t0,t1] for x=cx+r·cos t, y=cy+r·sin t.
+                a.radius * a.center.u * (a.t1.sin() - a.t0.sin())
+                    - a.radius * a.center.v * (a.t1.cos() - a.t0.cos())
+                    + a.radius * a.radius * (a.t1 - a.t0)
+            }
+            Curve2Kind::QuadraticBezier2(b) => {
+                // Closed-form ∫ over [0,1] for B(t)=(1−t)²P0+2(1−t)t P1+t²P2.
+                cross2(b.p0, b.p1) * (2.0 / 3.0)
+                    + cross2(b.p0, b.p2) * (1.0 / 3.0)
+                    + cross2(b.p1, b.p2) * (2.0 / 3.0)
+            }
+            Curve2Kind::CubicBezier2(b) => {
+                // Closed-form ∫ over [0,1] for the cubic Bernstein form.
+                cross2(b.p0, b.p1) * (3.0 / 5.0)
+                    + cross2(b.p0, b.p2) * (3.0 / 10.0)
+                    + cross2(b.p0, b.p3) * (1.0 / 10.0)
+                    + cross2(b.p1, b.p2) * (3.0 / 10.0)
+                    + cross2(b.p1, b.p3) * (3.0 / 10.0)
+                    + cross2(b.p2, b.p3) * (3.0 / 5.0)
+            }
+            Curve2Kind::Polyline2(pl) => {
+                // Sum of line-segment chord contributions.
+                let mut s = 0.0;
+                for w in pl.points.windows(2) {
+                    s += cross2(w[0], w[1]);
+                }
+                s
+            }
+            Curve2Kind::Nurbs(_) => todo!("contour_signed_area for NurbsCurve2"),
+        };
     }
     area * 0.5
 }
@@ -1272,6 +1588,22 @@ impl std::fmt::Display for Path2D {
                         )
                     }
                     Curve2Kind::Polyline2(pl) => format!("polyline({} pts)", pl.points.len()),
+                    Curve2Kind::QuadraticBezier2(b) => format!(
+                        "quad_to(c=({}, {}), end=({}, {}))",
+                        fmt_f64_path(b.p1.u),
+                        fmt_f64_path(b.p1.v),
+                        fmt_f64_path(b.p2.u),
+                        fmt_f64_path(b.p2.v),
+                    ),
+                    Curve2Kind::CubicBezier2(b) => format!(
+                        "cubic_to(c1=({}, {}), c2=({}, {}), end=({}, {}))",
+                        fmt_f64_path(b.p1.u),
+                        fmt_f64_path(b.p1.v),
+                        fmt_f64_path(b.p2.u),
+                        fmt_f64_path(b.p2.v),
+                        fmt_f64_path(b.p3.u),
+                        fmt_f64_path(b.p3.v),
+                    ),
                     Curve2Kind::Nurbs(_) => "nurbs(...)".to_owned(),
                 };
                 write!(f, "{}{}", connector, seg_str)?;
@@ -1829,6 +2161,344 @@ mod test {
         let dg = Curve3Kind::Polyline3(Polyline3::new(vec![p(1.0, 1.0, 1.0), p(1.0, 1.0, 1.0)]));
         assert!(!nd.is_degenerate());
         assert!(dg.is_degenerate());
+    }
+
+    // ── QuadraticBezier2 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn quad_bezier2_new_stores_control_points() {
+        let b = QuadraticBezier2::new(uv(0.0, 0.0), uv(1.0, 2.0), uv(2.0, 0.0));
+        assert_eq!(b.p0, uv(0.0, 0.0));
+        assert_eq!(b.p1, uv(1.0, 2.0));
+        assert_eq!(b.p2, uv(2.0, 0.0));
+        assert_eq!(b.t_min, 0.0);
+        assert_eq!(b.t_max, 1.0);
+    }
+
+    #[test]
+    fn quad_bezier2_eval_at_endpoints() {
+        // B(t) = (1-t)²P0 + 2(1-t)t P1 + t² P2
+        let b = QuadraticBezier2::new(uv(0.0, 0.0), uv(1.0, 2.0), uv(2.0, 0.0));
+        assert_eq!(b.eval(0.0), uv(0.0, 0.0));
+        assert_eq!(b.eval(1.0), uv(2.0, 0.0));
+    }
+
+    #[test]
+    fn quad_bezier2_eval_at_midpoint() {
+        // At t=0.5: 0.25*P0 + 0.5*P1 + 0.25*P2 = (0.5*1, 0.5*2) = (0.5, 1.0) + (0,0)/(0.5,0)
+        // P0=(0,0), P1=(1,2), P2=(2,0): midpoint = 0.25*(0,0)+0.5*(1,2)+0.25*(2,0)
+        //   = (0.5+0.5, 1.0) = (1.0, 1.0)
+        let b = QuadraticBezier2::new(uv(0.0, 0.0), uv(1.0, 2.0), uv(2.0, 0.0));
+        let m = b.eval(0.5);
+        assert!((m.u - 1.0).abs() < 1e-14);
+        assert!((m.v - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn quad_bezier2_eval_dt_at_endpoints() {
+        // B'(t) = 2(1-t)(P1-P0) + 2t(P2-P1)
+        // B'(0) = 2(P1-P0); B'(1) = 2(P2-P1)
+        let b = QuadraticBezier2::new(uv(0.0, 0.0), uv(1.0, 2.0), uv(2.0, 0.0));
+        assert_eq!(b.eval_dt(0.0), uv(2.0, 4.0));
+        assert_eq!(b.eval_dt(1.0), uv(2.0, -4.0));
+    }
+
+    #[test]
+    fn quad_bezier2_eval_dt_midpoint() {
+        // B'(0.5) = 2*0.5*(P1-P0) + 2*0.5*(P2-P1) = (P1-P0)+(P2-P1) = P2-P0
+        let b = QuadraticBezier2::new(uv(0.0, 0.0), uv(1.0, 2.0), uv(2.0, 0.0));
+        assert_eq!(b.eval_dt(0.5), uv(2.0, 0.0));
+    }
+
+    #[test]
+    fn quad_bezier2_not_degenerate() {
+        let b = QuadraticBezier2::new(uv(0.0, 0.0), uv(1.0, 2.0), uv(2.0, 0.0));
+        assert!(!b.is_degenerate());
+    }
+
+    #[test]
+    fn quad_bezier2_degenerate_all_points_coincide() {
+        // All three control points equal → degenerates to a single point.
+        let b = QuadraticBezier2::new(uv(1.0, 1.0), uv(1.0, 1.0), uv(1.0, 1.0));
+        assert!(b.is_degenerate());
+    }
+
+    #[test]
+    fn quad_bezier2_collinear_not_degenerate() {
+        // Collinear control points → the curve is a line segment, but it is NOT
+        // degenerate (it's still a valid curve spanning p0→p2).
+        let b = QuadraticBezier2::new(uv(0.0, 0.0), uv(1.0, 0.0), uv(2.0, 0.0));
+        assert!(!b.is_degenerate());
+    }
+
+    // ── CubicBezier2 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn cubic_bezier2_new_stores_control_points() {
+        let b = CubicBezier2::new(uv(0.0, 0.0), uv(1.0, 3.0), uv(2.0, 3.0), uv(3.0, 0.0));
+        assert_eq!(b.p0, uv(0.0, 0.0));
+        assert_eq!(b.p1, uv(1.0, 3.0));
+        assert_eq!(b.p2, uv(2.0, 3.0));
+        assert_eq!(b.p3, uv(3.0, 0.0));
+        assert_eq!(b.t_min, 0.0);
+        assert_eq!(b.t_max, 1.0);
+    }
+
+    #[test]
+    fn cubic_bezier2_eval_at_endpoints() {
+        let b = CubicBezier2::new(uv(0.0, 0.0), uv(1.0, 3.0), uv(2.0, 3.0), uv(3.0, 0.0));
+        assert_eq!(b.eval(0.0), uv(0.0, 0.0));
+        assert_eq!(b.eval(1.0), uv(3.0, 0.0));
+    }
+
+    #[test]
+    fn cubic_bezier2_eval_at_midpoint() {
+        // B(0.5) = (P0 + 3P1 + 3P2 + P3)/8
+        // = ((0,0) + 3*(1,3) + 3*(2,3) + (3,0))/8 = ((0+3+6+3)/8, (0+9+9+0)/8)
+        // = (12/8, 18/8) = (1.5, 2.25)
+        let b = CubicBezier2::new(uv(0.0, 0.0), uv(1.0, 3.0), uv(2.0, 3.0), uv(3.0, 0.0));
+        let m = b.eval(0.5);
+        assert!((m.u - 1.5).abs() < 1e-14);
+        assert!((m.v - 2.25).abs() < 1e-14);
+    }
+
+    #[test]
+    fn cubic_bezier2_eval_dt_at_endpoints() {
+        // B'(t) = 3(1-t)²(P1-P0) + 6(1-t)t(P2-P1) + 3t²(P3-P2)
+        // B'(0) = 3(P1-P0); B'(1) = 3(P3-P2)
+        let b = CubicBezier2::new(uv(0.0, 0.0), uv(1.0, 3.0), uv(2.0, 3.0), uv(3.0, 0.0));
+        assert_eq!(b.eval_dt(0.0), uv(3.0, 9.0));
+        assert_eq!(b.eval_dt(1.0), uv(3.0, -9.0));
+    }
+
+    #[test]
+    fn cubic_bezier2_not_degenerate() {
+        let b = CubicBezier2::new(uv(0.0, 0.0), uv(1.0, 3.0), uv(2.0, 3.0), uv(3.0, 0.0));
+        assert!(!b.is_degenerate());
+    }
+
+    #[test]
+    fn cubic_bezier2_degenerate_all_points_coincide() {
+        let b = CubicBezier2::new(uv(2.0, 2.0), uv(2.0, 2.0), uv(2.0, 2.0), uv(2.0, 2.0));
+        assert!(b.is_degenerate());
+    }
+
+    #[test]
+    fn cubic_bezier2_collinear_not_degenerate() {
+        let b = CubicBezier2::new(uv(0.0, 0.0), uv(1.0, 0.0), uv(2.0, 0.0), uv(3.0, 0.0));
+        assert!(!b.is_degenerate());
+    }
+
+    // ── Curve2Kind delegation for beziers ─────────────────────────────────────
+
+    #[test]
+    fn curve2kind_quad_bezier_delegates() {
+        let b = QuadraticBezier2::new(uv(0.0, 0.0), uv(1.0, 2.0), uv(2.0, 0.0));
+        let ck = Curve2Kind::QuadraticBezier2(b.clone());
+        assert_eq!(ck.eval(0.0), b.eval(0.0));
+        assert_eq!(ck.eval(0.5), b.eval(0.5));
+        assert_eq!(ck.eval(1.0), b.eval(1.0));
+        assert_eq!(ck.eval_dt(0.5), b.eval_dt(0.5));
+        assert!(!ck.is_degenerate());
+        // end() returns the last control point (p2)
+        assert_eq!(ck.end(), b.p2);
+    }
+
+    #[test]
+    fn curve2kind_cubic_bezier_delegates() {
+        let b = CubicBezier2::new(uv(0.0, 0.0), uv(1.0, 3.0), uv(2.0, 3.0), uv(3.0, 0.0));
+        let ck = Curve2Kind::CubicBezier2(b.clone());
+        assert_eq!(ck.eval(0.5), b.eval(0.5));
+        assert_eq!(ck.eval_dt(0.0), b.eval_dt(0.0));
+        // end() returns the last control point (p3)
+        assert_eq!(ck.end(), b.p3);
+    }
+
+    // ── Path2D::quad_to / cubic_to ────────────────────────────────────────────
+
+    #[test]
+    fn quad_to_adds_quadratic_segment() {
+        let mut p = Path2D::new();
+        p.start_contour(uv(0.0, 0.0)).unwrap();
+        p.quad_to(uv(1.0, 2.0), uv(2.0, 0.0));
+        let contour = p.contour(0);
+        assert_eq!(contour.segments.len(), 1);
+        assert!(matches!(
+            contour.segments[0],
+            Curve2Kind::QuadraticBezier2(_)
+        ));
+        // segment starts at current_pos before the call (0,0) and ends at (2,0)
+        assert_eq!(contour.segments[0].eval(0.0), uv(0.0, 0.0));
+        assert_eq!(contour.segments[0].eval(1.0), uv(2.0, 0.0));
+        assert_eq!(p.current_pos().unwrap(), uv(2.0, 0.0));
+    }
+
+    #[test]
+    fn cubic_to_adds_cubic_segment() {
+        let mut p = Path2D::new();
+        p.start_contour(uv(0.0, 0.0)).unwrap();
+        p.cubic_to(uv(1.0, 3.0), uv(2.0, 3.0), uv(3.0, 0.0));
+        let contour = p.contour(0);
+        assert_eq!(contour.segments.len(), 1);
+        assert!(matches!(contour.segments[0], Curve2Kind::CubicBezier2(_)));
+        assert_eq!(contour.segments[0].eval(1.0), uv(3.0, 0.0));
+        assert_eq!(p.current_pos().unwrap(), uv(3.0, 0.0));
+    }
+
+    #[test]
+    fn quad_to_chained_after_line_to() {
+        // segment chaining: line_to then quad_to; the quad's p0 must be the line's end.
+        let mut p = Path2D::new();
+        p.start_contour(uv(0.0, 0.0))
+            .unwrap()
+            .line_to(uv(1.0, 0.0))
+            .quad_to(uv(2.0, 1.0), uv(3.0, 0.0));
+        let contour = p.contour(0);
+        assert_eq!(contour.segments.len(), 2);
+        // second segment (the quad) must start at (1,0) — the line's end
+        assert_eq!(contour.segments[1].eval(0.0), uv(1.0, 0.0));
+        assert_eq!(contour.segments[1].eval(1.0), uv(3.0, 0.0));
+    }
+
+    #[test]
+    #[should_panic(expected = "no open contour")]
+    fn quad_to_panics_with_no_open_contour() {
+        let mut p = Path2D::new();
+        p.quad_to(uv(1.0, 2.0), uv(2.0, 0.0));
+    }
+
+    // ── Path2D with beziers: finish + Display ─────────────────────────────────
+
+    #[test]
+    fn finish_accepts_bezier_contour() {
+        // A closed contour mixing a line and a quadratic: line (0,0)→(2,0),
+        // then a quad back to (0,0) via control (1,1).
+        let mut p = Path2D::new();
+        p.start_contour(uv(0.0, 0.0))
+            .unwrap()
+            .line_to(uv(2.0, 0.0))
+            .quad_to(uv(1.0, 1.0), uv(0.0, 0.0));
+        p.close().unwrap();
+        let path = p.finish().expect("bezier contour finishes");
+        assert_eq!(path.n_contours(), 1);
+        assert_eq!(path.contour(0).segments.len(), 2);
+    }
+
+    #[test]
+    fn path2d_display_quad_segment() {
+        let mut p = Path2D::new();
+        p.start_contour(uv(0.0, 0.0))
+            .unwrap()
+            .quad_to(uv(1.0, 2.0), uv(2.0, 0.0))
+            .line_to_close()
+            .unwrap();
+        let path = p.finish().unwrap();
+        let s = format!("{path}");
+        assert!(s.contains("quad_to("), "missing quad_to entry: {s}");
+    }
+
+    #[test]
+    fn path2d_display_cubic_segment() {
+        let mut p = Path2D::new();
+        p.start_contour(uv(0.0, 0.0))
+            .unwrap()
+            .cubic_to(uv(1.0, 3.0), uv(2.0, 3.0), uv(3.0, 0.0))
+            .line_to_close()
+            .unwrap();
+        let path = p.finish().unwrap();
+        let s = format!("{path}");
+        assert!(s.contains("cubic_to("), "missing cubic_to entry: {s}");
+    }
+
+    // ── QuadraticBezier3 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn quad_bezier3_eval_at_endpoints() {
+        let b = QuadraticBezier3::new(p(0.0, 0.0, 0.0), p(1.0, 2.0, 1.0), p(2.0, 0.0, 0.0));
+        assert_eq!(b.eval(0.0), p(0.0, 0.0, 0.0));
+        assert_eq!(b.eval(1.0), p(2.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn quad_bezier3_eval_midpoint() {
+        let b = QuadraticBezier3::new(p(0.0, 0.0, 0.0), p(1.0, 2.0, 1.0), p(2.0, 0.0, 0.0));
+        let m = b.eval(0.5);
+        // 0.25*P0 + 0.5*P1 + 0.25*P2 = (0.5+0.5, 1.0, 0.5) = (1.0, 1.0, 0.5)
+        assert!(approx_eq3(m, p(1.0, 1.0, 0.5)));
+    }
+
+    #[test]
+    fn quad_bezier3_eval_dt_endpoints() {
+        let b = QuadraticBezier3::new(p(0.0, 0.0, 0.0), p(1.0, 2.0, 1.0), p(2.0, 0.0, 0.0));
+        assert_eq!(b.eval_dt(0.0), p(2.0, 4.0, 2.0));
+        assert_eq!(b.eval_dt(1.0), p(2.0, -4.0, -2.0));
+    }
+
+    #[test]
+    fn quad_bezier3_degenerate_all_coincide() {
+        let b = QuadraticBezier3::new(p(1.0, 1.0, 1.0), p(1.0, 1.0, 1.0), p(1.0, 1.0, 1.0));
+        assert!(b.is_degenerate());
+    }
+
+    // ── CubicBezier3 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn cubic_bezier3_eval_endpoints() {
+        let b = CubicBezier3::new(
+            p(0.0, 0.0, 0.0),
+            p(1.0, 3.0, 0.0),
+            p(2.0, 3.0, 0.0),
+            p(3.0, 0.0, 0.0),
+        );
+        assert_eq!(b.eval(0.0), p(0.0, 0.0, 0.0));
+        assert_eq!(b.eval(1.0), p(3.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn cubic_bezier3_eval_midpoint() {
+        let b = CubicBezier3::new(
+            p(0.0, 0.0, 0.0),
+            p(1.0, 3.0, 0.0),
+            p(2.0, 3.0, 0.0),
+            p(3.0, 0.0, 0.0),
+        );
+        // B(0.5) = (P0 + 3P1 + 3P2 + P3)/8 = ((0+3+6+3)/8, (0+9+9+0)/8, 0) = (1.5, 2.25, 0)
+        assert!(approx_eq3(b.eval(0.5), p(1.5, 2.25, 0.0)));
+    }
+
+    #[test]
+    fn cubic_bezier3_degenerate_all_coincide() {
+        let b = CubicBezier3::new(
+            p(2.0, 2.0, 2.0),
+            p(2.0, 2.0, 2.0),
+            p(2.0, 2.0, 2.0),
+            p(2.0, 2.0, 2.0),
+        );
+        assert!(b.is_degenerate());
+    }
+
+    // ── Curve3Kind delegation for beziers ─────────────────────────────────────
+
+    #[test]
+    fn curve3kind_quad_bezier_delegates() {
+        let b = QuadraticBezier3::new(p(0.0, 0.0, 0.0), p(1.0, 2.0, 1.0), p(2.0, 0.0, 0.0));
+        let ck = Curve3Kind::QuadraticBezier3(b.clone());
+        assert_eq!(ck.eval(0.5), b.eval(0.5));
+        assert_eq!(ck.eval_dt(0.0), b.eval_dt(0.0));
+        assert!(!ck.is_degenerate());
+    }
+
+    #[test]
+    fn curve3kind_cubic_bezier_delegates() {
+        let b = CubicBezier3::new(
+            p(0.0, 0.0, 0.0),
+            p(1.0, 3.0, 0.0),
+            p(2.0, 3.0, 0.0),
+            p(3.0, 0.0, 0.0),
+        );
+        let ck = Curve3Kind::CubicBezier3(b.clone());
+        assert_eq!(ck.eval(0.5), b.eval(0.5));
+        assert!(!ck.is_degenerate());
     }
 
     // ── Polyline2 construction ────────────────────────────────────────────────

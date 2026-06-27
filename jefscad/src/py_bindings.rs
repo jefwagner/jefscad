@@ -175,6 +175,39 @@ impl PyPath2D {
         slf
     }
 
+    /// Append a quadratic Bézier from the current position through control
+    /// `(c1u, c1v)` to `(eu, ev)`.  Returns `self` for chaining.
+    fn quad_to(
+        mut slf: pyo3::PyRefMut<'_, Self>,
+        c1u: f64,
+        c1v: f64,
+        eu: f64,
+        ev: f64,
+    ) -> pyo3::PyRefMut<'_, Self> {
+        slf.inner
+            .quad_to(Point2::new(c1u, c1v), Point2::new(eu, ev));
+        slf
+    }
+
+    /// Append a cubic Bézier from the current position through controls
+    /// `(c1u, c1v)` and `(c2u, c2v)` to `(eu, ev)`.  Returns `self` for chaining.
+    fn cubic_to(
+        mut slf: pyo3::PyRefMut<'_, Self>,
+        c1u: f64,
+        c1v: f64,
+        c2u: f64,
+        c2v: f64,
+        eu: f64,
+        ev: f64,
+    ) -> pyo3::PyRefMut<'_, Self> {
+        slf.inner.cubic_to(
+            Point2::new(c1u, c1v),
+            Point2::new(c2u, c2v),
+            Point2::new(eu, ev),
+        );
+        slf
+    }
+
     /// Mark the current contour as closed without adding a segment.
     ///
     /// The caller must ensure `current_pos` is already bit-exactly at the
