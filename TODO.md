@@ -405,21 +405,66 @@ pub fn pip2d(point: Point2, contour: &Contour) -> bool { ... }
       nesting task can too).
 
 ### Tasks — extrusion compile (contour-set)
-- [ ] `build_extrusion` rewrite in `brep_compiler.rs`:
+
+**Scope decision (locked this session):** implement **single-outer + holes** (the
+dice-critical case) in 0-b; defer **multi-outer** (≥2 top-level outers, e.g.
+disconnected glyphs like "i"/"Æ"-fragments) to 0-c. Multi-outer genuinely needs
+the multi-solid plumbing — `compile_primitive`/`compile_csg_node` return a single
+`SolidId` today, so multi-solid output would orphan every solid but the first; making
+multi-solid reachable means changing those signatures + the mesher entry + Python
+`mesh()`, which is exactly the 0-c `NodeBRep → SolidSet` work. 0-b delivers the full
+nesting + role-check + `pip2d` integration; holes become *inner cap `EdgeLoop`s on
+the one Solid's caps* (fits the single-`SolidId` signature perfectly). The first
+dice deliverable ("single cuboid + one inset glyph") is one outer + holes
+("A"=1+1, "B"=1+2, "O"=1+1) — all covered. Disconnected glyphs are rarer and not
+on the first deliverable's path.
+
+- [x] `build_extrusion` rewrite in `brep_compiler.rs`:
       - Input `path: &Path2D` (contour set).
-      - **Nest contours**: for each contour, pick a representative point (e.g. first
-        vertex), run `pip2d` against every other contour to build a containment tree.
-        Outers = top-level CCW contours → each becomes one `Solid`. Holes = CW
-        contours → assigned as inner cap loops to the nearest enclosing `Solid`'s cap
-        `Face`s.
-      - **Reject malformed**: a CW contour not inside any CCW outer →
-        `ExtrusionError::HoleOutsideOuter`; a contour whose winding sign doesn't match
-        its nesting role → `ExtrusionError::WindingRoleMismatch`.
-      - Per `Solid`: outer contour → lateral faces (one `LinearExtrusionSurface` per
-        segment) + bottom/top cap `Plane` faces; each hole contour → inner `Loop` on
-        both caps.
-      - Multi-outer → push multiple `Solid`s into one `NodeBRep` (the SolidSet).
-      - Keep the existing `ExtrusionError` variants; add the new ones above.
+      - **Nest contours**: for each contour, count how many *other* contours contain
+        its representative point (first vertex) via `pip2d`. That count = nesting
+        depth.
+      - **Hole-outside-outer check** (runs before the general role check so the
+        more specific error fires): a CW contour at depth 0 →
+        `ExtrusionError::HoleOutsideOuter`.
+      - **Role check** (compile-time, Q1): depth-even → must be CCW (outer);
+        depth-odd → must be CW (hole). Mismatch → `ExtrusionError::WindingRoleMismatch`.
+      - **Single-outer + holes → one `Solid`**: the outer contour builds the Solid as
+        today (lateral faces + bottom/top caps); each hole contour becomes an **inner
+        `EdgeLoop`** on *both* cap faces (caps become faces-with-holes via
+        `Face::inners`). Hole cap-loop winding: holes use the *same* traversal pattern
+        as the outer on each cap — top-cap holes `forward + Forward` (CW-in-XY,
+        correct for +Z outward), bottom-cap holes `reverse + Reverse` (CCW-in-XY,
+        correct for −Z outward). Verified against the CCW-outer/CW-hole convention +
+        the `extrude_with_hole_*` tests (manifold edges, closed loop chains, 1 inner
+        loop per cap).
+      - **Multi-outer** (≥2 top-level CCW outers) or **depth ≥ 2** (island-in-hole) →
+        `ExtrusionError::MultiContourNotSupported` (the nesting/role validation runs
+        first, so malformed multi-outer paths get the specific
+        `WindingRoleMismatch`/`HoleOutsideOuter` error rather than the generic one).
+        Doc-note: lands with the 0-c `SolidSet` plumbing.
+      - Refactored: `build_extrusion_contour_skeleton` helper (verts/curves/edges/
+        lateral-faces/seams for one contour, on a given shell) called for the outer +
+        each hole; `make_cap_face` / `add_cap_outer_loop` / `add_cap_inner_loop`
+        build the cap faces and attach loops. `add_coedge` factored out of the old
+        macro.
+      - `build_extrusion` signature **unchanged** (`Result<SolidId, ExtrusionError>`);
+        returns the single outer's solid.
+      - `ExtrusionError` gains `WindingRoleMismatch`, `HoleOutsideOuter`.
+        `MultiContourNotSupported` stays, now meaning "≥2 top-level outers OR depth ≥ 2."
+      - Kept the existing `ExtrusionError` variants.
+      - `Contour::signed_area()` exposed (pub) so the compiler can do the role check;
+        delegates to the private `contour_signed_area`.
+      - *Mesher note:* the mesher currently triangulates only the planar caps (a
+        no-hole square prism also meshes to 8V/4T = 2 caps × 2 tris); lateral
+        `Extrusion`/`Revolution` surfaces and face-with-holes caps aren't fully
+        meshed yet. Pre-existing limitation, unchanged by this commit — the real
+        mesher rewrite is 0-c/later. The b-rep `build_extrusion` produces is correct
+        (Rust structural tests verify manifoldness + loop closure + inner loops).
+- [ ] (moved to 0-c) **Multi-outer → multiple `Solid`s in one `SolidSet`**: blocked
+      on the `NodeBRep → SolidSet` rename + the `compile_primitive`/
+      `compile_csg_node` signature change to return a multi-solid handle. Lands in 0-c
+      alongside the struct refactor.
 - [x] Extend `LinearExtrusionSurface` to accept bezier profile segments (the surface
       eval already delegates to the profile `Curve2`/`Curve3`; ensure the profile curve
       type carries beziers and eval/deriv are correct). Tests exercising a

@@ -11,13 +11,13 @@
 //! the resulting solid.
 
 use crate::brep_kernel::{
-    CoEdge, Edge, Face, FaceSense, Loop, LoopId, Orientation, ProvenanceData, Shell, Solid,
-    SolidId, SolidModelingContext, Vertex,
+    CoEdge, CoEdgeId, Curve2Id, Edge, EdgeId, Face, FaceId, FaceSense, Loop, LoopId, Orientation,
+    ProvenanceData, Shell, Solid, SolidId, SolidModelingContext, Vertex,
 };
 use crate::geom::{
     CircularArc2, CircularArc3, ConicalSurface, CubicBezier3, Curve2Kind, Curve3Kind,
-    CylindricalSurface, Line2, Line3, LinearExtrusionSurface, Path2D, Plane, Point2, Point3,
-    Polyline3, QuadraticBezier3, RevolutionSurface, SphericalSurface, SurfaceKind,
+    CylindricalSurface, Line2, Line3, Path2D, Plane, Point2, Point3, Polyline3, QuadraticBezier3,
+    RevolutionSurface, SphericalSurface, SurfaceKind,
 };
 use crate::linalg::Mat4;
 
@@ -855,7 +855,19 @@ pub enum ExtrusionError {
     GeometricallyOpen,
     /// `path` has more than one contour (multi-contour nesting) — not yet supported;
     /// lands in the contour-set nesting task of 0-b.
+    ///
+    /// *0-b note:* now scoped to "≥2 top-level outers OR nesting depth ≥ 2" (the
+    /// single-outer-with-holes case is supported). Multi-outer genuinely needs the
+    /// 0-c `SolidSet` plumbing (single-`SolidId` signature can't represent multiple
+    /// solids); deferred to 0-c alongside the `NodeBRep → SolidSet` rename.
     MultiContourNotSupported,
+    /// A contour's winding direction doesn't match its nesting role: a depth-even
+    /// contour (outer role) was wound CW, or a depth-odd contour (hole role) was
+    /// wound CCW. (Compile-time role check — see `TODO.md` 0-b.Q1.)
+    WindingRoleMismatch,
+    /// A CW (hole) contour is not inside any CCW (outer) contour — a hole with no
+    /// enclosing outer.
+    HoleOutsideOuter,
 }
 
 /// Parameter range `[t_min, t_max]` of a `Curve2Kind`.
@@ -968,51 +980,192 @@ pub fn build_extrusion(
     prov_id: u64,
     geom_id: u64,
 ) -> Result<SolidId, ExtrusionError> {
-    // ── Validation ────────────────────────────────────────────────────────────
-    // ── Validation ────────────────────────────────────────────────────────────
-    // 0-b: single-contour preservation. Multi-contour nesting lands in a later
-    // 0-b task; until then, reject multi-contour paths with MultiContourNotSupported.
+    // ── Per-contour validation (tolerance-free; finish() also enforces these,
+    // but build_extrusion receives un-finished builder state from the Python
+    // binding, so it validates too) ─────────────────────────────────────────
     if path.n_contours() == 0 {
-        return Err(ExtrusionError::PathEmpty);
-    }
-    if path.n_contours() > 1 {
-        return Err(ExtrusionError::MultiContourNotSupported);
-    }
-    let contour = path.contour(0);
-    if !contour.closed {
-        return Err(ExtrusionError::PathNotClosed);
-    }
-    if contour.segments.is_empty() {
         return Err(ExtrusionError::PathEmpty);
     }
     if height <= 0.0 {
         return Err(ExtrusionError::NonPositiveHeight);
     }
-    {
-        let cp = contour.current_pos();
-        let dx = cp.u - contour.start.u;
-        let dy = cp.v - contour.start.v;
+    for ci in 0..path.n_contours() {
+        let c = path.contour(ci);
+        if !c.closed {
+            return Err(ExtrusionError::PathNotClosed);
+        }
+        if c.segments.is_empty() {
+            return Err(ExtrusionError::PathEmpty);
+        }
+        // Bit-exact closure (builder's close() enforces this, but defend in depth).
+        let cp = c.current_pos();
+        let dx = cp.u - c.start.u;
+        let dy = cp.v - c.start.v;
         if (dx * dx + dy * dy).sqrt() > ctx.tolerance.pos_tol {
             return Err(ExtrusionError::GeometricallyOpen);
         }
     }
 
-    let n = contour.segments.len();
+    // ── Nesting: depth[i] = number of *other* contours whose boundary contains
+    //    contour i's representative point (first vertex). Uses pip2d (even-odd,
+    //    analytic curve-ray intersection — no sampling). ─────────────────────
+    let n_contours = path.n_contours();
+    let depths: Vec<usize> = (0..n_contours)
+        .map(|i| {
+            let rep = path.contour(i).start;
+            (0..n_contours)
+                .filter(|&j| j != i && crate::pip2d::pip2d(rep, path.contour(j)))
+                .count()
+        })
+        .collect();
+
+    // ── Hole-outside-outer: a CW contour (hole role) at depth 0 (not inside any
+    //    outer) is a hole with no enclosing outer. Check this BEFORE the general
+    //    role check so the more specific error fires. ──────────────────────────
+    for i in 0..n_contours {
+        let c = path.contour(i);
+        if c.signed_area() < 0.0 && depths[i] == 0 {
+            return Err(ExtrusionError::HoleOutsideOuter);
+        }
+    }
+
+    // ── Role check (compile-time, Q1): depth-even → CCW (outer), depth-odd → CW
+    //    (hole). Convention: CCW = positive signed area. ──────────────────────
+    for i in 0..n_contours {
+        let c = path.contour(i);
+        let area = c.signed_area();
+        let is_ccw = area > 0.0;
+        let role_is_outer = depths[i] % 2 == 0; // even depth → outer (CCW)
+        if role_is_outer != is_ccw {
+            return Err(ExtrusionError::WindingRoleMismatch);
+        }
+    }
+
+    // ── Scope: single-outer + holes only. ≥2 top-level outers OR depth ≥ 2 →
+    //    MultiContourNotSupported (deferred to 0-c SolidSet plumbing). ────────
+    let top_level_outers: Vec<usize> = (0..n_contours)
+        .filter(|&i| depths[i] == 0 && path.contour(i).signed_area() > 0.0)
+        .collect();
+    if top_level_outers.len() != 1 {
+        return Err(ExtrusionError::MultiContourNotSupported);
+    }
+    if depths.iter().any(|&d| d >= 2) {
+        return Err(ExtrusionError::MultiContourNotSupported); // island-in-hole
+    }
+    let outer_idx = top_level_outers[0];
+    let hole_indices: Vec<usize> = (0..n_contours).filter(|&i| i != outer_idx).collect();
+
+    // ── Build the outer solid + its lateral faces / cap faces. ───────────────
     let h = height;
     let tol = ctx.tolerance.pos_tol;
     let p3 = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+
+    let solid_id = ctx.push_solid(Solid::new(crate::brep_kernel::ShellId(usize::MAX)));
+    let shell_id = ctx.push_shell(Shell::new(solid_id, true));
+    ctx.get_mut_solid(solid_id).outer = shell_id;
+
+    let prov = || ProvenanceData::primitive(prov_id, geom_id);
+
+    // Outer skeleton: verts / curves / edges / lateral faces (on shell_id).
+    let outer_skel =
+        build_extrusion_contour_skeleton(ctx, path.contour(outer_idx), h, tol, shell_id, prov);
+
+    // Hole skeletons: build each once (verts/curves/edges/lateral-faces/seams),
+    // then reuse e_bot / e_top for both cap inner loops.
+    let hole_skels: Vec<(usize, ContourExtrusionSkeleton)> = hole_indices
+        .iter()
+        .map(|&hi| {
+            let s = build_extrusion_contour_skeleton(ctx, path.contour(hi), h, tol, shell_id, prov);
+            (hi, s)
+        })
+        .collect();
+
+    // ── Bottom cap (z=0, outward = −Z): Plane, AntiAligned, outer loop reversed.
+    //    Plus one inner loop per hole (hole bottom edges, reversed → CCW-in-XY,
+    //    correct for −Z outward). ─────────────────────────────────────────────
+    let bottom_face_id = {
+        let plane = Plane::new(p3(0.0, 0.0, 0.0), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
+        make_cap_face(
+            ctx,
+            shell_id,
+            SurfaceKind::Plane(plane),
+            FaceSense::AntiAligned,
+            prov,
+        )
+    };
+    add_cap_outer_loop(
+        ctx,
+        bottom_face_id,
+        path.contour(outer_idx),
+        &outer_skel.e_bot,
+        false,
+    );
+    for &(hi, ref hskel) in &hole_skels {
+        add_cap_inner_loop(ctx, bottom_face_id, path.contour(hi), &hskel.e_bot, false);
+    }
+
+    // ── Top cap (z=h, outward = +Z): Plane, Aligned, outer loop forward. ─────
+    //    Plus one inner loop per hole (hole top edges, forward → CW-in-XY,
+    //    correct for +Z outward). ─────────────────────────────────────────────
+    let top_face_id = {
+        let plane = Plane::new(p3(0.0, 0.0, h), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
+        make_cap_face(
+            ctx,
+            shell_id,
+            SurfaceKind::Plane(plane),
+            FaceSense::Aligned,
+            prov,
+        )
+    };
+    add_cap_outer_loop(
+        ctx,
+        top_face_id,
+        path.contour(outer_idx),
+        &outer_skel.e_top,
+        true,
+    );
+    for &(hi, ref hskel) in &hole_skels {
+        add_cap_inner_loop(ctx, top_face_id, path.contour(hi), &hskel.e_top, true);
+    }
+
+    Ok(solid_id)
+}
+
+/// Per-contour extrusion skeleton: vertices (bot+top), curves3 (bot+top+seam),
+/// edges (bot+top+seam), and lateral faces (one `LinearExtrusionSurface` per
+/// segment) attached to `shell_id`. Does NOT create cap faces — the caller builds
+/// caps and attaches this contour's bottom/top edges as (outer or inner) cap loops.
+struct ContourExtrusionSkeleton {
+    e_bot: Vec<EdgeId>,
+    e_top: Vec<EdgeId>,
+    #[allow(dead_code)]
+    e_seam: Vec<EdgeId>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_extrusion_contour_skeleton(
+    ctx: &mut SolidModelingContext,
+    contour: &crate::geom::Contour,
+    h: f64,
+    tol: f64,
+    shell_id: crate::brep_kernel::ShellId,
+    prov: impl Fn() -> ProvenanceData,
+) -> ContourExtrusionSkeleton {
+    use crate::geom::{
+        Curve2Kind, Curve3Kind, Line2, Line3, LinearExtrusionSurface, Point2, Point3,
+    };
+    let p3 = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
     let p2 = |u: f64, v: f64| Point2::new(u, v);
     let up = p3(0.0, 0.0, 1.0);
+    let n = contour.segments.len();
 
-    // ── Knot points ───────────────────────────────────────────────────────────
-    // knots[i] = 2-D start of segment i (= end of segment i-1 for a closed path).
+    // Knots: start of each segment (= end of previous for a closed contour).
     let mut knots: Vec<Point2> = Vec::with_capacity(n);
     knots.push(contour.start);
     for seg in &contour.segments[..n - 1] {
         knots.push(seg.end());
     }
 
-    // ── Vertices: N bottom (z=0) + N top (z=h) ───────────────────────────────
     let verts_bot: Vec<_> = knots
         .iter()
         .map(|k| ctx.push_vertex(Vertex::new(p3(k.u, k.v, 0.0), tol)))
@@ -1022,7 +1175,6 @@ pub fn build_extrusion(
         .map(|k| ctx.push_vertex(Vertex::new(p3(k.u, k.v, h), tol)))
         .collect();
 
-    // ── Curves3: N bottom + N top (lifted from path) + N vertical seams ──────
     let c3_bot: Vec<_> = contour
         .segments
         .iter()
@@ -1043,7 +1195,6 @@ pub fn build_extrusion(
         })
         .collect();
 
-    // ── Edges: N bottom + N top + N seams ────────────────────────────────────
     let e_bot: Vec<_> = (0..n)
         .map(|i| {
             let (t0, t1) = curve2_t_range(&contour.segments[i]);
@@ -1072,49 +1223,24 @@ pub fn build_extrusion(
         .map(|i| ctx.push_edge(Edge::new(c3_seam[i], verts_bot[i], verts_top[i], 0.0, 1.0)))
         .collect();
 
-    // ── Topology skeleton ─────────────────────────────────────────────────────
-    let solid_id = ctx.push_solid(Solid::new(crate::brep_kernel::ShellId(usize::MAX)));
-    let shell_id = ctx.push_shell(Shell::new(solid_id, true));
-    ctx.get_mut_solid(solid_id).outer = shell_id;
-
-    let prov = || ProvenanceData::primitive(prov_id, geom_id);
-
-    macro_rules! make_face {
-        ($surf:expr, $sense:expr) => {{
-            let surf_id = ctx.push_surface($surf);
-            let face_id = ctx.push_face(Face::new(
-                shell_id,
-                surf_id,
-                LoopId(usize::MAX),
-                $sense,
-                prov(),
-            ));
-            let loop_id = ctx.push_loop(Loop::new(face_id, true));
-            ctx.get_mut_face(face_id).outer = loop_id;
-            ctx.get_mut_shell(shell_id).faces.push(face_id);
-            (face_id, loop_id)
-        }};
-    }
-
-    macro_rules! add_coedge {
-        ($edge:expr, $orient:expr, $face:expr, $pcurve:expr) => {{
-            let ce = ctx.push_coedge(CoEdge::new($edge, $orient, $face, $pcurve));
-            ctx.get_mut_edge($edge).coedges.push(ce);
-            ce
-        }};
-    }
-
-    // ── Lateral faces (one per segment) ──────────────────────────────────────
-    // Face i loop (CCW from outside): bot[i] Fwd | seam[i+1] Fwd | top[i] Rev | seam[i] Rev
-    //
-    // PCurve trick: Line2((0,v_const),(1,v_const)) gives eval(t) = (t, v_const) for any t,
-    // directly mapping the edge parameter to the surface u-coordinate.
+    // Lateral faces (one per segment) on shell_id. Loop (CCW from outside):
+    //   bot[i] Fwd | seam[i+1] Fwd | top[i] Rev | seam[i] Rev.
     for i in 0..n {
         let j = (i + 1) % n;
         let (t_min, t_max) = curve2_t_range(&contour.segments[i]);
         let profile = lift_curve2(&contour.segments[i], 0.0);
         let les = LinearExtrusionSurface::new(profile, up);
-        let (face_id, loop_id) = make_face!(SurfaceKind::Extrusion(les), FaceSense::Aligned);
+        let surf_id = ctx.push_surface(SurfaceKind::Extrusion(les));
+        let face_id = ctx.push_face(Face::new(
+            shell_id,
+            surf_id,
+            LoopId(usize::MAX),
+            FaceSense::Aligned,
+            prov(),
+        ));
+        let loop_id = ctx.push_loop(Loop::new(face_id, true));
+        ctx.get_mut_face(face_id).outer = loop_id;
+        ctx.get_mut_shell(shell_id).faces.push(face_id);
 
         let pc_bot = ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, 0.0), p2(1.0, 0.0))));
         let pc_seam_r =
@@ -1123,50 +1249,125 @@ pub fn build_extrusion(
         let pc_seam_l =
             ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(t_min, 0.0), p2(t_min, h))));
 
-        let ce_bot = add_coedge!(e_bot[i], Orientation::Forward, face_id, pc_bot);
-        let ce_seam_r = add_coedge!(e_seam[j], Orientation::Forward, face_id, pc_seam_r);
-        let ce_top = add_coedge!(e_top[i], Orientation::Reverse, face_id, pc_top);
-        let ce_seam_l = add_coedge!(e_seam[i], Orientation::Reverse, face_id, pc_seam_l);
+        let ce_bot = add_coedge(ctx, e_bot[i], Orientation::Forward, face_id, pc_bot);
+        let ce_seam_r = add_coedge(ctx, e_seam[j], Orientation::Forward, face_id, pc_seam_r);
+        let ce_top = add_coedge(ctx, e_top[i], Orientation::Reverse, face_id, pc_top);
+        let ce_seam_l = add_coedge(ctx, e_seam[i], Orientation::Reverse, face_id, pc_seam_l);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce_bot, ce_seam_r, ce_top, ce_seam_l]);
     }
 
-    // ── Bottom cap (z=0, outward normal = -Z) ─────────────────────────────────
-    // Plane: u_dir=+X, v_dir=+Y → natural normal = +Z → AntiAligned gives outward = -Z.
-    // Loop: traverse segments in reverse order, each Reverse → CW in XY from above.
-    // Consecutive chain: seg[N-1] Rev ends at knot[N-1], seg[N-2] Rev starts there ✓
-    // PCurve: cap UV = (x, y), so pcurve is the 2-D path segment directly.
-    {
-        let plane = Plane::new(p3(0.0, 0.0, 0.0), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
-        let (face_id, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::AntiAligned);
-        let ces: Vec<_> = (0..n)
-            .rev()
-            .map(|i| {
-                let pc = ctx.push_curve2(contour.segments[i].clone());
-                add_coedge!(e_bot[i], Orientation::Reverse, face_id, pc)
-            })
-            .collect();
-        ctx.get_mut_loop(loop_id).coedges.extend(ces);
+    ContourExtrusionSkeleton {
+        e_bot,
+        e_top,
+        e_seam,
     }
+}
 
-    // ── Top cap (z=h, outward normal = +Z) ───────────────────────────────────
-    // Plane: u_dir=+X, v_dir=+Y → natural normal = +Z → Aligned.
-    // Loop: traverse segments in forward order, each Forward → CCW in XY from above.
-    // PCurve: cap UV = (x, y), same 2-D shape.
-    {
-        let plane = Plane::new(p3(0.0, 0.0, h), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
-        let (face_id, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::Aligned);
-        let ces: Vec<_> = (0..n)
-            .map(|i| {
-                let pc = ctx.push_curve2(contour.segments[i].clone());
-                add_coedge!(e_top[i], Orientation::Forward, face_id, pc)
-            })
-            .collect();
-        ctx.get_mut_loop(loop_id).coedges.extend(ces);
-    }
+/// Push a coedge and register it on its edge's coedge list.
+fn add_coedge(
+    ctx: &mut SolidModelingContext,
+    edge: EdgeId,
+    orient: Orientation,
+    face: FaceId,
+    pcurve: Curve2Id,
+) -> CoEdgeId {
+    let ce = ctx.push_coedge(CoEdge::new(edge, orient, face, pcurve));
+    ctx.get_mut_edge(edge).coedges.push(ce);
+    ce
+}
 
-    Ok(solid_id)
+/// Create a cap face (Plane) on `shell_id` with an empty outer loop. The outer
+/// loop + inner loops are added by `add_cap_outer_loop` / `add_cap_inner_loop`.
+fn make_cap_face(
+    ctx: &mut SolidModelingContext,
+    shell_id: crate::brep_kernel::ShellId,
+    surf: SurfaceKind,
+    sense: FaceSense,
+    prov: impl Fn() -> ProvenanceData,
+) -> FaceId {
+    let surf_id = ctx.push_surface(surf);
+    let face_id = ctx.push_face(Face::new(
+        shell_id,
+        surf_id,
+        LoopId(usize::MAX),
+        sense,
+        prov(),
+    ));
+    let loop_id = ctx.push_loop(Loop::new(face_id, true));
+    ctx.get_mut_face(face_id).outer = loop_id;
+    ctx.get_mut_shell(shell_id).faces.push(face_id);
+    face_id
+}
+
+/// Add the outer loop to a cap face from a contour's bottom-or-top edges.
+/// `forward`: top cap traverses segments forward (Forward → CCW-in-XY for +Z);
+/// bottom cap traverses reverse (Reverse → CW-in-XY for −Z). PCurve = the 2-D
+/// segment itself (cap UV = (x, y)).
+fn add_cap_outer_loop(
+    ctx: &mut SolidModelingContext,
+    face_id: FaceId,
+    contour: &crate::geom::Contour,
+    edges: &[EdgeId],
+    forward: bool,
+) {
+    let n = contour.segments.len();
+    let order: Vec<usize> = if forward {
+        (0..n).collect()
+    } else {
+        (0..n).rev().collect()
+    };
+    let orient = if forward {
+        Orientation::Forward
+    } else {
+        Orientation::Reverse
+    };
+    let loop_id = ctx.get_face(face_id).outer;
+    let ces: Vec<_> = order
+        .iter()
+        .map(|&i| {
+            let pc = ctx.push_curve2(contour.segments[i].clone());
+            add_coedge(ctx, edges[i], orient, face_id, pc)
+        })
+        .collect();
+    ctx.get_mut_loop(loop_id).coedges.extend(ces);
+}
+
+/// Add an inner (hole) loop to a cap face from a hole contour's bottom-or-top
+/// edges. Hole winding: same traversal pattern as the outer on this cap — top
+/// cap `forward + Forward` (CW-in-XY, correct for +Z outward), bottom cap
+/// `reverse + Reverse` (CCW-in-XY, correct for −Z outward). The hole contour is
+/// authored CW, so forward traversal yields CW-in-XY (top cap) and reverse
+/// yields CCW-in-XY (bottom cap).
+fn add_cap_inner_loop(
+    ctx: &mut SolidModelingContext,
+    face_id: FaceId,
+    contour: &crate::geom::Contour,
+    edges: &[EdgeId],
+    forward: bool,
+) {
+    let n = contour.segments.len();
+    let order: Vec<usize> = if forward {
+        (0..n).collect()
+    } else {
+        (0..n).rev().collect()
+    };
+    let orient = if forward {
+        Orientation::Forward
+    } else {
+        Orientation::Reverse
+    };
+    let inner_loop_id = ctx.push_loop(Loop::new(face_id, false));
+    ctx.get_mut_face(face_id).inners.push(inner_loop_id);
+    let ces: Vec<_> = order
+        .iter()
+        .map(|&i| {
+            let pc = ctx.push_curve2(contour.segments[i].clone());
+            add_coedge(ctx, edges[i], orient, face_id, pc)
+        })
+        .collect();
+    ctx.get_mut_loop(inner_loop_id).coedges.extend(ces);
 }
 
 // ── build_revolution ──────────────────────────────────────────────────────────
@@ -3293,6 +3494,191 @@ mod test {
             bezier_lateral,
             "expected a lateral face backed by a QuadraticBezier3 profile"
         );
+    }
+
+    // ── build_extrusion with holes (contour-set nesting) ──────────────────────
+
+    /// Helper: square outer (0,0)-(4,4) wound CCW, with a square hole (1,1)-(2,2)
+    /// wound CW. The hole's vertices are ordered clockwise so its signed area is
+    /// negative.
+    fn square_with_hole_path() -> Path2D {
+        let mut p = Path2D::new();
+        // outer: CCW (positive area)
+        p.start_contour(Point2::new(0.0, 0.0))
+            .unwrap()
+            .line_to(Point2::new(4.0, 0.0))
+            .line_to(Point2::new(4.0, 4.0))
+            .line_to(Point2::new(0.0, 4.0))
+            .line_to_close()
+            .unwrap();
+        // hole: CW (negative area) — vertices (1,1),(1,2),(2,2),(2,1) traverse CW
+        p.start_contour(Point2::new(1.0, 1.0))
+            .unwrap()
+            .line_to(Point2::new(1.0, 2.0))
+            .line_to(Point2::new(2.0, 2.0))
+            .line_to(Point2::new(2.0, 1.0))
+            .line_to_close()
+            .unwrap();
+        p
+    }
+
+    #[test]
+    fn extrude_with_hole_entity_counts() {
+        // Outer N1=4 segments + hole N2=4 segments, height = any.
+        // Vertices:  (4+4)*2 = 16.  Edges: (4+4)*3 = 24.  Faces: 4 outer lateral +
+        // 4 hole lateral + 2 caps = 10.  Coedges: outer lateral 4*4=16, hole lateral
+        // 4*4=16, bottom cap (4 outer + 4 hole) = 8, top cap (4 outer + 4 hole) = 8
+        // → 48.
+        let mut ctx = SolidModelingContext::new();
+        build_extrusion(&mut ctx, &square_with_hole_path(), 1.0, 0, 0).unwrap();
+        assert_eq!(ctx.vertices.len(), 16);
+        assert_eq!(ctx.edges.len(), 24);
+        assert_eq!(ctx.faces.len(), 10);
+        assert_eq!(ctx.coedges.len(), 48);
+        assert_eq!(ctx.shells.len(), 1);
+        assert_eq!(ctx.solids.len(), 1);
+    }
+
+    #[test]
+    fn extrude_with_hole_cap_faces_have_one_inner_loop() {
+        let mut ctx = SolidModelingContext::new();
+        build_extrusion(&mut ctx, &square_with_hole_path(), 1.0, 0, 0).unwrap();
+        // The two cap faces (planes) must each have exactly one inner loop (the hole).
+        let cap_faces: Vec<_> = ctx
+            .faces
+            .iter()
+            .filter(|f| matches!(ctx.surfaces[f.surface.0], SurfaceKind::Plane(_)))
+            .collect();
+        assert_eq!(cap_faces.len(), 2, "expected exactly 2 cap faces");
+        for cap in cap_faces {
+            assert_eq!(
+                cap.inners.len(),
+                1,
+                "each cap must have 1 inner loop (the hole)"
+            );
+        }
+    }
+
+    #[test]
+    fn extrude_with_hole_hole_edges_are_manifold() {
+        // Every edge (including the hole's bottom/top/seam edges) must have exactly
+        // 2 coedges (one Forward, one Reverse) — the hole is a proper manifold
+        // through-wall, not a dangling boundary.
+        let mut ctx = SolidModelingContext::new();
+        build_extrusion(&mut ctx, &square_with_hole_path(), 1.0, 0, 0).unwrap();
+        for (i, edge) in ctx.edges.iter().enumerate() {
+            assert_eq!(edge.coedges.len(), 2, "edge {i} must have 2 coedges");
+            let fwd = edge
+                .coedges
+                .iter()
+                .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Forward)
+                .count();
+            let rev = edge
+                .coedges
+                .iter()
+                .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Reverse)
+                .count();
+            assert_eq!(fwd, 1, "edge {i} must have 1 Forward coedge");
+            assert_eq!(rev, 1, "edge {i} must have 1 Reverse coedge");
+        }
+    }
+
+    #[test]
+    fn extrude_winding_role_mismatch() {
+        // Two CCW contours, one inside the other. Depth 0 = CCW (ok), depth 1 should
+        // be CW but is CCW → WindingRoleMismatch.
+        let mut ctx = SolidModelingContext::new();
+        let mut p = Path2D::new();
+        // outer CCW
+        p.start_contour(Point2::new(0.0, 0.0))
+            .unwrap()
+            .line_to(Point2::new(4.0, 0.0))
+            .line_to(Point2::new(4.0, 4.0))
+            .line_to(Point2::new(0.0, 4.0))
+            .line_to_close()
+            .unwrap();
+        // inner ALSO CCW (wrong — should be CW for a hole)
+        p.start_contour(Point2::new(1.0, 1.0))
+            .unwrap()
+            .line_to(Point2::new(2.0, 1.0))
+            .line_to(Point2::new(2.0, 2.0))
+            .line_to(Point2::new(1.0, 2.0))
+            .line_to_close()
+            .unwrap();
+        assert_eq!(
+            build_extrusion(&mut ctx, &p, 1.0, 0, 0),
+            Err(ExtrusionError::WindingRoleMismatch)
+        );
+    }
+
+    #[test]
+    fn extrude_hole_outside_outer() {
+        // A single CW contour at top level (depth 0) — a hole with no enclosing
+        // outer → HoleOutsideOuter.
+        let mut ctx = SolidModelingContext::new();
+        let mut p = Path2D::new();
+        p.start_contour(Point2::new(0.0, 0.0))
+            .unwrap()
+            .line_to(Point2::new(0.0, 1.0)) // CW
+            .line_to(Point2::new(1.0, 1.0))
+            .line_to(Point2::new(1.0, 0.0))
+            .line_to_close()
+            .unwrap();
+        assert_eq!(
+            build_extrusion(&mut ctx, &p, 1.0, 0, 0),
+            Err(ExtrusionError::HoleOutsideOuter)
+        );
+    }
+
+    #[test]
+    fn extrude_multi_outer_not_supported() {
+        // Two separate CCW outers, neither containing the other → 2 top-level
+        // outers → MultiContourNotSupported (deferred to 0-c SolidSet plumbing).
+        let mut ctx = SolidModelingContext::new();
+        let mut p = Path2D::new();
+        p.start_contour(Point2::new(0.0, 0.0))
+            .unwrap()
+            .line_to(Point2::new(1.0, 0.0))
+            .line_to(Point2::new(1.0, 1.0))
+            .line_to(Point2::new(0.0, 1.0))
+            .line_to_close()
+            .unwrap();
+        p.start_contour(Point2::new(5.0, 5.0))
+            .unwrap()
+            .line_to(Point2::new(6.0, 5.0))
+            .line_to(Point2::new(6.0, 6.0))
+            .line_to(Point2::new(5.0, 6.0))
+            .line_to_close()
+            .unwrap();
+        assert_eq!(
+            build_extrusion(&mut ctx, &p, 1.0, 0, 0),
+            Err(ExtrusionError::MultiContourNotSupported)
+        );
+    }
+
+    #[test]
+    fn extrude_with_hole_loop_chains_close() {
+        // Both the outer cap loop and the hole's inner cap loop must form closed
+        // coedge chains (end of coedge i == start of coedge i+1, including wrap).
+        let mut ctx = SolidModelingContext::new();
+        build_extrusion(&mut ctx, &square_with_hole_path(), 1.0, 0, 0).unwrap();
+        for lp in &ctx.loops {
+            let n = lp.coedges.len();
+            assert!(n >= 3, "loop must have >= 3 coedges");
+            for i in 0..n {
+                let ce_cur = ctx.get_coedge(lp.coedges[i]);
+                let ce_next = ctx.get_coedge(lp.coedges[(i + 1) % n]);
+                let end_cur = match ce_cur.orientation {
+                    Orientation::Forward => ctx.get_edge(ce_cur.edge).v1,
+                    Orientation::Reverse => ctx.get_edge(ce_cur.edge).v0,
+                };
+                let start_next = match ce_next.orientation {
+                    Orientation::Forward => ctx.get_edge(ce_next.edge).v0,
+                    Orientation::Reverse => ctx.get_edge(ce_next.edge).v1,
+                };
+                assert_eq!(end_cur, start_next, "loop coedge chain broken at {i}");
+            }
+        }
     }
 
     // ── build_revolution ──────────────────────────────────────────────────────

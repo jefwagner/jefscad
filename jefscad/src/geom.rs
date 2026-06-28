@@ -1263,6 +1263,15 @@ impl Contour {
         self.current_pos
     }
 
+    /// Exact signed area of this (assumed-closed) contour (Green's theorem:
+    /// 0.5·∮(x·dy − y·dx), per-segment closed-form). Positive = CCW (outer),
+    /// negative = CW (hole). Used by `build_extrusion`'s compile-time role check
+    /// (depth-even → must be CCW; depth-odd → must be CW) and by `Path2D::finish`'s
+    /// build-time nonzero-area check. See [`contour_signed_area`] for the math.
+    pub fn signed_area(&self) -> f64 {
+        contour_signed_area(self)
+    }
+
     /// Push a segment, advancing `current_pos` to the segment's end.
     pub(crate) fn push(&mut self, seg: Curve2Kind, end: Point2) {
         self.segments.push(seg);
