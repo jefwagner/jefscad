@@ -28,14 +28,68 @@ to a b-rep `SolidSet` per tree node. The first concrete deliverable is custom D&
 a Python program that takes a font + glyph and produces a 3D-printable die face with
 the glyph boolean-subtracted from one cuboid face.
 
-**Design narrative lives in `architecture/`** (the renamed `jefscad-plan/` directory):
-`architecture.md` (b-rep structs, surface taxonomy, tolerance, struct lifecycle),
-`boolean-ops.md` (the boolean pipeline — the riskiest piece), and the original
-braindump. For the full *what & why*, read `architecture/index.md` first.
+**Design narrative lives in `architecture/`**: `index.md` (start here for the full
+what & why), `architecture.md` (b-rep structs, surface taxonomy, tolerance, struct
+lifecycle), `boolean-ops.md` (the boolean pipeline — the riskiest piece), and
+`jefscad.md` (original braindump / motivation).
 
 ---
 
-## Repository Layout (target state after the Phase 0 refactor)
+## Modes of work
+
+Mode switches are explicit — say "plan" or "implement" to change modes.
+
+- **Planning mode**: read `~/tools/llm-instructions/planning.md` before starting.
+  Produces 1–4 one-commit-sized items in `TODO.md` and triages `backlog.md`.
+- **Implementation mode**: read `~/tools/llm-instructions/implementation.md` before
+  starting. TDD loop with hard STOP gates requiring user approval.
+
+### Project-specific workflow deltas
+
+These modify the generic loop in the shared instruction files:
+
+- **The (a)/(b) test split.** Tests come in two classes by intent:
+  - **(a) Unit tests for *internal* interfaces.** Inline in Rust
+    (`#[cfg(test)] mod test { ... }` at the bottom of the source file) and focused
+    Python tests. They pin a single module's internals. **These MAY be updated or
+    changed during a refactor** — they are part of the implementation, not a contract.
+  - **(b) Integration tests for *cross-module / public* interfaces.** These live in
+    `tests/` (Python, pytest) and `jefscad/tests/` (Rust integration tests, when
+    added). They pin the public contract between modules. **These MUST NOT be updated
+    or changed during a refactor** — a refactor moves internals around while keeping
+    these green. If a refactor genuinely needs to change one of these, that is a
+    signal the public contract is changing and must be called out explicitly, not
+    silently edited.
+
+  The point: a refactor is *allowed* to rewrite every unit test and *forbidden* from
+  rewriting integration tests. The integration tests are the safety net that makes an
+  aggressive refactor safe.
+
+- **Planning consults `ROADMAP.md`.** The long-horizon phased plan is the wellspring:
+  planning mode decomposes items from here into `TODO.md`. Edit it when a phase's
+  shape changes, not when an individual task lands.
+- **`CHANGELOG.md` is milestones, not commits.** Curated milestone summaries
+  (reverse-chronological, coarser than commits) — a phase landing or a shipped
+  feature, not every commit. Duplicating `git log` is why CHANGELOGs get abandoned.
+
+---
+
+## Planning and progress files
+
+| File | Horizon | Granularity | Churn |
+|------|---------|-------------|-------|
+| `ROADMAP.md` | long-term | phases toward full project completion | rarely |
+| `TODO.md` | current session | commit-sized actionable items (1–4) | every planning session |
+| `backlog.md` | persistent | raw ideas, mid-session discoveries | triaged in planning mode |
+| `CHANGELOG.md` | history | milestone summaries | at milestones |
+
+`TODO.md` is session-scoped: rewritten at each planning session, cleared at the end
+of a work chunk (see `~/tools/llm-instructions/wiki-sync.md` — the changelog entry
+goes to `CHANGELOG.md` at milestones).
+
+---
+
+## Repository Layout
 
 ```
 repo root/
@@ -56,7 +110,6 @@ repo root/
 │       ├── brep_compiler.rs # CSG tree → b-rep SolidSet
 │       ├── bool_ops.rs      # boolean union / difference / intersection
 │       ├── mesher.rs        # b-rep → triangular mesh
-│       ├── predicates.rs    # classification predicates (deleted in 0-a)
 │       ├── py_bindings.rs   # pyo3 Python bindings
 │       └── bin/stub_gen.rs  # generates python/jefscad/_jefscad/__init__.pyi
 │
@@ -65,7 +118,7 @@ repo root/
 │   └── _jefscad/
 │       └── __init__.pyi     # generated type stubs
 │
-├── architecture/           # design narrative — the "what & why" (read-only-ish)
+├── architecture/            # design narrative — the "what & why"
 │   ├── index.md
 │   ├── architecture.md
 │   ├── boolean-ops.md
@@ -73,33 +126,17 @@ repo root/
 │
 ├── docs/                    # Sphinx user-facing HTML docs source
 ├── notebooks/               # Jupyter notebooks (interactive scratch)
+├── tests/                   # Python integration tests (contract tier (b))
 │
 ├── ROADMAP.md               # long-horizon phased plan (the wellspring)
-├── TODO.md                  # current / next-session actionable items (churns often)
+├── TODO.md                  # session-scoped actionable items
+├── backlog.md               # persistent idea parking lot
 ├── CHANGELOG.md             # curated milestone summaries (reverse-chronological)
 │
 ├── README.md                # short public summary / motivation
 ├── DEVELOPMENT.md           # environment setup + build/test/jupyter how-to
 └── AGENTS.md                # this file
 ```
-
-### Phase 0 (0-a complete)
-
-The project's foundation refactor is Phase 0 (see `ROADMAP.md` → Phase 0, and
-`architecture/` for the detailed breakdown). **Sub-step 0-a is complete:**
-
-- The standalone `flint` crate (rounded floating-point interval arithmetic, nightly
-  Rust) has been **spun out to its own independent repository** and is no longer in
-  this workspace or a dependency of `jefscad`.
-- `jefscad` uses **no nightly features**; the toolchain is **stable Rust, edition
-  2024** — plain `cargo`, no `+nightly` anywhere.
-- `jefscad/src/predicates.rs` (dead code, the abandoned pervasive-interval direction)
-  was deleted in 0-a; its `mat4_inv_f64` helper is preserved as `Mat4::inverse` in
-  `linalg.rs`.
-
-The remaining Phase 0 work is **0-b** (Path2D contour-set + beziers + ruled surface)
-and **0-c** (b-rep defining-only structs + Context side-tables + relative tolerance).
-`TODO.md` tracks the current actionable items.
 
 ---
 
@@ -153,109 +190,15 @@ sphinx-build -b html docs/ docs/_build/html/
   `cargo test` works **without linking against Python at all** — Rust unit tests run
   standalone. Only `maturin develop` activates the feature.
 - **No `rust-toolchain.toml`** in the repo. `jefscad` targets stable Rust, edition
-  2024 — plain `cargo` everywhere. (The former `flint` workspace member was the only
-  nightly consumer; it has been spun out to its own repo as part of Phase 0-a.)
+  2024 — plain `cargo` everywhere.
 - `.venv/` and the compiled `.so` are gitignored; every fresh clone needs the one-time
   setup in `DEVELOPMENT.md` (`uv venv`, `uv pip install ...`, `maturin develop`).
 
 ---
 
-## Workflow with AI
-
-This is the workflow AGENTS.md exists to support. Two modes, used in sequence within a
-session.
-
-### Mode A — Plan / brainstorm
-
-Use AI to talk through a problem, work through design options, and produce a concrete,
-actionable plan. The output of this mode is **`TODO.md`** updated (or created) with
-checkbox items — each item commit-sized and individually testable. Before leaving Mode A:
-
-- Decompose the work from `ROADMAP.md` into specific, actionable `TODO.md` items.
-- Resolve open design questions *before* implementing (record decisions in `architecture/`
-  if they change the design, or inline in `TODO.md` if they're scoped to the task).
-- Each TODO item should be small enough that one TDD cycle (below) closes it.
-
-### Mode B — TDD development cycle
-
-For each `TODO.md` item, in this order:
-
-1. **Decide the API specifics first.** Agree on struct layouts, trait definitions, and
-   method signatures *before* writing tests or implementation. Capture the decision (in
-   `architecture/` if it's a lasting design point, or in the commit if it's local).
-2. **Write the tests** — split into two classes by intent:
-   - **(a) Unit tests for *internal* interfaces.** These live inline in Rust
-     (`#[cfg(test)] mod test { ... }` at the bottom of the source file) and as focused
-     Python tests. They pin behaviour of a single module's internals. **These MAY be
-     updated or changed during a refactor** — they are part of the implementation, not
-     a contract.
-   - **(b) Integration tests for *cross-module / public* interfaces.** These live in
-     `tests/` (Python, pytest) and `jefscad/tests/` (Rust integration tests, when
-     added). They pin the public contract between modules. **These MUST NOT be updated
-     or changed during a refactor** — a refactor moves internals around while keeping
-     these green. If a refactor genuinely needs to change one of these, that is a signal
-     the public contract is changing and should be called out explicitly, not silently
-     edited.
-3. **Implement** the code until the tests pass.
-4. **Run the full suite** (`cargo test` + `pytest -v`) to confirm nothing else broke.
-5. **Commit once tests are green** (see commit style below). Check off the TODO item.
-
-The point of the (a)/(b) split: a refactor is *allowed* to rewrite every unit test, and
-*forbidden* from rewriting integration tests. Integration tests are the safety net that
-makes an aggressive refactor safe.
-
----
-
-## Planning and Progress Files
-
-Three top-level files, split by time horizon:
-
-| File | Horizon | Granularity | Churn |
-|------|---------|-------------|-------|
-| `ROADMAP.md` | long-term | phases toward full project completion | rarely |
-| `TODO.md` | current / next session | commit-sized actionable items | often |
-| `CHANGELOG.md` | history | **milestones** (phase completions, shipped features) | at milestones |
-
-### `ROADMAP.md`
-
-The long-horizon phased plan (migrated from `architecture/roadmap.md`). This is the
-wellspring: Mode A decomposes items from here into `TODO.md`. Edit it when a phase's
-shape changes, not when an individual task lands.
-
-### `TODO.md`
-
-The current and (optionally) next-session actionable items, each commit-sized and
-individually testable. Created/updated during Mode A. Worked through (and checked off)
-during Mode B. Use **standard Markdown checkboxes**:
-
-```
-- [ ] pending item
-- [x] completed item
-```
-
-### `CHANGELOG.md` — milestones, not commits
-
-`CHANGELOG.md` is **curated milestone summaries**, reverse-chronological — coarser than
-commits. It is **not** a per-commit log (that is `git log`'s job, and duplicating it is
-why CHANGELOGs get abandoned). Most commits do not touch `CHANGELOG.md`; only milestone
-boundaries (a phase landing, a shipped feature) do.
-
-### The session ritual
-
-- **Session start (Mode A):** review leftover `TODO.md` items → read `ROADMAP.md` →
-  decompose the next chunk of work into fresh `TODO.md` checkbox items.
-- **During the session (Mode B):** TDD-cycle each TODO item; commit when green; check off
-  the item in `TODO.md`.
-- **Session end (milestone boundary):** when a milestone has been reached (e.g. a phase
-  completes), write a `CHANGELOG.md` entry summarising what was built, and clear the
-  completed items from `TODO.md`. If no milestone crossed, just leave `TODO.md` with its
-  checkmarks for next session — no mandatory CHANGELOG churn every session.
-
----
-
 ## Commit Message Style
 
-Format-agnostic and human-readable. Two parts:
+Two parts:
 
 1. **Subject line** — a short, general description that reads well from
    `git log --oneline`. Imperative mood preferred. No required prefix or convention
@@ -264,30 +207,8 @@ Format-agnostic and human-readable. Two parts:
    notable design decisions, and (for tests) what the new tests cover. Wrap at a
    readable width.
 
-Example shape:
-
-```
-Add Mat4 newtype and move matrix inverse out of predicates
-
-Introduces jefscad/src/linalg.rs with a Mat4 newtype wrapping [f64;16]
-(row-major, column-vector / right-multiply, matching the existing convention).
-Members: IDENTITY, from_array, mat_mul, apply_pt, apply_vec, inverse, is_identity,
-as_array.
-
-mat4_inv_f64 is moved from predicates.rs onto Mat4::inverse (panic on singular,
-preserving the existing logic) so the helper survives the predicates.rs deletion
-in the next step.
-
-csg_lang.rs and brep_compiler.rs switch from flint::FlintArray<f64,16> to Mat4;
-.midpoint() calls become .as_array() since plain f64 has no interval.
-
-6 unit tests: identity, compose, apply_pt vs apply_vec, inverse round-trip,
-is_identity true/false, as_array round-trip. Existing primitive/csg_lang tests
-unchanged and green.
-```
-
-**Couple CHANGELOG to milestones, not commits.** Only touch `CHANGELOG.md` when a
-milestone lands; otherwise the commit message itself is the record of an atomic change.
+Lasting design decisions go in `architecture/` (if they change the design) or the
+commit body (if they're local to the task).
 
 ---
 
@@ -316,21 +237,21 @@ milestone lands; otherwise the commit message itself is the record of an atomic 
 
 ---
 
-## External Knowledge Base
+## Wiki
 
-A separate personal knowledge base lives at `~/kb` (outside this repo). It holds
-JefSCAD wiki pages and notes (e.g. `~/kb/wiki/JefSCAD*.md`,
-`~/kb/notes/jefscad-plan-*.md`). **Reference it when useful** for background and prior
-planning context. **Do not write to it from this repo** — it is a read-only reference
-from here.
+This project has an LLM-managed wiki at `~/wiki/projects/jefscad/` (background,
+design rationale, and planning history distilled from `architecture/` and past
+planning notes). Before ending a session that produced commits, check whether the
+wiki needs updating — full instructions in `~/wiki/AGENTS.md`. The wiki is a
+*reference*, not a write target from implementation tasks: wiki updates happen as
+their own step (wiki-sync mode), not as side-effects.
 
 ---
 
 ## Things to Avoid
 
 - Do not run `cargo build` / `cargo test` with `+nightly` — `jefscad` is stable-Rust
-  (edition 2024). The former `flint` crate was the only nightly consumer and has been
-  spun out to its own repo.
+  (edition 2024).
 - Do not modify `architecture/` design narrative as a side-effect of an implementation
   task unless the task genuinely changes the design — then update it deliberately.
 - Do not rewrite integration tests (cross-module / `tests/` / `jefscad/tests/`) during a
@@ -342,3 +263,5 @@ from here.
   changes — run `cargo run --bin stub_gen --features extension-module` and commit the
   resulting `python/jefscad/_jefscad/__init__.pyi` together with the API change.
 - Do not duplicate every commit into `CHANGELOG.md` — CHANGELOG is milestones only.
+- Do not write to `~/wiki/` from implementation tasks — wiki updates happen in
+  wiki-sync mode.
