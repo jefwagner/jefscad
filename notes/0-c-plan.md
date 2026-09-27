@@ -1,3 +1,10 @@
+# Phase 0-c execution plan
+
+> Relocated 2026-09-06 from the old TODO.md (which became session-scoped).
+> To be decomposed into session TODO items at the next planning session,
+> after resolving the open questions (0-c.Q1–Q3) below. Ingestion
+> candidate for ~/wiki/notes/ once settled.
+
 # TODO — current / next-session actionable items
 
 Phase 0-a and 0-b are **complete** (see `CHANGELOG.md` for milestone
