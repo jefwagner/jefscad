@@ -1,0 +1,81 @@
+{
+  "name": "jefscad",
+
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  "remoteUser": "vscode",
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  "//": "Read the comment in .devcontainer/Dockerfile first. Containment here is a function of what is NOT mounted and NOT installed, so the mount list below is deliberately short. Before adding a mount, ask: does this need to be writable, does it carry a credential, and is there a path that does not require it? Every mount is a hole in the boundary.",
+
+  "mounts": [
+    "source=${localEnv:HOME}/.config/jef/jefscad-pat,target=/home/vscode/.config/jef/jefscad-pat,type=bind,readonly",
+    "source=${localEnv:HOME}/tools/spend.py,target=/home/vscode/tools/spend.py,type=bind,readonly",
+    "source=${localEnv:HOME}/tools/llm-instructions,target=/home/vscode/tools/llm-instructions,type=bind,readonly",
+    "source=${localEnv:HOME}/wiki,target=/home/vscode/wiki,type=bind,readonly",
+    "source=${localEnv:HOME}/.msmtprc,target=/home/vscode/.msmtprc,type=bind,readonly"
+  ],
+
+  "//mounts-why": "Five mounts, and each earns its place. (1) the repo-scoped PAT, at the same relative path it has on the host so git-askpass.sh needs no container-specific variant. NOT the ~/.config/jef directory — that would also expose the pixel-world PAT. (2) and (3) the shared instruction files, read-only so the agent cannot edit the rules it is operating under. (4) the wiki, read-only: full read access to all three tiers — including projects/flint, which this project depends on for interval arithmetic, so the cross-project architectural reading is real here — and no ability to write, because the wiki is the one tier where an undetected error compounds instead of being caught. Updates go to notes/wiki-proposals/ and a human promotes them. (5) ~/.msmtprc, for the unsupervised summary email. This is the one mount that exists purely for a notification, so it is worth being explicit about the trade: it hands the container the ability to send mail as the user. It is read-only and the agent is instructed to send exactly one message per run, to jefwagner@gmail.com, never to anyone else. If that is not acceptable, drop this mount and the email instruction together — the fallback is a summary file in the branch, as pixel-world does. NOT ~/.ssh (the personal key reaches every repo on the account, including the wiki), NOT ~/.config/lab-bot, NOT ~/.aws or ~/.azure, NOT the host tool directory, NOT the docker socket (maturin builds the extension in-process; no container runtime is needed here).",
+
+  "runArgs": [
+    "--memory=8g",
+    "--cpus=4",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges:true"
+  ],
+
+  "remoteEnv": {
+    "PATH": "${containerEnv:PATH}:/home/vscode/.cargo/bin:/workspace/.venv/bin",
+    "SHELL": "/bin/bash",
+
+    "//git": "GIT_ASKPASS points at the tracked script that reads the mounted PAT. GIT_TERMINAL_PROMPT=0 stops a failed lookup from falling back to an interactive prompt, which in an unattended run hangs until the run is killed. GIT_SSH_COMMAND=/bin/false is a second line of defence behind the missing ssh binary: even if one is added later, git cannot silently fall back to SSH.",
+
+    "GIT_ASKPASS": "/workspace/git-askpass.sh",
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_SSH_COMMAND": "/bin/false",
+
+    "UV_LINK_MODE": "copy",
+    "UV_COMPILE_BYTECODE": "1",
+    "UV_PROJECT_ENVIRONMENT": "/workspace/.venv",
+
+    "RUSTUP_HOME": "/home/vscode/.rustup",
+    "CARGO_HOME": "/home/vscode/.cargo"
+  },
+
+  "postCreateCommand": "bash .devcontainer/setup-python.sh",
+
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "[rust]": {
+          "editor.defaultFormatter": "rust-lang.rust-analyzer",
+          "editor.formatOnSave": true
+        },
+        "[python]": {
+          "editor.defaultFormatter": "charlie1856.ruff",
+          "editor.formatOnSave": true
+        },
+        "files.exclude": {
+          "**/.venv": true
+        }
+      },
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "ms-toolsai.jupyter",
+        "ms-toolsai.jupyter-keymap",
+        "ms-toolsai.vscode-jupyter-cell-tags",
+        "ms-toolsai.vscode-jupyter-renderers"
+      ]
+    }
+  }
+}
