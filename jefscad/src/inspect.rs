@@ -26,7 +26,7 @@
 //! refinement and booleans — not the presentation `TriMesh` used for STL/OBJ
 //! export.
 
-use crate::brep_compiler::compile_csg_node;
+use crate::brep_compiler::{compile_csg_node, sole_solid};
 use crate::brep_kernel::{FaceSense, Orientation, SolidModelingContext};
 use crate::csg_lang::CsgNode;
 use crate::geom::{Curve2, Curve2Kind, Curve3, Curve3Kind, Surface, SurfaceKind};
@@ -344,7 +344,8 @@ fn sample_pcurve(kind: &Curve2Kind, t0: f64, t1: f64) -> Vec<[f64; 2]> {
 /// [`MeshDump`] stay fixed.
 pub fn dump_mesh_csg_node(node: &CsgNode, resolution: u32) -> MeshDump {
     let mut ctx = SolidModelingContext::new();
-    let root = compile_csg_node(&mut ctx, node);
+    let set = compile_csg_node(&mut ctx, node);
+    let root = sole_solid(&ctx, set);
     let opts = MeshOptions {
         resolution,
         ..MeshOptions::default()
