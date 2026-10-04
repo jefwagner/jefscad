@@ -138,9 +138,8 @@ fn intersect_plane_plane(
     let p_start = origin + dir * t_start;
     let p_end   = origin + dir * t_end;
 
-    let tol      = ctx.tolerance.pos_tol;
-    let v_start  = ctx.push_vertex(Vertex::new(p_start, tol));
-    let v_end    = ctx.push_vertex(Vertex::new(p_end,   tol));
+    let v_start  = ctx.push_vertex(Vertex::new(p_start));
+    let v_end    = ctx.push_vertex(Vertex::new(p_end));
     let curve3   = ctx.push_curve3(Curve3Kind::Line3(Line3::new(p_start, p_end)));
     let pcurve_a = push_intersection_pcurve(ctx, face_a, p_start, p_end);
     let pcurve_b = push_intersection_pcurve(ctx, face_b, p_start, p_end);

@@ -12,7 +12,7 @@
 
 use crate::brep_kernel::{
     CoEdge, CoEdgeId, Curve2Id, Edge, EdgeId, Face, FaceId, FaceSense, Loop, LoopId, Orientation,
-    ProvenanceData, Shell, Solid, SolidId, SolidModelingContext, Vertex,
+    ProvenanceData, Shell, Solid, SolidId, SolidModelingContext, Vertex, fuzzy_eq,
 };
 use crate::geom::{
     CircularArc2, CircularArc3, ConicalSurface, CubicBezier3, Curve2Kind, Curve3Kind,
@@ -38,19 +38,17 @@ pub fn build_cuboid(
     prov_id: u64,
     geom_id: u64,
 ) -> SolidId {
-    let tol = ctx.tolerance.pos_tol;
-
     // ── Vertices ──────────────────────────────────────────────────────────────
     // V0..V3 at z=0 (CCW from origin), V4..V7 at z=dz directly above V0..V3.
     let p = |x, y, z| Point3::new(x, y, z);
-    let v0 = ctx.push_vertex(Vertex::new(p(0.0, 0.0, 0.0), tol));
-    let v1 = ctx.push_vertex(Vertex::new(p(dx, 0.0, 0.0), tol));
-    let v2 = ctx.push_vertex(Vertex::new(p(dx, dy, 0.0), tol));
-    let v3 = ctx.push_vertex(Vertex::new(p(0.0, dy, 0.0), tol));
-    let v4 = ctx.push_vertex(Vertex::new(p(0.0, 0.0, dz), tol));
-    let v5 = ctx.push_vertex(Vertex::new(p(dx, 0.0, dz), tol));
-    let v6 = ctx.push_vertex(Vertex::new(p(dx, dy, dz), tol));
-    let v7 = ctx.push_vertex(Vertex::new(p(0.0, dy, dz), tol));
+    let v0 = ctx.push_vertex(Vertex::new(p(0.0, 0.0, 0.0)));
+    let v1 = ctx.push_vertex(Vertex::new(p(dx, 0.0, 0.0)));
+    let v2 = ctx.push_vertex(Vertex::new(p(dx, dy, 0.0)));
+    let v3 = ctx.push_vertex(Vertex::new(p(0.0, dy, 0.0)));
+    let v4 = ctx.push_vertex(Vertex::new(p(0.0, 0.0, dz)));
+    let v5 = ctx.push_vertex(Vertex::new(p(dx, 0.0, dz)));
+    let v6 = ctx.push_vertex(Vertex::new(p(dx, dy, dz)));
+    let v7 = ctx.push_vertex(Vertex::new(p(0.0, dy, dz)));
 
     // ── Edges (Line3, t ∈ [0,1]) ──────────────────────────────────────────────
     // Bottom ring: E0..E3  Top ring: E4..E7  Verticals: E8..E11
@@ -95,7 +93,7 @@ pub fn build_cuboid(
         // shell ID not yet known; we'll use a placeholder and patch below
         crate::brep_kernel::ShellId(usize::MAX)
     }));
-    let shell_id = ctx.push_shell(Shell::new(solid_id, true));
+    let shell_id = ctx.push_shell(Shell::new(true));
     // patch solid.outer
     ctx.get_mut_solid(solid_id).outer = shell_id;
 
@@ -107,13 +105,12 @@ pub fn build_cuboid(
         ($surf:expr, $sense:expr) => {{
             let surf_id = ctx.push_surface($surf);
             let face_id = ctx.push_face(Face::new(
-                shell_id,
                 surf_id,
                 LoopId(usize::MAX), // patched below
                 $sense,
                 prov(),
             ));
-            let loop_id = ctx.push_loop(Loop::new(face_id, true));
+            let loop_id = ctx.push_loop(Loop::new(true));
             ctx.get_mut_face(face_id).outer = loop_id;
             ctx.get_mut_shell(shell_id).faces.push(face_id);
             (face_id, loop_id)
@@ -134,9 +131,8 @@ pub fn build_cuboid(
 
     // Helper: push a coedge and register it back on the edge.
     macro_rules! add_coedge {
-        ($ctx:expr, $edge:expr, $orient:expr, $face:expr, $pcurve:expr) => {{
-            let ce_id = $ctx.push_coedge(CoEdge::new($edge, $orient, $face, $pcurve));
-            $ctx.get_mut_edge($edge).coedges.push(ce_id);
+        ($ctx:expr, $edge:expr, $orient:expr, $pcurve:expr) => {{
+            let ce_id = $ctx.push_coedge(CoEdge::new($edge, $orient, $pcurve));
             ce_id
         }};
     }
@@ -148,7 +144,7 @@ pub fn build_cuboid(
         let u_dir = p(1.0, 0.0, 0.0);
         let v_dir = p(0.0, -1.0, 0.0);
         let surf = SurfaceKind::Plane(Plane::new(p0, u_dir, v_dir));
-        let (face_id, loop_id) = make_face!(surf, FaceSense::Aligned);
+        let (_, loop_id) = make_face!(surf, FaceSense::Aligned);
 
         // Loop: E0 Rev, E3 Rev, E2 Rev, E1 Rev  (V1→V0→V3→V2→V1)
         // PCurves: Line2 from UV(edge.v0) to UV(edge.v1), regardless of orientation.
@@ -173,10 +169,10 @@ pub fn build_cuboid(
             uv(pts[2], p0, u_dir, v_dir),
         );
 
-        let ce0 = add_coedge!(ctx, e0, Orientation::Reverse, face_id, pc_e0);
-        let ce3 = add_coedge!(ctx, e3, Orientation::Reverse, face_id, pc_e3);
-        let ce2 = add_coedge!(ctx, e2, Orientation::Reverse, face_id, pc_e2);
-        let ce1 = add_coedge!(ctx, e1, Orientation::Reverse, face_id, pc_e1);
+        let ce0 = add_coedge!(ctx, e0, Orientation::Reverse, pc_e0);
+        let ce3 = add_coedge!(ctx, e3, Orientation::Reverse, pc_e3);
+        let ce2 = add_coedge!(ctx, e2, Orientation::Reverse, pc_e2);
+        let ce1 = add_coedge!(ctx, e1, Orientation::Reverse, pc_e1);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce0, ce3, ce2, ce1]);
@@ -189,7 +185,7 @@ pub fn build_cuboid(
         let u_dir = p(1.0, 0.0, 0.0);
         let v_dir = p(0.0, 1.0, 0.0);
         let surf = SurfaceKind::Plane(Plane::new(p0, u_dir, v_dir));
-        let (face_id, loop_id) = make_face!(surf, FaceSense::Aligned);
+        let (_, loop_id) = make_face!(surf, FaceSense::Aligned);
 
         // Loop: E4 Fwd, E5 Fwd, E6 Fwd, E7 Fwd  (V4→V5→V6→V7→V4)
         let pc_e4 = line2(
@@ -213,10 +209,10 @@ pub fn build_cuboid(
             uv(pts[4], p0, u_dir, v_dir),
         );
 
-        let ce4 = add_coedge!(ctx, e4, Orientation::Forward, face_id, pc_e4);
-        let ce5 = add_coedge!(ctx, e5, Orientation::Forward, face_id, pc_e5);
-        let ce6 = add_coedge!(ctx, e6, Orientation::Forward, face_id, pc_e6);
-        let ce7 = add_coedge!(ctx, e7, Orientation::Forward, face_id, pc_e7);
+        let ce4 = add_coedge!(ctx, e4, Orientation::Forward, pc_e4);
+        let ce5 = add_coedge!(ctx, e5, Orientation::Forward, pc_e5);
+        let ce6 = add_coedge!(ctx, e6, Orientation::Forward, pc_e6);
+        let ce7 = add_coedge!(ctx, e7, Orientation::Forward, pc_e7);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce4, ce5, ce6, ce7]);
@@ -229,7 +225,7 @@ pub fn build_cuboid(
         let u_dir = p(1.0, 0.0, 0.0);
         let v_dir = p(0.0, 0.0, 1.0);
         let surf = SurfaceKind::Plane(Plane::new(p0, u_dir, v_dir));
-        let (face_id, loop_id) = make_face!(surf, FaceSense::Aligned);
+        let (_, loop_id) = make_face!(surf, FaceSense::Aligned);
 
         // Loop: E0 Fwd, E9 Fwd, E4 Rev, E8 Rev  (V0→V1→V5→V4→V0)
         let pc_e0 = line2(
@@ -253,10 +249,10 @@ pub fn build_cuboid(
             uv(pts[4], p0, u_dir, v_dir),
         );
 
-        let ce0 = add_coedge!(ctx, e0, Orientation::Forward, face_id, pc_e0);
-        let ce9 = add_coedge!(ctx, e9, Orientation::Forward, face_id, pc_e9);
-        let ce4 = add_coedge!(ctx, e4, Orientation::Reverse, face_id, pc_e4);
-        let ce8 = add_coedge!(ctx, e8, Orientation::Reverse, face_id, pc_e8);
+        let ce0 = add_coedge!(ctx, e0, Orientation::Forward, pc_e0);
+        let ce9 = add_coedge!(ctx, e9, Orientation::Forward, pc_e9);
+        let ce4 = add_coedge!(ctx, e4, Orientation::Reverse, pc_e4);
+        let ce8 = add_coedge!(ctx, e8, Orientation::Reverse, pc_e8);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce0, ce9, ce4, ce8]);
@@ -269,7 +265,7 @@ pub fn build_cuboid(
         let u_dir = p(-1.0, 0.0, 0.0);
         let v_dir = p(0.0, 0.0, 1.0);
         let surf = SurfaceKind::Plane(Plane::new(p0, u_dir, v_dir));
-        let (face_id, loop_id) = make_face!(surf, FaceSense::Aligned);
+        let (_, loop_id) = make_face!(surf, FaceSense::Aligned);
 
         // Loop: E2 Fwd, E11 Fwd, E6 Rev, E10 Rev  (V2→V3→V7→V6→V2)
         let pc_e2 = line2(
@@ -293,10 +289,10 @@ pub fn build_cuboid(
             uv(pts[6], p0, u_dir, v_dir),
         );
 
-        let ce2 = add_coedge!(ctx, e2, Orientation::Forward, face_id, pc_e2);
-        let ce11 = add_coedge!(ctx, e11, Orientation::Forward, face_id, pc_e11);
-        let ce6 = add_coedge!(ctx, e6, Orientation::Reverse, face_id, pc_e6);
-        let ce10 = add_coedge!(ctx, e10, Orientation::Reverse, face_id, pc_e10);
+        let ce2 = add_coedge!(ctx, e2, Orientation::Forward, pc_e2);
+        let ce11 = add_coedge!(ctx, e11, Orientation::Forward, pc_e11);
+        let ce6 = add_coedge!(ctx, e6, Orientation::Reverse, pc_e6);
+        let ce10 = add_coedge!(ctx, e10, Orientation::Reverse, pc_e10);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce2, ce11, ce6, ce10]);
@@ -309,7 +305,7 @@ pub fn build_cuboid(
         let u_dir = p(0.0, -1.0, 0.0);
         let v_dir = p(0.0, 0.0, 1.0);
         let surf = SurfaceKind::Plane(Plane::new(p0, u_dir, v_dir));
-        let (face_id, loop_id) = make_face!(surf, FaceSense::Aligned);
+        let (_, loop_id) = make_face!(surf, FaceSense::Aligned);
 
         // Loop: E3 Fwd, E8 Fwd, E7 Rev, E11 Rev  (V3→V0→V4→V7→V3)
         let pc_e3 = line2(
@@ -333,10 +329,10 @@ pub fn build_cuboid(
             uv(pts[7], p0, u_dir, v_dir),
         );
 
-        let ce3 = add_coedge!(ctx, e3, Orientation::Forward, face_id, pc_e3);
-        let ce8 = add_coedge!(ctx, e8, Orientation::Forward, face_id, pc_e8);
-        let ce7 = add_coedge!(ctx, e7, Orientation::Reverse, face_id, pc_e7);
-        let ce11 = add_coedge!(ctx, e11, Orientation::Reverse, face_id, pc_e11);
+        let ce3 = add_coedge!(ctx, e3, Orientation::Forward, pc_e3);
+        let ce8 = add_coedge!(ctx, e8, Orientation::Forward, pc_e8);
+        let ce7 = add_coedge!(ctx, e7, Orientation::Reverse, pc_e7);
+        let ce11 = add_coedge!(ctx, e11, Orientation::Reverse, pc_e11);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce3, ce8, ce7, ce11]);
@@ -349,7 +345,7 @@ pub fn build_cuboid(
         let u_dir = p(0.0, 1.0, 0.0);
         let v_dir = p(0.0, 0.0, 1.0);
         let surf = SurfaceKind::Plane(Plane::new(p0, u_dir, v_dir));
-        let (face_id, loop_id) = make_face!(surf, FaceSense::Aligned);
+        let (_, loop_id) = make_face!(surf, FaceSense::Aligned);
 
         // Loop: E1 Fwd, E10 Fwd, E5 Rev, E9 Rev  (V1→V2→V6→V5→V1)
         let pc_e1 = line2(
@@ -373,15 +369,16 @@ pub fn build_cuboid(
             uv(pts[5], p0, u_dir, v_dir),
         );
 
-        let ce1 = add_coedge!(ctx, e1, Orientation::Forward, face_id, pc_e1);
-        let ce10 = add_coedge!(ctx, e10, Orientation::Forward, face_id, pc_e10);
-        let ce5 = add_coedge!(ctx, e5, Orientation::Reverse, face_id, pc_e5);
-        let ce9 = add_coedge!(ctx, e9, Orientation::Reverse, face_id, pc_e9);
+        let ce1 = add_coedge!(ctx, e1, Orientation::Forward, pc_e1);
+        let ce10 = add_coedge!(ctx, e10, Orientation::Forward, pc_e10);
+        let ce5 = add_coedge!(ctx, e5, Orientation::Reverse, pc_e5);
+        let ce9 = add_coedge!(ctx, e9, Orientation::Reverse, pc_e9);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce1, ce10, ce5, ce9]);
     }
 
+    ctx.rebuild_indices();
     solid_id
 }
 
@@ -406,14 +403,13 @@ pub fn build_cylinder(
     geom_id: u64,
 ) -> SolidId {
     use std::f64::consts::TAU; // 2π
-    let tol = ctx.tolerance.pos_tol;
     let p3 = |x, y, z| Point3::new(x, y, z);
     let p2 = |u, v| Point2::new(u, v);
 
     // ── Vertices ──────────────────────────────────────────────────────────────
     // Both vertices lie on the seam (x=r, y=0).
-    let v_bot = ctx.push_vertex(Vertex::new(p3(r, 0.0, 0.0), tol));
-    let v_top = ctx.push_vertex(Vertex::new(p3(r, 0.0, h), tol));
+    let v_bot = ctx.push_vertex(Vertex::new(p3(r, 0.0, 0.0)));
+    let v_top = ctx.push_vertex(Vertex::new(p3(r, 0.0, h)));
 
     // ── Curves3 ───────────────────────────────────────────────────────────────
     // E_base and E_top are full circles (closed: v0 == v1). t ∈ [0, 2π].
@@ -450,7 +446,7 @@ pub fn build_cylinder(
 
     // ── Topology skeleton ─────────────────────────────────────────────────────
     let solid_id = ctx.push_solid(Solid::new(crate::brep_kernel::ShellId(usize::MAX)));
-    let shell_id = ctx.push_shell(Shell::new(solid_id, true));
+    let shell_id = ctx.push_shell(Shell::new(true));
     ctx.get_mut_solid(solid_id).outer = shell_id;
 
     let prov = || ProvenanceData::primitive(prov_id, geom_id);
@@ -458,14 +454,8 @@ pub fn build_cylinder(
     macro_rules! make_face {
         ($surf:expr, $sense:expr) => {{
             let surf_id = ctx.push_surface($surf);
-            let face_id = ctx.push_face(Face::new(
-                shell_id,
-                surf_id,
-                LoopId(usize::MAX),
-                $sense,
-                prov(),
-            ));
-            let loop_id = ctx.push_loop(Loop::new(face_id, true));
+            let face_id = ctx.push_face(Face::new(surf_id, LoopId(usize::MAX), $sense, prov()));
+            let loop_id = ctx.push_loop(Loop::new(true));
             ctx.get_mut_face(face_id).outer = loop_id;
             ctx.get_mut_shell(shell_id).faces.push(face_id);
             (face_id, loop_id)
@@ -473,9 +463,8 @@ pub fn build_cylinder(
     }
 
     macro_rules! add_coedge {
-        ($edge:expr, $orient:expr, $face:expr, $pcurve:expr) => {{
-            let ce_id = ctx.push_coedge(CoEdge::new($edge, $orient, $face, $pcurve));
-            ctx.get_mut_edge($edge).coedges.push(ce_id);
+        ($edge:expr, $orient:expr, $pcurve:expr) => {{
+            let ce_id = ctx.push_coedge(CoEdge::new($edge, $orient, $pcurve));
             ce_id
         }};
     }
@@ -493,7 +482,7 @@ pub fn build_cylinder(
     {
         let cyl =
             CylindricalSurface::new(p3(0.0, 0.0, 0.0), p3(0.0, 0.0, 1.0), p3(1.0, 0.0, 0.0), r);
-        let (face_id, loop_id) = make_face!(SurfaceKind::Cylinder(cyl), FaceSense::Aligned);
+        let (_, loop_id) = make_face!(SurfaceKind::Cylinder(cyl), FaceSense::Aligned);
 
         let pc_base_lat =
             ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, 0.0), p2(1.0, 0.0))));
@@ -501,10 +490,10 @@ pub fn build_cylinder(
         let pc_top_lat = ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, h), p2(1.0, h))));
         let pc_seam_lft = ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, 0.0), p2(0.0, h))));
 
-        let ce_base = add_coedge!(e_base, Orientation::Forward, face_id, pc_base_lat);
-        let ce_sr = add_coedge!(e_seam, Orientation::Forward, face_id, pc_seam_rgt);
-        let ce_top = add_coedge!(e_top, Orientation::Reverse, face_id, pc_top_lat);
-        let ce_sl = add_coedge!(e_seam, Orientation::Reverse, face_id, pc_seam_lft);
+        let ce_base = add_coedge!(e_base, Orientation::Forward, pc_base_lat);
+        let ce_sr = add_coedge!(e_seam, Orientation::Forward, pc_seam_rgt);
+        let ce_top = add_coedge!(e_top, Orientation::Reverse, pc_top_lat);
+        let ce_sl = add_coedge!(e_seam, Orientation::Reverse, pc_seam_lft);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce_base, ce_sr, ce_top, ce_sl]);
@@ -516,7 +505,7 @@ pub fn build_cylinder(
     // Loop CW in UV (Reverse) to satisfy the AntiAligned convention.
     {
         let plane = Plane::new(p3(0.0, 0.0, 0.0), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
-        let (face_id, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::AntiAligned);
+        let (_, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::AntiAligned);
 
         let pc = ctx.push_curve2(Curve2Kind::CircularArc2(CircularArc2::new(
             p2(0.0, 0.0),
@@ -524,7 +513,7 @@ pub fn build_cylinder(
             0.0,
             TAU,
         )));
-        let ce = add_coedge!(e_base, Orientation::Reverse, face_id, pc);
+        let ce = add_coedge!(e_base, Orientation::Reverse, pc);
         ctx.get_mut_loop(loop_id).coedges.push(ce);
     }
 
@@ -533,7 +522,7 @@ pub fn build_cylinder(
     // Loop CCW in UV (Forward) to satisfy the Aligned convention.
     {
         let plane = Plane::new(p3(0.0, 0.0, h), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
-        let (face_id, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::Aligned);
+        let (_, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::Aligned);
 
         let pc = ctx.push_curve2(Curve2Kind::CircularArc2(CircularArc2::new(
             p2(0.0, 0.0),
@@ -541,10 +530,11 @@ pub fn build_cylinder(
             0.0,
             TAU,
         )));
-        let ce = add_coedge!(e_top, Orientation::Forward, face_id, pc);
+        let ce = add_coedge!(e_top, Orientation::Forward, pc);
         ctx.get_mut_loop(loop_id).coedges.push(ce);
     }
 
+    ctx.rebuild_indices();
     solid_id
 }
 
@@ -572,14 +562,13 @@ pub fn build_cone(
     geom_id: u64,
 ) -> SolidId {
     use std::f64::consts::TAU;
-    let tol = ctx.tolerance.pos_tol;
     let p3 = |x, y, z| Point3::new(x, y, z);
     let p2 = |u, v| Point2::new(u, v);
     let v_max = (r * r + h * h).sqrt(); // slant distance from apex to base circle
 
     // ── Vertices ──────────────────────────────────────────────────────────────
-    let v_apex = ctx.push_vertex(Vertex::new(p3(0.0, 0.0, h), tol));
-    let v_base = ctx.push_vertex(Vertex::new(p3(r, 0.0, 0.0), tol));
+    let v_apex = ctx.push_vertex(Vertex::new(p3(0.0, 0.0, h)));
+    let v_base = ctx.push_vertex(Vertex::new(p3(r, 0.0, 0.0)));
 
     // ── Curves3 ───────────────────────────────────────────────────────────────
     // E_base: full circle at z=0, CCW from above, t ∈ [0, 2π].  Closed: v0==v1==v_base.
@@ -609,7 +598,7 @@ pub fn build_cone(
 
     // ── Topology skeleton ─────────────────────────────────────────────────────
     let solid_id = ctx.push_solid(Solid::new(crate::brep_kernel::ShellId(usize::MAX)));
-    let shell_id = ctx.push_shell(Shell::new(solid_id, true));
+    let shell_id = ctx.push_shell(Shell::new(true));
     ctx.get_mut_solid(solid_id).outer = shell_id;
 
     let prov = || ProvenanceData::primitive(prov_id, geom_id);
@@ -617,14 +606,8 @@ pub fn build_cone(
     macro_rules! make_face {
         ($surf:expr, $sense:expr) => {{
             let surf_id = ctx.push_surface($surf);
-            let face_id = ctx.push_face(Face::new(
-                shell_id,
-                surf_id,
-                LoopId(usize::MAX),
-                $sense,
-                prov(),
-            ));
-            let loop_id = ctx.push_loop(Loop::new(face_id, true));
+            let face_id = ctx.push_face(Face::new(surf_id, LoopId(usize::MAX), $sense, prov()));
+            let loop_id = ctx.push_loop(Loop::new(true));
             ctx.get_mut_face(face_id).outer = loop_id;
             ctx.get_mut_shell(shell_id).faces.push(face_id);
             (face_id, loop_id)
@@ -632,9 +615,8 @@ pub fn build_cone(
     }
 
     macro_rules! add_coedge {
-        ($edge:expr, $orient:expr, $face:expr, $pcurve:expr) => {{
-            let ce_id = ctx.push_coedge(CoEdge::new($edge, $orient, $face, $pcurve));
-            ctx.get_mut_edge($edge).coedges.push(ce_id);
+        ($edge:expr, $orient:expr, $pcurve:expr) => {{
+            let ce_id = ctx.push_coedge(CoEdge::new($edge, $orient, $pcurve));
             ce_id
         }};
     }
@@ -657,7 +639,7 @@ pub fn build_cone(
     {
         let ha = (r / h).atan();
         let cone = ConicalSurface::new(p3(0.0, 0.0, h), p3(0.0, 0.0, -1.0), p3(1.0, 0.0, 0.0), ha);
-        let (face_id, loop_id) = make_face!(SurfaceKind::Cone(cone), FaceSense::Aligned);
+        let (_, loop_id) = make_face!(SurfaceKind::Cone(cone), FaceSense::Aligned);
 
         let pc_apex = ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, 0.0), p2(TAU, 0.0))));
         let pc_seam_rgt =
@@ -671,10 +653,10 @@ pub fn build_cone(
         let pc_seam_lft =
             ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, 0.0), p2(0.0, v_max))));
 
-        let ce_apex = add_coedge!(e_apex_deg, Orientation::Forward, face_id, pc_apex);
-        let ce_sr = add_coedge!(e_seam, Orientation::Forward, face_id, pc_seam_rgt);
-        let ce_base = add_coedge!(e_base, Orientation::Forward, face_id, pc_base_lat);
-        let ce_sl = add_coedge!(e_seam, Orientation::Reverse, face_id, pc_seam_lft);
+        let ce_apex = add_coedge!(e_apex_deg, Orientation::Forward, pc_apex);
+        let ce_sr = add_coedge!(e_seam, Orientation::Forward, pc_seam_rgt);
+        let ce_base = add_coedge!(e_base, Orientation::Forward, pc_base_lat);
+        let ce_sl = add_coedge!(e_seam, Orientation::Reverse, pc_seam_lft);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce_apex, ce_sr, ce_base, ce_sl]);
@@ -685,7 +667,7 @@ pub fn build_cone(
     // Loop CW in UV (Reverse E_base) for outward −z.
     {
         let plane = Plane::new(p3(0.0, 0.0, 0.0), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
-        let (face_id, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::AntiAligned);
+        let (_, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::AntiAligned);
 
         let pc = ctx.push_curve2(Curve2Kind::CircularArc2(CircularArc2::new(
             p2(0.0, 0.0),
@@ -693,10 +675,11 @@ pub fn build_cone(
             0.0,
             TAU,
         )));
-        let ce = add_coedge!(e_base, Orientation::Reverse, face_id, pc);
+        let ce = add_coedge!(e_base, Orientation::Reverse, pc);
         ctx.get_mut_loop(loop_id).coedges.push(ce);
     }
 
+    ctx.rebuild_indices();
     solid_id
 }
 
@@ -733,13 +716,12 @@ pub fn build_cone(
 //   E_seam      Rev  (↓, left seam u=0)
 pub fn build_sphere(ctx: &mut SolidModelingContext, r: f64, prov_id: u64, geom_id: u64) -> SolidId {
     use std::f64::consts::{FRAC_PI_2, TAU};
-    let tol = ctx.tolerance.pos_tol;
     let p3 = |x, y, z| Point3::new(x, y, z);
     let p2 = |u, v| Point2::new(u, v);
 
     // ── Vertices ──────────────────────────────────────────────────────────────
-    let v_s = ctx.push_vertex(Vertex::new(p3(0.0, 0.0, -r), tol)); // south pole
-    let v_n = ctx.push_vertex(Vertex::new(p3(0.0, 0.0, r), tol)); // north pole
+    let v_s = ctx.push_vertex(Vertex::new(p3(0.0, 0.0, -r))); // south pole
+    let v_n = ctx.push_vertex(Vertex::new(p3(0.0, 0.0, r))); // north pole
 
     // ── Curves3 ───────────────────────────────────────────────────────────────
     // E_seam: semicircle along the prime meridian (x-z half-plane).
@@ -771,15 +753,14 @@ pub fn build_sphere(ctx: &mut SolidModelingContext, r: f64, prov_id: u64, geom_i
 
     // ── Topology skeleton ─────────────────────────────────────────────────────
     let solid_id = ctx.push_solid(Solid::new(crate::brep_kernel::ShellId(usize::MAX)));
-    let shell_id = ctx.push_shell(Shell::new(solid_id, true));
+    let shell_id = ctx.push_shell(Shell::new(true));
     ctx.get_mut_solid(solid_id).outer = shell_id;
 
     let prov = || ProvenanceData::primitive(prov_id, geom_id);
 
     macro_rules! add_coedge {
-        ($edge:expr, $orient:expr, $face:expr, $pcurve:expr) => {{
-            let ce_id = ctx.push_coedge(CoEdge::new($edge, $orient, $face, $pcurve));
-            ctx.get_mut_edge($edge).coedges.push(ce_id);
+        ($edge:expr, $orient:expr, $pcurve:expr) => {{
+            let ce_id = ctx.push_coedge(CoEdge::new($edge, $orient, $pcurve));
             ce_id
         }};
     }
@@ -800,13 +781,12 @@ pub fn build_sphere(ctx: &mut SolidModelingContext, r: f64, prov_id: u64, geom_i
             SphericalSurface::new(p3(0.0, 0.0, 0.0), r, p3(1.0, 0.0, 0.0), p3(0.0, 0.0, 1.0));
         let surf_id = ctx.push_surface(SurfaceKind::Sphere(sphere));
         let face_id = ctx.push_face(Face::new(
-            shell_id,
             surf_id,
             LoopId(usize::MAX),
             FaceSense::Aligned,
             prov(),
         ));
-        let loop_id = ctx.push_loop(Loop::new(face_id, true));
+        let loop_id = ctx.push_loop(Loop::new(true));
         ctx.get_mut_face(face_id).outer = loop_id;
         ctx.get_mut_shell(shell_id).faces.push(face_id);
 
@@ -823,15 +803,16 @@ pub fn build_sphere(ctx: &mut SolidModelingContext, r: f64, prov_id: u64, geom_i
         let pc_seam_lft =
             ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, 0.0), p2(0.0, 1.0))));
 
-        let ce_s = add_coedge!(e_south_deg, Orientation::Forward, face_id, pc_south);
-        let ce_sr = add_coedge!(e_seam, Orientation::Forward, face_id, pc_seam_rgt);
-        let ce_n = add_coedge!(e_north_deg, Orientation::Forward, face_id, pc_north);
-        let ce_sl = add_coedge!(e_seam, Orientation::Reverse, face_id, pc_seam_lft);
+        let ce_s = add_coedge!(e_south_deg, Orientation::Forward, pc_south);
+        let ce_sr = add_coedge!(e_seam, Orientation::Forward, pc_seam_rgt);
+        let ce_n = add_coedge!(e_north_deg, Orientation::Forward, pc_north);
+        let ce_sl = add_coedge!(e_seam, Orientation::Reverse, pc_seam_lft);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce_s, ce_sr, ce_n, ce_sl]);
     }
 
+    ctx.rebuild_indices();
     solid_id
 }
 
@@ -847,7 +828,7 @@ pub enum ExtrusionError {
     /// `height` is zero or negative.
     NonPositiveHeight,
     /// `path.closed` is `true` but `path.current_pos()` is not within
-    /// `ctx.tolerance.pos_tol` of `path.start`.
+    /// `Tolerance` of `path.start`.
     ///
     /// *0-b note:* with the new builder, [`Path2D::close`] enforces `current_pos ==
     /// start` bit-exactly, so this is unreachable through the builder in 0-b. The
@@ -972,7 +953,7 @@ fn lift_xz_curve2(c: &Curve2Kind) -> Curve3Kind {
 /// # Errors
 /// Returns [`ExtrusionError`] if the path is not closed, empty, the height is
 /// non-positive, or the path is geometrically open (endpoints don't meet within
-/// `ctx.tolerance.pos_tol`).
+/// `Tolerance`).
 pub fn build_extrusion(
     ctx: &mut SolidModelingContext,
     path: &Path2D,
@@ -998,10 +979,20 @@ pub fn build_extrusion(
             return Err(ExtrusionError::PathEmpty);
         }
         // Bit-exact closure (builder's close() enforces this, but defend in depth).
+        // `ref_scale` is the contour's own extent (max distance from start to a
+        // segment endpoint) -- the local feature size for this comparison.
         let cp = c.current_pos();
-        let dx = cp.u - c.start.u;
-        let dy = cp.v - c.start.v;
-        if (dx * dx + dy * dy).sqrt() > ctx.tolerance.pos_tol {
+        let ref_scale = c
+            .segments
+            .iter()
+            .map(|s| {
+                let p = s.end();
+                ((p.u - c.start.u).powi(2) + (p.v - c.start.v).powi(2)).sqrt()
+            })
+            .fold(0.0_f64, f64::max);
+        if !(fuzzy_eq(cp.u, c.start.u, ref_scale, &ctx.tolerance)
+            && fuzzy_eq(cp.v, c.start.v, ref_scale, &ctx.tolerance))
+        {
             return Err(ExtrusionError::GeometricallyOpen);
         }
     }
@@ -1057,25 +1048,24 @@ pub fn build_extrusion(
 
     // ── Build the outer solid + its lateral faces / cap faces. ───────────────
     let h = height;
-    let tol = ctx.tolerance.pos_tol;
     let p3 = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
 
     let solid_id = ctx.push_solid(Solid::new(crate::brep_kernel::ShellId(usize::MAX)));
-    let shell_id = ctx.push_shell(Shell::new(solid_id, true));
+    let shell_id = ctx.push_shell(Shell::new(true));
     ctx.get_mut_solid(solid_id).outer = shell_id;
 
     let prov = || ProvenanceData::primitive(prov_id, geom_id);
 
     // Outer skeleton: verts / curves / edges / lateral faces (on shell_id).
     let outer_skel =
-        build_extrusion_contour_skeleton(ctx, path.contour(outer_idx), h, tol, shell_id, prov);
+        build_extrusion_contour_skeleton(ctx, path.contour(outer_idx), h, shell_id, prov);
 
     // Hole skeletons: build each once (verts/curves/edges/lateral-faces/seams),
     // then reuse e_bot / e_top for both cap inner loops.
     let hole_skels: Vec<(usize, ContourExtrusionSkeleton)> = hole_indices
         .iter()
         .map(|&hi| {
-            let s = build_extrusion_contour_skeleton(ctx, path.contour(hi), h, tol, shell_id, prov);
+            let s = build_extrusion_contour_skeleton(ctx, path.contour(hi), h, shell_id, prov);
             (hi, s)
         })
         .collect();
@@ -1128,6 +1118,7 @@ pub fn build_extrusion(
         add_cap_inner_loop(ctx, top_face_id, path.contour(hi), &hskel.e_top, true);
     }
 
+    ctx.rebuild_indices();
     Ok(solid_id)
 }
 
@@ -1147,7 +1138,6 @@ fn build_extrusion_contour_skeleton(
     ctx: &mut SolidModelingContext,
     contour: &crate::geom::Contour,
     h: f64,
-    tol: f64,
     shell_id: crate::brep_kernel::ShellId,
     prov: impl Fn() -> ProvenanceData,
 ) -> ContourExtrusionSkeleton {
@@ -1168,11 +1158,11 @@ fn build_extrusion_contour_skeleton(
 
     let verts_bot: Vec<_> = knots
         .iter()
-        .map(|k| ctx.push_vertex(Vertex::new(p3(k.u, k.v, 0.0), tol)))
+        .map(|k| ctx.push_vertex(Vertex::new(p3(k.u, k.v, 0.0))))
         .collect();
     let verts_top: Vec<_> = knots
         .iter()
-        .map(|k| ctx.push_vertex(Vertex::new(p3(k.u, k.v, h), tol)))
+        .map(|k| ctx.push_vertex(Vertex::new(p3(k.u, k.v, h))))
         .collect();
 
     let c3_bot: Vec<_> = contour
@@ -1232,13 +1222,12 @@ fn build_extrusion_contour_skeleton(
         let les = LinearExtrusionSurface::new(profile, up);
         let surf_id = ctx.push_surface(SurfaceKind::Extrusion(les));
         let face_id = ctx.push_face(Face::new(
-            shell_id,
             surf_id,
             LoopId(usize::MAX),
             FaceSense::Aligned,
             prov(),
         ));
-        let loop_id = ctx.push_loop(Loop::new(face_id, true));
+        let loop_id = ctx.push_loop(Loop::new(true));
         ctx.get_mut_face(face_id).outer = loop_id;
         ctx.get_mut_shell(shell_id).faces.push(face_id);
 
@@ -1249,10 +1238,10 @@ fn build_extrusion_contour_skeleton(
         let pc_seam_l =
             ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(t_min, 0.0), p2(t_min, h))));
 
-        let ce_bot = add_coedge(ctx, e_bot[i], Orientation::Forward, face_id, pc_bot);
-        let ce_seam_r = add_coedge(ctx, e_seam[j], Orientation::Forward, face_id, pc_seam_r);
-        let ce_top = add_coedge(ctx, e_top[i], Orientation::Reverse, face_id, pc_top);
-        let ce_seam_l = add_coedge(ctx, e_seam[i], Orientation::Reverse, face_id, pc_seam_l);
+        let ce_bot = add_coedge(ctx, e_bot[i], Orientation::Forward, pc_bot);
+        let ce_seam_r = add_coedge(ctx, e_seam[j], Orientation::Forward, pc_seam_r);
+        let ce_top = add_coedge(ctx, e_top[i], Orientation::Reverse, pc_top);
+        let ce_seam_l = add_coedge(ctx, e_seam[i], Orientation::Reverse, pc_seam_l);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce_bot, ce_seam_r, ce_top, ce_seam_l]);
@@ -1270,12 +1259,9 @@ fn add_coedge(
     ctx: &mut SolidModelingContext,
     edge: EdgeId,
     orient: Orientation,
-    face: FaceId,
     pcurve: Curve2Id,
 ) -> CoEdgeId {
-    let ce = ctx.push_coedge(CoEdge::new(edge, orient, face, pcurve));
-    ctx.get_mut_edge(edge).coedges.push(ce);
-    ce
+    ctx.push_coedge(CoEdge::new(edge, orient, pcurve))
 }
 
 /// Create a cap face (Plane) on `shell_id` with an empty outer loop. The outer
@@ -1288,14 +1274,8 @@ fn make_cap_face(
     prov: impl Fn() -> ProvenanceData,
 ) -> FaceId {
     let surf_id = ctx.push_surface(surf);
-    let face_id = ctx.push_face(Face::new(
-        shell_id,
-        surf_id,
-        LoopId(usize::MAX),
-        sense,
-        prov(),
-    ));
-    let loop_id = ctx.push_loop(Loop::new(face_id, true));
+    let face_id = ctx.push_face(Face::new(surf_id, LoopId(usize::MAX), sense, prov()));
+    let loop_id = ctx.push_loop(Loop::new(true));
     ctx.get_mut_face(face_id).outer = loop_id;
     ctx.get_mut_shell(shell_id).faces.push(face_id);
     face_id
@@ -1328,7 +1308,7 @@ fn add_cap_outer_loop(
         .iter()
         .map(|&i| {
             let pc = ctx.push_curve2(contour.segments[i].clone());
-            add_coedge(ctx, edges[i], orient, face_id, pc)
+            add_coedge(ctx, edges[i], orient, pc)
         })
         .collect();
     ctx.get_mut_loop(loop_id).coedges.extend(ces);
@@ -1358,13 +1338,13 @@ fn add_cap_inner_loop(
     } else {
         Orientation::Reverse
     };
-    let inner_loop_id = ctx.push_loop(Loop::new(face_id, false));
+    let inner_loop_id = ctx.push_loop(Loop::new(false));
     ctx.get_mut_face(face_id).inners.push(inner_loop_id);
     let ces: Vec<_> = order
         .iter()
         .map(|&i| {
             let pc = ctx.push_curve2(contour.segments[i].clone());
-            add_coedge(ctx, edges[i], orient, face_id, pc)
+            add_coedge(ctx, edges[i], orient, pc)
         })
         .collect();
     ctx.get_mut_loop(inner_loop_id).coedges.extend(ces);
@@ -1377,9 +1357,10 @@ fn add_cap_inner_loop(
 pub enum RevolutionError {
     /// `path.segments` is empty.
     PathEmpty,
-    /// A knot point has x < -`ctx.tolerance.pos_tol` (profile enters the negative half-plane).
+    /// A knot point has x < 0 beyond relative tolerance (profile enters the negative half-plane).
     ProfileBelowAxis,
-    /// The path is open and neither endpoint lies on the Z-axis (x ≤ `ctx.tolerance.pos_tol`).
+    /// The path is open and neither endpoint lies on the Z-axis (x is zero within
+    /// relative tolerance).
     OpenProfileNoAxisEndpoint,
 }
 
@@ -1430,7 +1411,6 @@ pub fn build_revolution(
         return Err(RevolutionError::PathEmpty);
     }
 
-    let tol = ctx.tolerance.pos_tol;
     let n = contour.segments.len();
 
     // ── Collect distinct knot points ──────────────────────────────────────────
@@ -1446,15 +1426,31 @@ pub fn build_revolution(
         knots.push(contour.segments.last().unwrap().end());
     }
 
+    // ── Tolerance: a radial coordinate is "on the axis" within relative
+    // tolerance. `ref_scale` is the profile's bbox diagonal (local feature size) --
+    // taken over the whole profile, not just the radius, so an on-axis endpoint
+    // like cos(π/2) ≈ 6e-17 is still seen as on-axis.
+    let tol = ctx.tolerance;
+    let (mut u_min, mut u_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    let (mut v_min, mut v_max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for k in &knots {
+        u_min = u_min.min(k.u);
+        u_max = u_max.max(k.u);
+        v_min = v_min.min(k.v);
+        v_max = v_max.max(k.v);
+    }
+    let ref_scale = ((u_max - u_min).powi(2) + (v_max - v_min).powi(2)).sqrt();
+    let on_axis = |x: f64| fuzzy_eq(x, 0.0, ref_scale, &tol);
+
     // ── Validation ────────────────────────────────────────────────────────────
     for k in &knots {
-        if k.u < -tol {
+        if k.u < 0.0 && !on_axis(k.u) {
             return Err(RevolutionError::ProfileBelowAxis);
         }
     }
 
-    let first_on_axis = knots[0].u <= tol;
-    let last_on_axis = knots[n_knots - 1].u <= tol;
+    let first_on_axis = on_axis(knots[0].u);
+    let last_on_axis = on_axis(knots[n_knots - 1].u);
 
     if !contour.closed && !first_on_axis && !last_on_axis {
         return Err(RevolutionError::OpenProfileNoAxisEndpoint);
@@ -1466,7 +1462,7 @@ pub fn build_revolution(
     // ── Vertices: one per knot, on the seam (y = 0) ──────────────────────────
     let verts: Vec<_> = knots
         .iter()
-        .map(|k| ctx.push_vertex(Vertex::new(p3(k.u, 0.0, k.v), tol)))
+        .map(|k| ctx.push_vertex(Vertex::new(p3(k.u, 0.0, k.v))))
         .collect();
 
     // ── Circle edges: one per knot ────────────────────────────────────────────
@@ -1476,7 +1472,7 @@ pub fn build_revolution(
         .iter()
         .zip(verts.iter())
         .map(|(k, &v)| {
-            if k.u <= tol {
+            if on_axis(k.u) {
                 let c = ctx.push_curve3(Curve3Kind::Line3(Line3::new(
                     p3(0.0, 0.0, k.v),
                     p3(0.0, 0.0, k.v),
@@ -1508,7 +1504,7 @@ pub fn build_revolution(
 
     // ── Topology skeleton ─────────────────────────────────────────────────────
     let solid_id = ctx.push_solid(Solid::new(crate::brep_kernel::ShellId(usize::MAX)));
-    let shell_id = ctx.push_shell(Shell::new(solid_id, true));
+    let shell_id = ctx.push_shell(Shell::new(true));
     ctx.get_mut_solid(solid_id).outer = shell_id;
 
     let prov = || ProvenanceData::primitive(prov_id, geom_id);
@@ -1516,14 +1512,8 @@ pub fn build_revolution(
     macro_rules! make_face {
         ($surf:expr, $sense:expr) => {{
             let surf_id = ctx.push_surface($surf);
-            let face_id = ctx.push_face(Face::new(
-                shell_id,
-                surf_id,
-                LoopId(usize::MAX),
-                $sense,
-                prov(),
-            ));
-            let loop_id = ctx.push_loop(Loop::new(face_id, true));
+            let face_id = ctx.push_face(Face::new(surf_id, LoopId(usize::MAX), $sense, prov()));
+            let loop_id = ctx.push_loop(Loop::new(true));
             ctx.get_mut_face(face_id).outer = loop_id;
             ctx.get_mut_shell(shell_id).faces.push(face_id);
             (face_id, loop_id)
@@ -1531,9 +1521,8 @@ pub fn build_revolution(
     }
 
     macro_rules! add_coedge {
-        ($edge:expr, $orient:expr, $face:expr, $pcurve:expr) => {{
-            let ce = ctx.push_coedge(CoEdge::new($edge, $orient, $face, $pcurve));
-            ctx.get_mut_edge($edge).coedges.push(ce);
+        ($edge:expr, $orient:expr, $pcurve:expr) => {{
+            let ce = ctx.push_coedge(CoEdge::new($edge, $orient, $pcurve));
             ce
         }};
     }
@@ -1558,10 +1547,10 @@ pub fn build_revolution(
             p3(0.0, 0.0, 0.0),
             p3(0.0, 0.0, 1.0),
         );
-        let (face_id, loop_id) = make_face!(SurfaceKind::Revolution(rev_surf), FaceSense::Aligned);
+        let (_, loop_id) = make_face!(SurfaceKind::Revolution(rev_surf), FaceSense::Aligned);
 
         // PCurve for circle[i] (bottom of face, at v = t0_seg)
-        let pc_circ_bot = if knots[i].u <= tol {
+        let pc_circ_bot = if on_axis(knots[i].u) {
             ctx.push_curve2(Curve2Kind::Line2(Line2::new(
                 p2(0.0, t0_seg),
                 p2(TAU, t0_seg),
@@ -1576,7 +1565,7 @@ pub fn build_revolution(
         let pc_seam_rgt =
             ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(TAU, 0.0), p2(TAU, 1.0))));
         // PCurve for circle[j] (top of face, at v = t1_seg)
-        let pc_circ_top = if knots[j].u <= tol {
+        let pc_circ_top = if on_axis(knots[j].u) {
             ctx.push_curve2(Curve2Kind::Line2(Line2::new(
                 p2(0.0, t1_seg),
                 p2(TAU, t1_seg),
@@ -1591,10 +1580,10 @@ pub fn build_revolution(
         let pc_seam_lft =
             ctx.push_curve2(Curve2Kind::Line2(Line2::new(p2(0.0, 0.0), p2(0.0, 1.0))));
 
-        let ce_bot = add_coedge!(circles[i], Orientation::Forward, face_id, pc_circ_bot);
-        let ce_sr = add_coedge!(seams[i], Orientation::Forward, face_id, pc_seam_rgt);
-        let ce_top = add_coedge!(circles[j], Orientation::Reverse, face_id, pc_circ_top);
-        let ce_sl = add_coedge!(seams[i], Orientation::Reverse, face_id, pc_seam_lft);
+        let ce_bot = add_coedge!(circles[i], Orientation::Forward, pc_circ_bot);
+        let ce_sr = add_coedge!(seams[i], Orientation::Forward, pc_seam_rgt);
+        let ce_top = add_coedge!(circles[j], Orientation::Reverse, pc_circ_top);
+        let ce_sl = add_coedge!(seams[i], Orientation::Reverse, pc_seam_lft);
         ctx.get_mut_loop(loop_id)
             .coedges
             .extend([ce_bot, ce_sr, ce_top, ce_sl]);
@@ -1607,31 +1596,32 @@ pub fn build_revolution(
         if !first_on_axis {
             let k = knots[0];
             let plane = Plane::new(p3(0.0, 0.0, k.v), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
-            let (face_id, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::AntiAligned);
+            let (_, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::AntiAligned);
             let pc = ctx.push_curve2(Curve2Kind::CircularArc2(CircularArc2::new(
                 p2(0.0, 0.0),
                 k.u,
                 0.0,
                 TAU,
             )));
-            let ce = add_coedge!(circles[0], Orientation::Reverse, face_id, pc);
+            let ce = add_coedge!(circles[0], Orientation::Reverse, pc);
             ctx.get_mut_loop(loop_id).coedges.push(ce);
         }
         if !last_on_axis {
             let k = knots[n];
             let plane = Plane::new(p3(0.0, 0.0, k.v), p3(1.0, 0.0, 0.0), p3(0.0, 1.0, 0.0));
-            let (face_id, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::Aligned);
+            let (_, loop_id) = make_face!(SurfaceKind::Plane(plane), FaceSense::Aligned);
             let pc = ctx.push_curve2(Curve2Kind::CircularArc2(CircularArc2::new(
                 p2(0.0, 0.0),
                 k.u,
                 0.0,
                 TAU,
             )));
-            let ce = add_coedge!(circles[n], Orientation::Forward, face_id, pc);
+            let ce = add_coedge!(circles[n], Orientation::Forward, pc);
             ctx.get_mut_loop(loop_id).coedges.push(ce);
         }
     }
 
+    ctx.rebuild_indices();
     Ok(solid_id)
 }
 
@@ -1828,7 +1818,9 @@ fn wrap_solid(
 ) -> crate::brep_kernel::SolidSetId {
     let mut set = crate::brep_kernel::SolidSet::new(source_csg_id);
     set.solids.push(solid_id);
-    ctx.push_solidset(set)
+    let set_id = ctx.push_solidset(set);
+    ctx.rebuild_indices();
+    set_id
 }
 
 /// Return the single solid produced by a compiled node.
@@ -1923,7 +1915,9 @@ pub fn compile_csg_node(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::brep_kernel::{Orientation, SolidId};
+    use crate::brep_kernel::{
+        CoEdgeId, EdgeId, FaceId, LoopId, Orientation, ShellId, SolidId, SolidSetId,
+    };
     use crate::geom::Curve3;
 
     fn std_cuboid() -> (SolidModelingContext, SolidId) {
@@ -1993,9 +1987,9 @@ mod test {
     #[test]
     fn cuboid_each_edge_has_exactly_two_coedges() {
         let (ctx, _) = std_cuboid();
-        for edge in &ctx.edges {
+        for i in 0..ctx.edges.len() {
             assert_eq!(
-                edge.coedges.len(),
+                ctx.coedges_of_edge(EdgeId(i)).len(),
                 2,
                 "every manifold edge must have exactly 2 coedges"
             );
@@ -2005,14 +1999,13 @@ mod test {
     #[test]
     fn cuboid_each_edge_one_forward_one_reverse() {
         let (ctx, _) = std_cuboid();
-        for edge in &ctx.edges {
-            let fwd = edge
-                .coedges
+        for i in 0..ctx.edges.len() {
+            let ces = ctx.coedges_of_edge(EdgeId(i));
+            let fwd = ces
                 .iter()
                 .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Forward)
                 .count();
-            let rev = edge
-                .coedges
+            let rev = ces
                 .iter()
                 .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Reverse)
                 .count();
@@ -2190,22 +2183,21 @@ mod test {
     #[test]
     fn cylinder_each_edge_has_exactly_two_coedges() {
         let (ctx, _) = std_cylinder();
-        for edge in &ctx.edges {
-            assert_eq!(edge.coedges.len(), 2);
+        for i in 0..ctx.edges.len() {
+            assert_eq!(ctx.coedges_of_edge(EdgeId(i)).len(), 2);
         }
     }
 
     #[test]
     fn cylinder_each_edge_one_forward_one_reverse() {
         let (ctx, _) = std_cylinder();
-        for edge in &ctx.edges {
-            let fwd = edge
-                .coedges
+        for i in 0..ctx.edges.len() {
+            let ces = ctx.coedges_of_edge(EdgeId(i));
+            let fwd = ces
                 .iter()
                 .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Forward)
                 .count();
-            let rev = edge
-                .coedges
+            let rev = ces
                 .iter()
                 .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Reverse)
                 .count();
@@ -2392,7 +2384,7 @@ mod test {
     fn cone_apex_edge_has_one_coedge() {
         let (ctx, _) = std_cone();
         assert_eq!(
-            ctx.edges[1].coedges.len(),
+            ctx.coedges_of_edge(EdgeId(1)).len(),
             1,
             "degenerate apex edge has no second face, so only 1 coedge"
         );
@@ -2408,7 +2400,7 @@ mod test {
                 continue; // skip apex degenerate
             }
             assert_eq!(
-                edge.coedges.len(),
+                ctx.coedges_of_edge(EdgeId(i)).len(),
                 2,
                 "edge {} should have exactly 2 coedges",
                 i
@@ -2419,17 +2411,16 @@ mod test {
     #[test]
     fn cone_non_degenerate_edges_one_forward_one_reverse() {
         let (ctx, _) = std_cone();
-        for edge in &ctx.edges {
+        for (i, edge) in ctx.edges.iter().enumerate() {
             if edge.v0 == edge.v1 && ctx.get_curve3(edge.curve3).is_degenerate() {
                 continue;
             }
-            let fwd = edge
-                .coedges
+            let ces = ctx.coedges_of_edge(EdgeId(i));
+            let fwd = ces
                 .iter()
                 .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Forward)
                 .count();
-            let rev = edge
-                .coedges
+            let rev = ces
                 .iter()
                 .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Reverse)
                 .count();
@@ -2607,20 +2598,18 @@ mod test {
     #[test]
     fn sphere_seam_has_two_coedges() {
         let (ctx, _) = std_sphere();
-        assert_eq!(ctx.edges[0].coedges.len(), 2);
+        assert_eq!(ctx.coedges_of_edge(EdgeId(0)).len(), 2);
     }
 
     #[test]
     fn sphere_seam_one_forward_one_reverse() {
         let (ctx, _) = std_sphere();
-        let edge = &ctx.edges[0];
-        let fwd = edge
-            .coedges
+        let ces = ctx.coedges_of_edge(EdgeId(0));
+        let fwd = ces
             .iter()
             .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Forward)
             .count();
-        let rev = edge
-            .coedges
+        let rev = ces
             .iter()
             .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Reverse)
             .count();
@@ -2632,12 +2621,12 @@ mod test {
     fn sphere_pole_edges_have_one_coedge_each() {
         let (ctx, _) = std_sphere();
         assert_eq!(
-            ctx.edges[1].coedges.len(),
+            ctx.coedges_of_edge(EdgeId(1)).len(),
             1,
             "south_deg must have 1 coedge"
         );
         assert_eq!(
-            ctx.edges[2].coedges.len(),
+            ctx.coedges_of_edge(EdgeId(2)).len(),
             1,
             "north_deg must have 1 coedge"
         );
@@ -2724,6 +2713,49 @@ mod test {
         let set = compile_primitive(&mut ctx, &prim, &t, 0, 0);
         let sid = sole_solid(&ctx, set);
         (ctx, sid)
+    }
+
+    #[test]
+    fn rebuild_indices_populates_all_side_tables() {
+        let (ctx, _sid) = compile(crate::csg_lang::CsgPrimitive::Cuboid {
+            dx: 2.0,
+            dy: 3.0,
+            dz: 4.0,
+        });
+
+        // SolidSet -> Solid, Solid -> Shell.
+        assert_eq!(ctx.solidsets.len(), 1);
+        assert_eq!(ctx.solidset_of_solid(SolidId(0)), Some(SolidSetId(0)));
+        assert_eq!(ctx.solid_of_shell(ShellId(0)), Some(SolidId(0)));
+
+        // Shell -> Face, Face -> Shell.
+        assert_eq!(ctx.faces_of_shell(ShellId(0)).len(), 6);
+        for i in 0..ctx.faces.len() {
+            assert_eq!(ctx.shell_of_face(FaceId(i)), Some(ShellId(0)));
+        }
+
+        // Loop -> Face and CoEdge -> Face.
+        for i in 0..ctx.loops.len() {
+            assert_eq!(ctx.face_of_loop(LoopId(i)), Some(FaceId(i)));
+        }
+        for i in 0..ctx.coedges.len() {
+            assert!(ctx.face_of_coedge(CoEdgeId(i)).is_some(), "coedge {i}");
+        }
+
+        // Shell edge/vertex caches.
+        assert_eq!(ctx.edges_of_shell(ShellId(0)).len(), 12);
+        assert_eq!(ctx.vertices_of_shell(ShellId(0)).len(), 8);
+
+        // Edge -> CoEdge (order preserved) and Edge -> Face.
+        for i in 0..ctx.edges.len() {
+            let ces = ctx.coedges_of_edge(EdgeId(i));
+            assert_eq!(ces.len(), 2, "edge {i} coedge count");
+            assert!(
+                ces.windows(2).all(|w| w[0].0 < w[1].0),
+                "edge {i} coedges not in arena order"
+            );
+            assert_eq!(ctx.faces_of_edge(EdgeId(i)).len(), 2, "edge {i} face count");
+        }
     }
 
     // ── Dispatch / entity counts (regression) ─────────────────────────────────
@@ -3315,9 +3347,9 @@ mod test {
     #[test]
     fn extrude_triangle_each_edge_has_two_coedges() {
         let (ctx, _) = std_extrude_triangle();
-        for (i, edge) in ctx.edges.iter().enumerate() {
+        for i in 0..ctx.edges.len() {
             assert_eq!(
-                edge.coedges.len(),
+                ctx.coedges_of_edge(EdgeId(i)).len(),
                 2,
                 "edge {i} must have exactly 2 coedges"
             );
@@ -3327,14 +3359,13 @@ mod test {
     #[test]
     fn extrude_triangle_each_edge_one_fwd_one_rev() {
         let (ctx, _) = std_extrude_triangle();
-        for edge in &ctx.edges {
-            let fwd = edge
-                .coedges
+        for i in 0..ctx.edges.len() {
+            let ces = ctx.coedges_of_edge(EdgeId(i));
+            let fwd = ces
                 .iter()
                 .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Forward)
                 .count();
-            let rev = edge
-                .coedges
+            let rev = ces
                 .iter()
                 .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Reverse)
                 .count();
@@ -3590,15 +3621,14 @@ mod test {
         // through-wall, not a dangling boundary.
         let mut ctx = SolidModelingContext::new();
         build_extrusion(&mut ctx, &square_with_hole_path(), 1.0, 0, 0).unwrap();
-        for (i, edge) in ctx.edges.iter().enumerate() {
-            assert_eq!(edge.coedges.len(), 2, "edge {i} must have 2 coedges");
-            let fwd = edge
-                .coedges
+        for i in 0..ctx.edges.len() {
+            let ces = ctx.coedges_of_edge(EdgeId(i));
+            assert_eq!(ces.len(), 2, "edge {i} must have 2 coedges");
+            let fwd = ces
                 .iter()
                 .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Forward)
                 .count();
-            let rev = edge
-                .coedges
+            let rev = ces
                 .iter()
                 .filter(|&&ce| ctx.get_coedge(ce).orientation == Orientation::Reverse)
                 .count();
@@ -3896,13 +3926,14 @@ mod test {
     fn revolve_cone_degenerate_edge_has_one_coedge() {
         let (ctx, _) = std_revolve_cone();
         // The degenerate apex edge (v0==v1, at z=0) is only adjacent to one face.
-        let deg_edges: Vec<_> = ctx
-            .edges
-            .iter()
-            .filter(|e| e.v0 == e.v1 && e.t0 == 0.0 && e.t1 == 1.0)
+        let deg_edges: Vec<usize> = (0..ctx.edges.len())
+            .filter(|&i| {
+                let e = &ctx.edges[i];
+                e.v0 == e.v1 && e.t0 == 0.0 && e.t1 == 1.0
+            })
             .collect();
         assert_eq!(deg_edges.len(), 1, "expect exactly one degenerate edge");
-        assert_eq!(deg_edges[0].coedges.len(), 1);
+        assert_eq!(ctx.coedges_of_edge(EdgeId(deg_edges[0])).len(), 1);
     }
 
     // Face sense
@@ -3933,11 +3964,12 @@ mod test {
     #[test]
     fn revolve_cone_non_degenerate_edges_have_two_coedges() {
         let (ctx, _) = std_revolve_cone();
-        for edge in &ctx.edges {
+        for i in 0..ctx.edges.len() {
+            let edge = &ctx.edges[i];
             if !(edge.v0 == edge.v1 && edge.t0 == 0.0 && edge.t1 == 1.0) {
                 // non-degenerate
                 assert_eq!(
-                    edge.coedges.len(),
+                    ctx.coedges_of_edge(EdgeId(i)).len(),
                     2,
                     "non-degenerate edge must have 2 coedges"
                 );
