@@ -637,14 +637,17 @@ pub fn merge_dcel_vertices(dcel: &mut HalfEdgeMesh, epsilon: f64) {
 
 // ── mesh_solid ────────────────────────────────────────────────────────────────
 
-/// Tessellate all faces of solid `sid` and return a combined [`TriMesh`].
+/// Build the internal DCEL half-edge mesh for solid `sid`.
 ///
 /// Each face tessellator appends vertices and half-edges to a shared
 /// [`HalfEdgeMesh`].  After all faces are meshed, [`merge_dcel_vertices`]
 /// collapses coincident boundary duplicates so that [`stitch_twins`] can link
-/// all interior half-edge pairs.  The final [`TriMesh`] is produced by
+/// all interior half-edge pairs.  The returned DCEL is the internal mesh source
+/// of truth; [`mesh_solid`] converts it to the presentation [`TriMesh`].
+///
+/// Exposed so that `inspect` can snapshot the DCEL before it is discarded by
 /// [`HalfEdgeMesh::to_trimesh`].
-pub fn mesh_solid(ctx: &SolidModelingContext, sid: SolidId, opts: &MeshOptions) -> TriMesh {
+pub fn build_dcel(ctx: &SolidModelingContext, sid: SolidId, opts: &MeshOptions) -> HalfEdgeMesh {
     let shell_id = ctx.get_solid(sid).outer;
     let face_ids: Vec<FaceId> = ctx.get_shell(shell_id).faces.clone();
 
@@ -657,7 +660,15 @@ pub fn mesh_solid(ctx: &SolidModelingContext, sid: SolidId, opts: &MeshOptions) 
 
     merge_dcel_vertices(&mut dcel, opts.epsilon);
     stitch_twins(&mut dcel);
-    dcel.to_trimesh()
+    dcel
+}
+
+/// Tessellate all faces of solid `sid` and return a combined [`TriMesh`].
+///
+/// Thin wrapper over [`build_dcel`] that converts the internal DCEL to the
+/// presentation [`TriMesh`] used for STL/OBJ export.
+pub fn mesh_solid(ctx: &SolidModelingContext, sid: SolidId, opts: &MeshOptions) -> TriMesh {
+    build_dcel(ctx, sid, opts).to_trimesh()
 }
 
 // ── mesh_face ─────────────────────────────────────────────────────────────────
