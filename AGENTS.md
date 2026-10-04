@@ -122,10 +122,29 @@ independently. This is the mode this repo's containment exists to support — se
    work from it alone.
 2. **Approval gate**: do not start work until jef explicitly approves `goal.md`.
    Revise and re-submit until approved.
-3. **Isolate**: create a worktree before anything else —
-   `git worktree add ../jefscad-loop -b agent/<date> dice-plans`, and work in
-   `../jefscad-loop`. Never work unattended in the main checkout. This is what
-   keeps `~/projects/jefscad` itself untouched.
+3. **Isolate**: create a worktree before anything else — from *inside the
+   devcontainer*, so git records container-absolute gitdir paths that match the
+   `/workspace` mount:
+   `git worktree add worktree/agent-<date> -b agent/<date> dev`, and work in
+   `worktree/agent-<date>`. Never work unattended in the main checkout. This is
+   what keeps `~/projects/jefscad` itself untouched.
+
+   Two hard rules follow from how linked worktrees resolve paths. A worktree's
+   `.git` is a *file* holding an absolute path to the main repo's `.git`, and
+   the container mounts only the repo itself (`workspaceMount`), so:
+
+   - **Create the worktree from inside the container, never from the host.**
+     Created inside, the gitdir path points at `/workspace/.git/...` and
+     matches the mount; created on the host it points at the host path and git
+     is dead inside the container. The worktree therefore looks broken from the
+     host — that asymmetry is intended: it guarantees unattended work only
+     happens in the container.
+   - **Never use sibling-level worktrees (`../jefscad-...`).** A sibling
+     directory is outside the workspace mount, so it cannot see the main
+     repo's `.git` at all; git is dead inside the container there.
+
+   `worktree/` is gitignored; `git worktree add` creates the directory on
+   demand, and nothing under it is ever committed.
 4. **Independent work**: proceed without further check-ins. Track spend with:
    `uv run ~/tools/spend.py --cap <cap from goal.md>`
    Check periodically. It **reports and exits non-zero**; it does not interrupt,
@@ -136,7 +155,7 @@ independently. This is the mode this repo's containment exists to support — se
    work is blocked. Then:
 
    - run the full test suite and record the result;
-   - push the branch — **never merge it, never push to `dice-plans` or `main`**;
+   - push the branch — **never merge it, never push to `dev` or `main`**;
    - write a summary email to **jefwagner@gmail.com only** with what was done,
      what was learned, current state, next steps, test results, and the final
      spend from `uv run ~/tools/spend.py`;
@@ -219,6 +238,8 @@ repo root/
 │       ├── brep_compiler.rs # CSG tree → b-rep SolidSet
 │       ├── bool_ops.rs      # boolean union / difference / intersection
 │       ├── mesher.rs        # b-rep → triangular mesh
+│       ├── pip2d.rs         # 2D point-in-polygon (even-odd ray casting; used by extrusion
+│       │                    #   contour nesting, later boolean classification)
 │       ├── py_bindings.rs   # pyo3 Python bindings
 │       └── bin/stub_gen.rs  # generates python/jefscad/_jefscad/__init__.pyi
 │
@@ -366,8 +387,10 @@ properties of the environment, not claims about behaviour.
   mounted, and not even if `GIT_SSH_COMMAND` were unset. This required an
   explicit `apt-get purge` in the Dockerfile: the base image ships
   `openssh-client`, so merely not installing it is not enough.
-- **One credential exists**: the repo-scoped PAT, mounted read-only. The
-  pixel-world PAT and the lab bot credential are neither mounted nor reachable.
+- **Two credentials exist, each file-scoped and read-only**: the repo-scoped
+  PAT (git push/pull only) and the OpenRouter API key at
+  `~/.pi/agent/auth.json`, for pi model calls. The pixel-world PAT, the
+  termcanvas PAT, and the lab bot credential are neither mounted nor reachable.
 - **No `~/.aws`, `~/.azure`, `~/.config/lab-bot`, or host tool directory.**
 - **`~/wiki/` is mounted read-only** — full read access to `kb/`,
   `projects/jefscad/` (9 pages, including `Flint.md` for the interval
@@ -402,17 +425,16 @@ say so rather than working around it.
 
 ### Branches
 
-- **The primary branch is `dice-plans`** (89 commits); `main` is the default
-  branch holding releases (76 commits). The naming is asymmetric with the other
-  projects — pixel-world uses `dev` — and is worth normalising eventually, but
-  until then the worktree base in Unsupervised mode step 3 follows
-  `dice-plans`, and that is the branch an agent must never commit to.
+- **Git-flow: `dev` is the primary active branch** (92 commits); `main` is the
+  default branch holding releases (76 commits). Both reject force-pushes
+  (GitHub branch protection) — that binds jef too. Solo dev: the only branches
+  beyond these are the `agent/*` work branches below. `dice-plans` is the
+  retired former primary, kept for history; new work branches off `dev`.
 - Progress files are lowercase (`todo.md`), matching `planning.md`. The old
   `TODO.md` was renamed because a case-mismatched name on a case-sensitive
   filesystem produces two competing todo lists — the one the agent writes and
   the one being read from.
-- Work goes on `agent/<short-desc>` branches. Never commit to `dice-plans`.
-- `dice-plans` and `main` reject force-pushes and require a pull request.
+- Work goes on `agent/<short-desc>` branches. Never commit to `dev`.
 - Prefer a worktree for anything unattended (see Unsupervised mode, step 3).
 
 ### Residual risk — the honest remainder
