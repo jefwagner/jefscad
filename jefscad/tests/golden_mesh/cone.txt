@@ -1,0 +1,68 @@
+vertices 9
+  v 0 pos=(0.000000000,0.000000000,2.000000000) uv=(0.000000000,0.000000000) n=(0.838716981,0.347407948,0.419358490) ref=Corner(0)
+  v 1 pos=(1.000000000,0.000000000,0.000000000) uv=(0.000000000,2.236067977) n=(0.894427191,0.000000000,0.447213595) ref=Corner(1)
+  v 2 pos=(0.707106781,-0.707106781,0.000000000) uv=(0.785398163,2.236067977) n=(0.632455532,-0.632455532,0.447213595) ref=OnEdge(0)
+  v 3 pos=(0.000000000,-1.000000000,0.000000000) uv=(1.570796327,2.236067977) n=(0.000000000,-0.894427191,0.447213595) ref=OnEdge(0)
+  v 4 pos=(-0.707106781,-0.707106781,0.000000000) uv=(2.356194490,2.236067977) n=(-0.632455532,-0.632455532,0.447213595) ref=OnEdge(0)
+  v 5 pos=(-1.000000000,-0.000000000,0.000000000) uv=(3.141592654,2.236067977) n=(-0.894427191,-0.000000000,0.447213595) ref=OnEdge(0)
+  v 6 pos=(-0.707106781,0.707106781,0.000000000) uv=(3.926990817,2.236067977) n=(-0.632455532,0.632455532,0.447213595) ref=OnEdge(0)
+  v 7 pos=(-0.000000000,1.000000000,0.000000000) uv=(4.712388980,2.236067977) n=(-0.000000000,0.894427191,0.447213595) ref=OnEdge(0)
+  v 8 pos=(0.707106781,0.707106781,0.000000000) uv=(5.497787144,2.236067977) n=(0.632455532,0.632455532,0.447213595) ref=OnEdge(0)
+half_edges 42
+  he 0 twin=5 next=1 vertex=0 face=0 constraint=false
+  he 1 twin=24 next=2 vertex=2 face=0 constraint=false
+  he 2 twin=21 next=0 vertex=1 face=0 constraint=false
+  he 3 twin=8 next=4 vertex=0 face=1 constraint=false
+  he 4 twin=25 next=5 vertex=3 face=1 constraint=false
+  he 5 twin=0 next=3 vertex=2 face=1 constraint=false
+  he 6 twin=11 next=7 vertex=0 face=2 constraint=false
+  he 7 twin=28 next=8 vertex=4 face=2 constraint=false
+  he 8 twin=3 next=6 vertex=3 face=2 constraint=false
+  he 9 twin=14 next=10 vertex=0 face=3 constraint=false
+  he 10 twin=31 next=11 vertex=5 face=3 constraint=false
+  he 11 twin=6 next=9 vertex=4 face=3 constraint=false
+  he 12 twin=17 next=13 vertex=0 face=4 constraint=false
+  he 13 twin=34 next=14 vertex=6 face=4 constraint=false
+  he 14 twin=9 next=12 vertex=5 face=4 constraint=false
+  he 15 twin=20 next=16 vertex=0 face=5 constraint=false
+  he 16 twin=37 next=17 vertex=7 face=5 constraint=false
+  he 17 twin=12 next=15 vertex=6 face=5 constraint=false
+  he 18 twin=23 next=19 vertex=0 face=6 constraint=false
+  he 19 twin=40 next=20 vertex=8 face=6 constraint=false
+  he 20 twin=15 next=18 vertex=7 face=6 constraint=false
+  he 21 twin=2 next=22 vertex=0 face=7 constraint=false
+  he 22 twin=41 next=23 vertex=1 face=7 constraint=false
+  he 23 twin=18 next=21 vertex=8 face=7 constraint=false
+  he 24 twin=1 next=25 vertex=1 face=8 constraint=false
+  he 25 twin=4 next=26 vertex=2 face=8 constraint=false
+  he 26 twin=27 next=24 vertex=3 face=8 constraint=false
+  he 27 twin=26 next=28 vertex=1 face=9 constraint=false
+  he 28 twin=7 next=29 vertex=3 face=9 constraint=false
+  he 29 twin=30 next=27 vertex=4 face=9 constraint=false
+  he 30 twin=29 next=31 vertex=1 face=10 constraint=false
+  he 31 twin=10 next=32 vertex=4 face=10 constraint=false
+  he 32 twin=33 next=30 vertex=5 face=10 constraint=false
+  he 33 twin=32 next=34 vertex=1 face=11 constraint=false
+  he 34 twin=13 next=35 vertex=5 face=11 constraint=false
+  he 35 twin=36 next=33 vertex=6 face=11 constraint=false
+  he 36 twin=35 next=37 vertex=1 face=12 constraint=false
+  he 37 twin=16 next=38 vertex=6 face=12 constraint=false
+  he 38 twin=39 next=36 vertex=7 face=12 constraint=false
+  he 39 twin=38 next=40 vertex=1 face=13 constraint=false
+  he 40 twin=19 next=41 vertex=7 face=13 constraint=false
+  he 41 twin=22 next=39 vertex=8 face=13 constraint=false
+faces 14
+  f 0 he=0
+  f 1 he=3
+  f 2 he=6
+  f 3 he=9
+  f 4 he=12
+  f 5 he=15
+  f 6 he=18
+  f 7 he=21
+  f 8 he=24
+  f 9 he=27
+  f 10 he=30
+  f 11 he=33
+  f 12 he=36
+  f 13 he=39

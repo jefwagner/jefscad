@@ -1,0 +1,27 @@
+vertices 8
+  v 0 pos=(0.000000000,0.000000000,0.000000000) uv=(0.000000000,0.000000000) n=(0.000000000,0.000000000,-1.000000000) ref=Corner(0)
+  v 1 pos=(0.000000000,2.000000000,0.000000000) uv=(0.000000000,2.000000000) n=(0.000000000,0.000000000,-1.000000000) ref=Corner(3)
+  v 2 pos=(2.000000000,2.000000000,0.000000000) uv=(2.000000000,2.000000000) n=(0.000000000,0.000000000,-1.000000000) ref=Corner(2)
+  v 3 pos=(2.000000000,0.000000000,0.000000000) uv=(2.000000000,0.000000000) n=(0.000000000,0.000000000,-1.000000000) ref=Corner(1)
+  v 4 pos=(0.000000000,0.000000000,2.000000000) uv=(0.000000000,0.000000000) n=(0.000000000,0.000000000,1.000000000) ref=Corner(4)
+  v 5 pos=(2.000000000,0.000000000,2.000000000) uv=(2.000000000,0.000000000) n=(0.000000000,0.000000000,1.000000000) ref=Corner(5)
+  v 6 pos=(2.000000000,2.000000000,2.000000000) uv=(2.000000000,2.000000000) n=(0.000000000,0.000000000,1.000000000) ref=Corner(6)
+  v 7 pos=(0.000000000,2.000000000,2.000000000) uv=(0.000000000,2.000000000) n=(0.000000000,0.000000000,1.000000000) ref=Corner(7)
+half_edges 12
+  he 0 twin=- next=1 vertex=0 face=0 constraint=false
+  he 1 twin=- next=2 vertex=1 face=0 constraint=false
+  he 2 twin=3 next=0 vertex=2 face=0 constraint=false
+  he 3 twin=2 next=4 vertex=0 face=1 constraint=false
+  he 4 twin=- next=5 vertex=2 face=1 constraint=false
+  he 5 twin=- next=3 vertex=3 face=1 constraint=false
+  he 6 twin=- next=7 vertex=4 face=2 constraint=false
+  he 7 twin=- next=8 vertex=5 face=2 constraint=false
+  he 8 twin=9 next=6 vertex=6 face=2 constraint=false
+  he 9 twin=8 next=10 vertex=4 face=3 constraint=false
+  he 10 twin=- next=11 vertex=6 face=3 constraint=false
+  he 11 twin=- next=9 vertex=7 face=3 constraint=false
+faces 4
+  f 0 he=0
+  f 1 he=3
+  f 2 he=6
+  f 3 he=9
