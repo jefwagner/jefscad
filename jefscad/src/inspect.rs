@@ -19,11 +19,18 @@
 //! `[t0, t1]` endpoints and midpoint, and each coedge's pcurve likewise. This
 //! keeps [`BRepDump`] decoupled from the concrete geometric struct layouts.
 //! NURBS variants are tagged but not sampled — their `eval` is still `todo!`.
+//!
+//! The module also snapshots the internal mesher output: [`dump_mesh_csg_node`]
+//! builds the DCEL half-edge mesh via the mesher and flattens it into a
+//! [`MeshDump`]. This captures the *internal* mesh — the source of truth for
+//! refinement and booleans — not the presentation `TriMesh` used for STL/OBJ
+//! export.
 
 use crate::brep_compiler::compile_csg_node;
 use crate::brep_kernel::{FaceSense, Orientation, SolidModelingContext};
 use crate::csg_lang::CsgNode;
 use crate::geom::{Curve2, Curve2Kind, Curve3, Curve3Kind, Surface, SurfaceKind};
+use crate::mesher::{HalfEdgeMesh, MeshOptions, MeshVertexRef, build_dcel};
 
 /// Fixed UV grid used to fingerprint a surface (see module docs).
 const SURFACE_UV: [(f64, f64); 5] = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.31, 0.57)];
@@ -325,4 +332,104 @@ fn sample_pcurve(kind: &Curve2Kind, t0: f64, t1: f64) -> Vec<[f64; 2]> {
             })
             .collect(),
     }
+}
+
+// ── Mesh (DCEL) inspection ────────────────────────────────────────────────────
+
+/// Compile `node` and snapshot the internal DCEL half-edge mesh at `resolution`.
+///
+/// This is the mesh-side observation entry point for the golden safety net. It
+/// is stable across the Phase 0-c schema migration: only `dump_dcel`'s internals
+/// follow the mesher's field access, while this signature and the shape of
+/// [`MeshDump`] stay fixed.
+pub fn dump_mesh_csg_node(node: &CsgNode, resolution: u32) -> MeshDump {
+    let mut ctx = SolidModelingContext::new();
+    let root = compile_csg_node(&mut ctx, node);
+    let opts = MeshOptions {
+        resolution,
+        ..MeshOptions::default()
+    };
+    let dcel = build_dcel(&ctx, root, &opts);
+    dump_dcel(&dcel)
+}
+
+/// Flatten the internal [`HalfEdgeMesh`] into a plain-data [`MeshDump`].
+fn dump_dcel(dcel: &HalfEdgeMesh) -> MeshDump {
+    let vertices = dcel
+        .vertices
+        .iter()
+        .map(|v| MeshVertexDump {
+            pos: v.pos,
+            uv: v.uv,
+            normal: v.normal,
+            brep_ref: match v.brep_ref {
+                MeshVertexRef::Corner(id) => MeshVertexRefDump::Corner(id.0),
+                MeshVertexRef::OnEdge(id) => MeshVertexRefDump::OnEdge(id.0),
+                MeshVertexRef::OnFace(id) => MeshVertexRefDump::OnFace(id.0),
+            },
+        })
+        .collect();
+
+    let half_edges = dcel
+        .half_edges
+        .iter()
+        .map(|he| HalfEdgeDump {
+            twin: he.twin.map(|t| t.0),
+            next: he.next.0,
+            vertex: he.vertex.0,
+            face: he.face.0,
+            is_constraint: he.is_constraint,
+        })
+        .collect();
+
+    let faces = dcel.faces.iter().map(|f| f.half_edge.0).collect();
+
+    MeshDump {
+        vertices,
+        half_edges,
+        faces,
+    }
+}
+
+/// A plain-data snapshot of the internal DCEL half-edge mesh.
+///
+/// Arenas are indexed by position, mirroring `HalfEdgeMesh`'s `Vec`s, so
+/// `half_edges[i]` corresponds to `HalfEdgeId(i)`. Cross-references are stored
+/// as those indices.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeshDump {
+    pub vertices: Vec<MeshVertexDump>,
+    pub half_edges: Vec<HalfEdgeDump>,
+    /// Representative half-edge index per [`DcelFace`](crate::mesher::DcelFace).
+    pub faces: Vec<usize>,
+}
+
+/// One internal mesh vertex: position, UV, normal, and B-rep attribution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeshVertexDump {
+    pub pos: [f64; 3],
+    pub uv: [f64; 2],
+    pub normal: [f64; 3],
+    pub brep_ref: MeshVertexRefDump,
+}
+
+/// Plain-data form of [`MeshVertexRef`](crate::mesher::MeshVertexRef).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeshVertexRefDump {
+    /// B-rep topological vertex index.
+    Corner(usize),
+    /// B-rep edge index.
+    OnEdge(usize),
+    /// B-rep face index.
+    OnFace(usize),
+}
+
+/// One directed half-edge: connectivity plus the constraint flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HalfEdgeDump {
+    pub twin: Option<usize>,
+    pub next: usize,
+    pub vertex: usize,
+    pub face: usize,
+    pub is_constraint: bool,
 }
