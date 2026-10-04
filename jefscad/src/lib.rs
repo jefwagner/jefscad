@@ -9,6 +9,7 @@ pub(crate) mod brep_compiler;
 mod brep_kernel;
 pub mod csg_lang;
 pub mod geom;
+pub mod inspect;
 pub mod linalg;
 mod mesher;
 pub mod pip2d;

@@ -25,5 +25,8 @@ __pycache__/
 *.swo
 .DS_Store
 
+# Agent worktrees (see AGENTS.md Unsupervised mode, step 3)
+worktree/
+
 # Python doc build artifacts
 docs/_build/
