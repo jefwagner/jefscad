@@ -332,10 +332,11 @@ impl PyNode {
     ///     A `Mesh` object with `save_stl` and `save_obj` export methods.
     #[pyo3(signature = (resolution=32))]
     fn mesh(&self, resolution: u32) -> PyMesh {
-        use crate::brep_compiler::compile_csg_node;
+        use crate::brep_compiler::{compile_csg_node, sole_solid};
         use crate::brep_kernel::SolidModelingContext;
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_csg_node(&mut ctx, &self.inner);
+        let set = compile_csg_node(&mut ctx, &self.inner);
+        let sid = sole_solid(&ctx, set);
         let tri_mesh = mesh_solid(
             &ctx,
             sid,

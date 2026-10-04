@@ -41,7 +41,7 @@ define_id!(LoopId);
 define_id!(FaceId);
 define_id!(ShellId);
 define_id!(SolidId);
-define_id!(NodeBRepId);
+define_id!(SolidSetId);
 define_id!(SurfaceId);
 define_id!(Curve3Id);
 define_id!(Curve2Id);
@@ -271,12 +271,12 @@ impl Solid {
 /// components from a boolean operation). `solids` starts empty and is populated during
 /// B-rep compilation.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NodeBRep {
+pub struct SolidSet {
     pub solids:        Vec<SolidId>,
     pub source_csg_id: u64,
 }
 
-impl NodeBRep {
+impl SolidSet {
     pub fn new(source_csg_id: u64) -> Self {
         Self { solids: Vec::new(), source_csg_id }
     }
@@ -313,7 +313,7 @@ pub struct SolidModelingContext {
     pub surfaces:   Vec<SurfaceKind>,
     pub curves3:    Vec<Curve3Kind>,
     pub curves2:    Vec<Curve2Kind>,
-    pub nodes:      Vec<NodeBRep>,
+    pub solidsets:  Vec<SolidSet>,
     pub solids:     Vec<Solid>,
     pub shells:     Vec<Shell>,
     pub faces:      Vec<Face>,
@@ -332,7 +332,7 @@ impl SolidModelingContext {
             surfaces:   Vec::new(),
             curves3:    Vec::new(),
             curves2:    Vec::new(),
-            nodes:      Vec::new(),
+            solidsets:  Vec::new(),
             solids:     Vec::new(),
             shells:     Vec::new(),
             faces:      Vec::new(),
@@ -348,7 +348,7 @@ impl SolidModelingContext {
     impl_push_get!(surfaces,   SurfaceId,   SurfaceKind,  push_surface,   get_surface,   get_mut_surface);
     impl_push_get!(curves3,    Curve3Id,    Curve3Kind,   push_curve3,    get_curve3,    get_mut_curve3);
     impl_push_get!(curves2,    Curve2Id,    Curve2Kind,   push_curve2,    get_curve2,    get_mut_curve2);
-    impl_push_get!(nodes,      NodeBRepId,  NodeBRep,     push_node,      get_node,      get_mut_node);
+    impl_push_get!(solidsets,  SolidSetId,  SolidSet,     push_solidset,  get_solidset,  get_mut_solidset);
     impl_push_get!(solids,     SolidId,     Solid,        push_solid,     get_solid,     get_mut_solid);
     impl_push_get!(shells,     ShellId,     Shell,        push_shell,     get_shell,     get_mut_shell);
     impl_push_get!(faces,      FaceId,      Face,         push_face,      get_face,      get_mut_face);
@@ -495,8 +495,8 @@ mod test {
     }
 
     #[test]
-    fn nodebrep_new_stores_csg_id_solids_empty() {
-        let n = NodeBRep::new(42);
+    fn solidset_new_stores_csg_id_solids_empty() {
+        let n = SolidSet::new(42);
         assert_eq!(n.source_csg_id, 42);
         assert!(n.solids.is_empty());
     }

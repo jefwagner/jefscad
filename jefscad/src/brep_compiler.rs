@@ -1669,7 +1669,7 @@ pub fn compile_primitive(
     transform: &Mat4,
     prov_id: u64,
     geom_id: u64,
-) -> SolidId {
+) -> crate::brep_kernel::SolidSetId {
     use crate::csg_lang::CsgPrimitive;
 
     // Snapshot arena lengths so we know which entries belong to this build.
@@ -1693,7 +1693,7 @@ pub fn compile_primitive(
 
     // Skip the walk when the transform is the identity.
     if transform.is_identity() {
-        return solid_id;
+        return wrap_solid(ctx, solid_id, prov_id);
     }
 
     // ── Extract linear part and translation ───────────────────────────────────
@@ -1817,7 +1817,29 @@ pub fn compile_primitive(
         }
     }
 
-    solid_id
+    wrap_solid(ctx, solid_id, prov_id)
+}
+
+/// Wrap a freshly built solid into a one-solid `SolidSet` and return its id.
+fn wrap_solid(
+    ctx: &mut SolidModelingContext,
+    solid_id: crate::brep_kernel::SolidId,
+    source_csg_id: u64,
+) -> crate::brep_kernel::SolidSetId {
+    let mut set = crate::brep_kernel::SolidSet::new(source_csg_id);
+    set.solids.push(solid_id);
+    ctx.push_solidset(set)
+}
+
+/// Return the single solid produced by a compiled node.
+///
+/// Primitives always produce exactly one `Solid`; multi-solid results (booleans,
+/// multi-outer extrusion) are not yet implemented.
+pub fn sole_solid(
+    ctx: &SolidModelingContext,
+    set: crate::brep_kernel::SolidSetId,
+) -> crate::brep_kernel::SolidId {
+    ctx.get_solidset(set).solids[0]
 }
 
 /// Scale the v-coordinate of every pcurve on the face backed by `surf_idx` by `s`.
@@ -1884,7 +1906,7 @@ fn scale_lateral_pcurves(ctx: &mut SolidModelingContext, surf_idx: usize, s: f64
 pub fn compile_csg_node(
     ctx: &mut SolidModelingContext,
     node: &crate::csg_lang::CsgNode,
-) -> SolidId {
+) -> crate::brep_kernel::SolidSetId {
     use crate::csg_lang::CsgBaseNode;
     match &node.base {
         CsgBaseNode::Prim(prim) => {
@@ -2690,7 +2712,8 @@ mod test {
     /// Compile with identity transform, forwarding prov/geom ids.
     fn compile(prim: CsgPrimitive) -> (SolidModelingContext, SolidId) {
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_primitive(&mut ctx, &prim, &Mat4::IDENTITY, 7, 42);
+        let set = compile_primitive(&mut ctx, &prim, &Mat4::IDENTITY, 7, 42);
+        let sid = sole_solid(&ctx, set);
         (ctx, sid)
     }
 
@@ -2698,7 +2721,8 @@ mod test {
     fn compile_with(prim: CsgPrimitive, transform: [f64; 16]) -> (SolidModelingContext, SolidId) {
         let t = Mat4::from_array(transform);
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_primitive(&mut ctx, &prim, &t, 0, 0);
+        let set = compile_primitive(&mut ctx, &prim, &t, 0, 0);
+        let sid = sole_solid(&ctx, set);
         (ctx, sid)
     }
 
@@ -4045,7 +4069,8 @@ mod test {
 
     fn compile_node(node: &CsgNode) -> (SolidModelingContext, SolidId) {
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_csg_node(&mut ctx, node);
+        let set = compile_csg_node(&mut ctx, node);
+        let sid = sole_solid(&ctx, set);
         (ctx, sid)
     }
 

@@ -1196,18 +1196,20 @@ fn sample_loop_uvs(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::brep_compiler::compile_csg_node;
+    use crate::brep_compiler::{compile_csg_node, sole_solid};
     use crate::csg_lang::CsgNode;
 
     fn mesh_prim(node: &CsgNode) -> TriMesh {
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_csg_node(&mut ctx, node);
+        let set = compile_csg_node(&mut ctx, node);
+        let sid = sole_solid(&ctx, set);
         mesh_solid(&ctx, sid, &MeshOptions::default())
     }
 
     fn mesh_prim_res(node: &CsgNode, resolution: u32) -> TriMesh {
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_csg_node(&mut ctx, node);
+        let set = compile_csg_node(&mut ctx, node);
+        let sid = sole_solid(&ctx, set);
         mesh_solid(&ctx, sid, &MeshOptions { resolution, ..MeshOptions::default() })
     }
 
@@ -1597,7 +1599,8 @@ mod test {
     /// `HalfEdgeMesh` before `to_trimesh` discards connectivity.
     fn dcel_prim(node: &CsgNode) -> HalfEdgeMesh {
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_csg_node(&mut ctx, node);
+        let set = compile_csg_node(&mut ctx, node);
+        let sid = sole_solid(&ctx, set);
         let shell_id = ctx.get_solid(sid).outer;
         let face_ids: Vec<FaceId> = ctx.get_shell(shell_id).faces.clone();
         let mut dcel     = HalfEdgeMesh::new();
@@ -1688,7 +1691,8 @@ mod test {
     fn unmerged_prim(node: &CsgNode) -> TriMesh {
         // mesh_solid with epsilon=0 to get the pre-merge mesh
         let mut ctx = SolidModelingContext::new();
-        let sid = compile_csg_node(&mut ctx, node);
+        let set = compile_csg_node(&mut ctx, node);
+        let sid = sole_solid(&ctx, set);
         mesh_solid(&ctx, sid, &MeshOptions { resolution: 32, epsilon: 0.0 })
     }
 

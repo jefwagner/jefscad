@@ -703,7 +703,8 @@ mod test {
         let mut ctx = SolidModelingContext::new();
         let sid_a = build_cuboid(&mut ctx, 1.0, 1.0, 1.0, 0, 0);
         let b_node = CsgNode::cuboid(1.0, 1.0, 1.0).translate(0.5, 1.5, 0.5);
-        let sid_b  = compile_csg_node(&mut ctx, &b_node);
+        let b_set  = compile_csg_node(&mut ctx, &b_node);
+        let sid_b  = crate::brep_compiler::sole_solid(&ctx, b_set);
         let top_a  = face_by_normal(&ctx, &solid_faces(&ctx, sid_a), 0.0,  0.0, 1.0);
         let left_b = face_by_normal(&ctx, &solid_faces(&ctx, sid_b), -1.0, 0.0, 0.0);
         assert!(intersect_plane_plane(&mut ctx, top_a, left_b).is_none());
@@ -719,7 +720,8 @@ mod test {
         let mut ctx = SolidModelingContext::new();
         let sid_a  = build_cuboid(&mut ctx, 1.0, 1.0, 1.0, 0, 0);
         let b_node = CsgNode::cuboid(1.0, 0.5, 1.0).translate(0.5, 0.1, 0.5);
-        let sid_b  = compile_csg_node(&mut ctx, &b_node);
+        let b_set  = compile_csg_node(&mut ctx, &b_node);
+        let sid_b  = crate::brep_compiler::sole_solid(&ctx, b_set);
         let top_a  = face_by_normal(&ctx, &solid_faces(&ctx, sid_a), 0.0,  0.0, 1.0);
         let left_b = face_by_normal(&ctx, &solid_faces(&ctx, sid_b), -1.0, 0.0, 0.0);
         let ffi = intersect_plane_plane(&mut ctx, top_a, left_b).unwrap();
