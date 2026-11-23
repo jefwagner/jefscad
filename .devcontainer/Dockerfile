@@ -68,17 +68,25 @@ ENV RUSTUP_HOME=/home/vscode/.rustup \
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable --profile default
 ENV PATH=/home/vscode/.cargo/bin:$PATH
 
-# Node.js (NodeSource LTS) + pi coding agent, installed natively in the image.
+# Node.js (NodeSource LTS) + pi coding agent + Claude Code, installed natively
+# in the image.
 USER root
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g @earendil-works/pi-coding-agent
+    && npm install -g @earendil-works/pi-coding-agent @anthropic-ai/claude-code
 
 # pi agent config dir. devcontainer.json mounts the repo-scoped OpenRouter
 # auth.json at ~/.pi/agent/auth.json; the parent dir must exist and be
 # writable by vscode so pi can store models-store.json and sessions too.
 RUN mkdir -p /home/vscode/.pi/agent && chown -R vscode:vscode /home/vscode/.pi
+
+# Claude Code config dir. devcontainer.json mounts a named Docker volume here
+# (NOT the host ~/.claude, which holds every project's transcripts, memory and
+# the host login). It must exist in the image, owned by vscode: Docker seeds an
+# empty named volume from the image directory, ownership included, so without
+# this the volume comes up root-owned and Claude Code cannot write its login.
+RUN mkdir -p /home/vscode/.claude && chown -R vscode:vscode /home/vscode/.claude
 
 # Create workspace mountpoint
 RUN mkdir -p /workspace && chown vscode:vscode /workspace
